@@ -67,6 +67,16 @@ pub fn corpus() -> Vec<Seed> {
         "vibefs",
         Sparse::encode_image(0, &vibefs_image(), vibefs::BLOCK),
     ));
+    out.push(seed(
+        "fdt_parse",
+        "two-uarts",
+        include_bytes!("../../../crates/core/src/machine/testdata/two-uarts.dtb").to_vec(),
+    ));
+    out.push(seed(
+        "fdt_parse",
+        "reserved-both",
+        include_bytes!("../../../crates/core/src/machine/testdata/reserved-both.dtb").to_vec(),
+    ));
     out.push(seed("pci_enumerate", "bus", pci_bus()));
     out.push(seed(
         "virtio_caps",

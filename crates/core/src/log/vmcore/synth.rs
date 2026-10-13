@@ -149,8 +149,7 @@ impl Synth {
                 Arch::entry_phys(e).as_u64()
             } else {
                 let t = self.alloc_frame();
-                let f = PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE);
-                self.set_pte(table, idx, Arch::make_entry(PhysAddr(t), f));
+                self.set_pte(table, idx, Arch::make_table(PhysAddr(t)));
                 t
             };
             level -= 1;
@@ -160,7 +159,11 @@ impl Synth {
             f |= PageFlags::HUGE;
         }
         let idx = Arch::index(VirtAddr(va), leaf);
-        self.set_pte(table, idx, Arch::make_entry(PhysAddr(pa), PageFlags(f)));
+        self.set_pte(
+            table,
+            idx,
+            Arch::make_entry(VirtAddr(va), PhysAddr(pa), PageFlags(f)),
+        );
     }
 
     /// The PA of `va` under this table, if mapped.

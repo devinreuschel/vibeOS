@@ -13,6 +13,8 @@
 
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
+use crate::arch::current::UserFrame;
+use vibeos::arch::ContextSwitch;
 use vibeos::desc::UserSegs;
 use vibeos::ipi::{home_cpu, pick_cpu};
 use vibeos::kalloc::{AllocError, TryBox, TryVec};
@@ -22,15 +24,15 @@ use vibeos::lock::RANK_SCHED;
 use vibeos::per_cpu::PerCpu;
 use vibeos::proc::pid::{IdIndex, PidAlloc};
 use vibeos::sched::{TimeoutQueue, effective_deadline, enqueue_runnable, take_next};
-use vibeos::syscall::UserFrame;
+#[cfg(target_arch = "x86_64")]
+use vibeos::thread::prepare_thread;
 use vibeos::thread::{
     CpuAffinity, CpuContext, Fxsave, MAX_THREADS, OnCpu, Tcb, ThreadId, ThreadState, WaitOutcome,
-    apply_if_on_resume, prepare_thread,
 };
 use vibeos::time::Instant;
 use vibeos::wait::{WaitLink, WaitLinks, WaitQueue};
 
-use crate::arch::current::InterruptGuard;
+use crate::arch::current::{Arch, InterruptGuard};
 use crate::cell::BootCell;
 use crate::kva_init::{self, GuardedStack};
 use crate::per_cpu_init;
@@ -39,21 +41,29 @@ use crate::time_init;
 
 mod ap;
 mod boot;
+mod idle;
 mod sweep;
 mod table;
 mod user;
 pub use ap::{abandon_unstarted, adopt_ap_idle};
 #[cfg(feature = "kernel_tests")]
 pub(crate) use boot::BOOT_STACK_PAGES;
+#[cfg(any(target_arch = "x86_64", feature = "kernel_tests"))]
 pub(crate) use boot::bootstrap_stack;
 pub use boot::init_bootstrap;
+pub use idle::halt_if_idle;
 pub use sweep::start_sweep;
+#[cfg(feature = "kernel_tests")]
+pub(crate) use table::scan_live_stacks;
 pub(crate) use table::table_root;
 #[cfg(feature = "kernel_tests")]
-pub(crate) use table::{RunTsc, run_tsc_snapshot, table_usage, timeouts_capacity};
+pub(crate) use table::table_usage;
+#[cfg(feature = "kernel_tests")]
+pub(crate) use table::{RunTsc, run_tsc_snapshot, timeouts_capacity};
 use table::{dead_reusable, slot_reusable};
 pub use table::{each_thread, init_tables};
-pub use user::{reset_user_segs, set_user_segs};
+pub(crate) use user::initial_fxsave;
+pub use user::{reset_user_segs, set_tls_base, set_user_segs};
 
 // The syscall layer's hooks (DESIGN §1.2), which `syscall_init::init_bsp`
 // sets before the scheduler runs a second thread.
@@ -476,6 +486,7 @@ fn thread_exit() -> ! {
             );
             cpu.dead_stack = Some(stack);
         });
+        // AcqRel: pairs with the Acquire load in `stacks_in_flight` and the other updates.
         STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
     }
     // Under SCHED, as every other state store; the slot stays unreusable
@@ -513,8 +524,9 @@ pub fn schedule_preempt() {
 const EXPIRE_BATCH: usize = 32;
 const PLACE_BATCH: usize = 32;
 
-/// IF-on-resume is applied to the incoming TCB before `popfq`. See
-/// [`apply_if_on_resume`]. `InterruptGuard` stays on the outgoing stack.
+/// IF-on-resume is applied to the incoming TCB before `popfq` /
+/// `msr daif`. See [`vibeos::arch::ContextSwitch::resume_with_irqs`].
+/// `InterruptGuard` stays on the outgoing stack.
 fn schedule_inner(from_irq: bool) {
     let _irq = InterruptGuard::enter();
     if !from_irq {
@@ -641,8 +653,9 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
         let delta = now.wrapping_sub(cpu.slice_tsc);
         cpu.slice_tsc = now;
         cpu.quantum_tsc = now;
-        // Single writer: only this CPU stores its `switches`.
+        // Relaxed: only this CPU stores its `switches`; pairs with nothing.
         let switches = cpu.remote.switches.load(Ordering::Relaxed);
+        // Relaxed: as the load; pairs with nothing.
         cpu.remote
             .switches
             .store(switches.wrapping_add(1), Ordering::Relaxed);
@@ -659,23 +672,32 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
             if old_ptr == cpu.idle {
                 cpu.idle_tsc = cpu.idle_tsc.wrapping_add(delta);
             }
+            // Relaxed: only this CPU changes its `irq_nest`; pairs with nothing.
             (*old_ptr).irq_nest = cpu.irq_nest.load(Ordering::Relaxed);
+            // Relaxed: as above; pairs with nothing.
             cpu.irq_nest.store((*new_ptr).irq_nest, Ordering::Relaxed);
-            apply_if_on_resume(
-                &mut (*new_ptr).context.rflags,
-                cpu.irq_nest.load(Ordering::Relaxed),
+            // Relaxed: as above; pairs with nothing.
+            Arch::resume_with_irqs(
+                &mut (*new_ptr).context,
+                cpu.irq_nest.load(Ordering::Relaxed) == 0,
             );
             per_cpu_init::set_current_thread(cpu, new_ptr);
             (*new_ptr).on_cpu.set();
-            // A user thread's ring-3 DS, ES, FS and GS (DESIGN §7.5), before
-            // `on_switch`; a kernel thread has none and keeps what is live.
+            // A user thread's ring-3 DS, ES, FS and GS (DESIGN §7.5). Save
+            // the outgoing TLS base before `on_switch` and before a
+            // selector load, which can zero `FS_BASE`.
             if (*old_ptr).pid != 0 {
                 (*old_ptr).user_segs = crate::arch::gdt::read_user_segs();
-            }
-            if (*new_ptr).pid != 0 {
-                crate::arch::gdt::load_user_segs((*new_ptr).user_segs);
+                (*old_ptr).tls_base = crate::arch::current::user_tls();
             }
             on_switch(cpu, old_ptr, new_ptr);
+            if (*new_ptr).pid != 0 {
+                crate::arch::gdt::load_user_segs((*new_ptr).user_segs);
+                // SAFETY: `tls_base` is 0 or the image's thread pointer,
+                // a user address `setup_tls` chose; established by
+                // `user_init::setup_tls` and `on_switch`.
+                crate::arch::current::set_user_tls((*new_ptr).tls_base);
+            }
         }
     });
     // The switch asm turns IF on for a thread whose `irq_nest` is 0.
@@ -758,6 +780,7 @@ fn reclaim_dead_stacks_here() -> bool {
 
 /// The worker has freed `n` stacks it took with [`take_dead_stacks`].
 pub(crate) fn stacks_reclaimed(n: usize) {
+    // AcqRel: pairs with the Acquire load in `stacks_in_flight` and the other updates.
     STACKS_IN_FLIGHT.fetch_sub(n, Ordering::AcqRel);
 }
 
@@ -774,7 +797,9 @@ fn retire_dead_stack(cpu: &mut PerCpu) -> bool {
         return false;
     };
     if pages == DEFAULT_STACK_PAGES && cpu.stack_cache.put_from(&mut cpu.dead_stack) {
+        // AcqRel: pairs with the Acquire load in `cached_stack_frames` and the other updates.
         CACHED_STACK_FRAMES.fetch_add(pages, Ordering::AcqRel);
+        // AcqRel: pairs with the Acquire load in `stacks_in_flight` and the other updates.
         STACKS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
         return false;
     }
@@ -788,18 +813,21 @@ fn retire_dead_stack(cpu: &mut PerCpu) -> bool {
 /// Frames the stack caches of every CPU hold.
 #[cfg(feature = "kernel_tests")]
 pub fn cached_stack_frames() -> usize {
+    // Acquire: pairs with each AcqRel update of `CACHED_STACK_FRAMES`.
     CACHED_STACK_FRAMES.load(Ordering::Acquire)
 }
 
 /// Dead threads' stacks not yet cached or freed.
 #[cfg(feature = "kernel_tests")]
 pub fn stacks_in_flight() -> usize {
+    // Acquire: pairs with each AcqRel update of `STACKS_IN_FLIGHT`.
     STACKS_IN_FLIGHT.load(Ordering::Acquire)
 }
 
 /// A default-size stack from this CPU's cache, zeroed, or `None`.
 fn cached_stack() -> Option<GuardedStack> {
     let stack = per_cpu_init::with_current(|cpu| cpu.stack_cache.take())?;
+    // AcqRel: pairs with the Acquire load in `cached_stack_frames` and the other updates.
     CACHED_STACK_FRAMES.fetch_sub(stack.pages(), Ordering::AcqRel);
     let len = stack.pages() * vibeos::paging::PAGE_SIZE_4K as usize;
     // SAFETY: the stack's `pages` pages above `base` are mapped writable
@@ -808,6 +836,11 @@ fn cached_stack() -> Option<GuardedStack> {
     unsafe { core::ptr::write_bytes(stack.base().as_u64() as *mut u8, 0, len) };
     #[cfg(feature = "kernel_tests")]
     testing::refill_cached(&stack);
+    #[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+    // SAFETY: invariant I10, established at `thread_init::finish_switch`.
+    unsafe {
+        kva_init::refill_stack(&stack);
+    }
     Some(stack)
 }
 
@@ -822,43 +855,23 @@ pub(crate) fn return_stack(stack: GuardedStack) {
     };
     match refused {
         None => {
+            // AcqRel: pairs with the Acquire load in `cached_stack_frames` and the other updates.
             CACHED_STACK_FRAMES.fetch_add(pages, Ordering::AcqRel);
         }
         Some(stack) => kva_init::free_stack(stack),
     }
 }
 
-/// `sti; hlt` with a closed lost-wakeup window: cli, drain inbox, recheck
-/// runq, then `sti; hlt` as one pair. ROADMAP §4.8 / DESIGN §7.8.
-pub fn halt_if_idle() {
-    loop {
-        // SAFETY: `cli` touches only IF; the `sti` below or the idle loop's
-        // next pass turns it back on; established here.
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            core::arch::asm!("cli", options(nostack, preserves_flags));
-        }
-        crate::sched::irqoff::off_here();
-        crate::ipi_init::drain_inbox();
-        if !per_cpu_init::current().runq.is_empty() {
-            crate::sched::irqoff::on();
-            // SAFETY: `sti` restores the IF=1 this idle loop runs with;
-            // established here.
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                core::arch::asm!("sti", options(nostack, preserves_flags));
-            }
-            return;
-        }
-        crate::sched::irqoff::on();
-        // SAFETY: `sti; hlt` as one pair: the interrupt shadow keeps a
-        // wake-up IPI from landing between them (DESIGN §7.8); established
-        // here.
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            core::arch::asm!("sti; hlt", options(nomem, nostack));
-        }
+fn prepare_kernel_context(ctx: &mut CpuContext, top: u64, tramp: u64) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        prepare_thread(ctx, top, tramp);
+        // SAFETY: `prepare_thread` wrote `rsp` 8 bytes below `top` on this
+        // thread's stack; established by `vibeos::thread::prepare_thread`.
+        unsafe { (ctx.stack_ptr() as *mut u64).write_volatile(0) };
     }
+    #[cfg(target_arch = "aarch64")]
+    Arch::prepare(ctx, top, tramp);
 }
 
 pub fn spawn(name: &'static str, entry: fn()) -> Result<ThreadHandle, SpawnError> {
@@ -1007,16 +1020,21 @@ pub fn spawn_user(
             panic!("spawn_user: thread {} has no stack", h.id().0);
         };
         let at = top - USER_FRAME_BYTES as u64;
-        // SAFETY: invariant I25: `[top - 168, top)` is the user frame of
-        // this thread's own kernel stack, mapped and unused: the thread is
-        // not runnable before `make_ready`, and nothing else refers to its
-        // stack; established by `thread_init::spawn_inner`.
+        // SAFETY: invariant I25: `[top - USER_FRAME_BYTES, top)` is the
+        // user frame of this thread's own kernel stack, mapped and unused:
+        // the thread is not runnable before `make_ready`, and nothing else
+        // refers to its stack; established by `thread_init::spawn_inner`.
         unsafe { (at as *mut UserFrame).write(*frame) };
-        // The pad word below the frame, as the syscall entry leaves it.
-        prepare_thread(&mut tcb.context, at - 8, tramp);
-        // SAFETY: invariant: `context.rsp` is 8 bytes below the pad word,
-        // inside this thread's unused stack; established here.
-        unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
+        #[cfg(target_arch = "aarch64")]
+        Arch::prepare(&mut tcb.context, at, tramp);
+        #[cfg(target_arch = "x86_64")]
+        {
+            // The pad word below the frame, as the syscall entry leaves it.
+            prepare_thread(&mut tcb.context, at - 8, tramp);
+            // SAFETY: invariant: `context.rsp` is 8 bytes below the pad
+            // word, inside this thread's unused stack; established here.
+            unsafe { (tcb.context.stack_ptr() as *mut u64).write_volatile(0) };
+        }
     });
     Ok(h)
 }
@@ -1052,8 +1070,10 @@ pub fn make_ready(id: ThreadId) {
 
 fn choose_cpu(affinity: CpuAffinity) -> u32 {
     let mask = per_cpu_init::online_mask();
+    // Relaxed: a round-robin hint; a lost update only repeats a CPU; pairs with nothing.
     let mut rr = SPAWN_RR.load(Ordering::Relaxed);
     let cpu = pick_cpu(affinity, mask, &mut rr);
+    // Relaxed: as the load; pairs with nothing.
     SPAWN_RR.store(rr, Ordering::Relaxed);
     cpu
 }
@@ -1073,27 +1093,12 @@ fn spawn_inner(
     as_cr3: u64,
     stack_pages: usize,
 ) -> Result<ThreadHandle, SpawnError> {
+    // AcqRel: pairs with the Release store in `testing::fail_next_fork_stack`.
     #[cfg(feature = "kernel_tests")]
     if current_pid() != 0 && testing::FAIL_FORK_STACK.swap(false, Ordering::AcqRel) {
         return Err(SpawnError::NoMemory);
     }
-    let cached = if stack_pages == DEFAULT_STACK_PAGES {
-        cached_stack()
-    } else {
-        None
-    };
-    let stack = match cached {
-        Some(s) => s,
-        None => match kva_init::alloc_guarded_stack(stack_pages) {
-            Ok(s) => s,
-            // Once: an exit burst can leave this CPU's dead list holding
-            // enough stacks for KVA to refuse (`Kva::alloc`'s live cap).
-            Err(_) if reclaim_dead_stacks_here() => {
-                kva_init::alloc_guarded_stack(stack_pages).map_err(|_| SpawnError::NoMemory)?
-            }
-            Err(_) => return Err(SpawnError::NoMemory),
-        },
-    };
+    let stack = user::take_boxed_stack(stack_pages)?;
     let top = stack.top().as_u64();
     assert!(top.is_multiple_of(16), "kva stack top not 16-aligned");
     // Taken by whichever path below installs it in a TCB.
@@ -1110,6 +1115,7 @@ fn spawn_inner(
     // `on_cpu` set; its CPU clears it with Release (`finish_switch`).
     // The Dead TCB's old tid leaves the index and the timeout queue and
     // goes back to the allocator; the new thread takes a new tid.
+    let mut stacked = core::ptr::null_mut();
     let reused = with_sched(|s| {
         let slot = s
             .slots
@@ -1126,7 +1132,7 @@ fn spawn_inner(
         let tcb = s.slots[slot].as_deref_mut()?;
         assert!(tcb.stack.is_none(), "dead tcb still owns stack");
         tcb.id = id;
-        fill_tcb(
+        stacked = fill_tcb(
             tcb, name, entry, affinity, cpu, ks, top, tramp, first_nest, pid, as_cr3,
         );
         if !enqueue {
@@ -1138,11 +1144,12 @@ fn spawn_inner(
         }
         Some(Ok(id))
     });
+    user::forget_stack_box(stacked);
     match reused {
         Some(Ok(id)) => return Ok(ThreadHandle { id }),
         Some(Err(e)) => {
             if let Some(ks) = stack.take() {
-                return_stack(ks);
+                user::return_boxed_stack(ks);
             }
             return Err(e);
         }
@@ -1150,44 +1157,24 @@ fn spawn_inner(
     }
 
     // Built without the stack, so a failed allocation drops no stack; the
-    // stack goes back as a full table's does (DESIGN §4.4).
-    let tcb = TryBox::try_new(Tcb {
-        id: ThreadId(0),
-        name,
-        state: if enqueue { ThreadState::Ready } else { PARKED },
-        on_cpu: OnCpu::new(),
-        stack: None,
-        context: CpuContext::empty(),
-        entry,
-        affinity,
-        cpu,
-        irq_nest: first_nest,
-        switches: 0,
-        run_tsc: 0,
-        wait_outcome: WaitOutcome::Woken,
-        as_cr3,
-        fpu: Fxsave::INITIAL,
-        fp_cpu: None,
-        user_segs: UserSegs::NULL,
-        syscall_count: vibeos::atomic::AtomicU64::new(0),
-        pid,
-        no_reclaim: AtomicU32::new(0),
-    });
-    let mut tcb = match tcb {
-        Ok(t) => t,
-        Err(_) => {
-            if let Some(ks) = stack.take() {
-                return_stack(ks);
+    // stack goes back as a full table's does (DESIGN §4.4). The TCB and
+    // the stack handle are written in their boxes: a by-value `Tcb` or
+    // `GuardedStack` would put `Option<GuardedStack>` and `Fxsave` on this
+    // stack (DESIGN §4.5).
+    let mut tcb =
+        match user::box_new_tcb(name, entry, affinity, enqueue, cpu, first_nest, pid, as_cr3) {
+            Ok(t) => t,
+            Err(_) => {
+                if let Some(ks) = stack.take() {
+                    user::return_boxed_stack(ks);
+                }
+                return Err(SpawnError::NoMemory);
             }
-            return Err(SpawnError::NoMemory);
-        }
-    };
-    tcb.stack = stack;
-    prepare_thread(&mut tcb.context, top, tramp);
-    // SAFETY: `prepare_thread` put `context.rsp` 8 bytes below `top`,
-    // inside the thread's own stack, mapped and not yet run on; established
-    // by `vibeos::thread::prepare_thread`.
-    unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
+        };
+    if let Some(ks) = stack.take() {
+        user::install_stack(&mut tcb.stack, ks);
+    }
+    prepare_kernel_context(&mut tcb.context, top, tramp);
 
     let placed = with_sched(|s| {
         let Some(slot) = s.slots.iter().position(|x| x.is_none()) else {
@@ -1225,6 +1212,7 @@ pub fn fp_invalidate(tcb: &mut Tcb) {
     vibeos::fpu::invalidate(&mut tcb.fp_cpu);
 }
 
+#[inline(never)]
 #[allow(clippy::too_many_arguments)] // TCB fields filled at spawn
 fn fill_tcb(
     tcb: &mut Tcb,
@@ -1232,16 +1220,16 @@ fn fill_tcb(
     entry: fn(),
     affinity: CpuAffinity,
     cpu: u32,
-    ks: GuardedStack,
+    ks: TryBox<GuardedStack>,
     top: u64,
     tramp: u64,
     irq_nest: u32,
     pid: u32,
     as_cr3: u64,
-) {
+) -> *mut GuardedStack {
     tcb.name = name;
     tcb.state = ThreadState::Ready;
-    tcb.stack = Some(ks);
+    let p = user::place_stack(&mut tcb.stack, ks);
     tcb.entry = entry;
     tcb.affinity = affinity;
     tcb.cpu = cpu;
@@ -1250,18 +1238,15 @@ fn fill_tcb(
     tcb.run_tsc = 0;
     tcb.wait_outcome = WaitOutcome::Woken;
     tcb.as_cr3 = as_cr3;
-    tcb.fpu = Fxsave::INITIAL;
+    tcb.fpu = initial_fxsave();
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
     tcb.user_segs = UserSegs::NULL;
-    // Relaxed: a statistic, reset before the thread first runs.
+    // Relaxed: a statistic, reset before the thread first runs; pairs with nothing.
     tcb.syscall_count.store(0, Ordering::Relaxed);
     tcb.pid = pid;
-    prepare_thread(&mut tcb.context, top, tramp);
-    // SAFETY: `prepare_thread` put `context.rsp` 8 bytes below `top`,
-    // inside the thread's own stack, mapped and not yet run on; established
-    // by `vibeos::thread::prepare_thread`.
-    unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
+    prepare_kernel_context(&mut tcb.context, top, tramp);
+    p
 }
 
 pub fn sleep_ms(ms: u64) {
@@ -1461,9 +1446,11 @@ pub fn current_cpu() -> u32 {
 }
 
 #[cfg(feature = "kernel_tests")]
+pub use testing::exited;
+#[cfg(feature = "kernel_tests")]
 pub use testing::{
-    cpu_of, exited, ktest_drop_timeout, ktest_last_overdue, ktest_preempt_before_places,
-    ktest_sweeps, name, state, try_state,
+    cpu_of, ktest_drop_timeout, ktest_last_overdue, ktest_preempt_before_places, ktest_sweeps,
+    name, state, try_state,
 };
 
 pub fn tcb_ptr(id: ThreadId) -> *mut Tcb {
@@ -1472,4 +1459,8 @@ pub fn tcb_ptr(id: ThreadId) -> *mut Tcb {
 
 /// Hooks the in-guest tests arm (DESIGN §8.2). `kernel_tests` builds only.
 #[cfg(feature = "kernel_tests")]
+#[cfg_attr(
+    target_arch = "aarch64",
+    allow(dead_code, reason = "x86 ktest hooks; aarch64 uses the requeue hook")
+)]
 pub mod testing;

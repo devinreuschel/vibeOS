@@ -64,6 +64,9 @@ cp "$limine_dir/limine-bios.sys" "$staging/boot/"
 cp "$limine_dir/limine-bios-cd.bin" "$staging/boot/"
 cp "$limine_dir/limine-uefi-cd.bin" "$staging/boot/"
 cp "$limine_dir/BOOTX64.EFI" "$staging/EFI/BOOT/"
+if [ -f "$limine_dir/BOOTAA64.EFI" ]; then
+    cp "$limine_dir/BOOTAA64.EFI" "$staging/EFI/BOOT/"
+fi
 
 # 3. The time pin: with SOURCE_DATE_EPOCH set, xorriso takes file times from
 # the staged files, so every staged path gets the epoch.

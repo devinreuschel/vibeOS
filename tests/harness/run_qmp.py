@@ -417,7 +417,7 @@ def main() -> int:
         print(f"[qmp] recorded into {args.record} on {version}", file=sys.stderr)
         return 0
     env = env_config(default_iso=default_iso(), default_timeout=BOOT_ALLOWANCE_S)
-    res = results.Results(env.tier)
+    res = results.Results(env.tier, env.arch)
     with tempfile.TemporaryDirectory(prefix="vibeos-qmp-rec-") as d:
         try:
             info = record(Path(d))

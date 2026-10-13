@@ -8,14 +8,14 @@ use vibeos::syscall::{SYS_GETPID, SYS_KILL};
 use vibeos::vectors;
 
 use super::hooks as exit_testing;
-use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, x86_user_code};
 use crate::ktest::{Outcome, sleep_until};
 use crate::proc_init;
 use crate::proc_init::testing as proc_testing;
 use crate::thread_init;
 
 // A loop in ring 3 with no syscall.
-user_code!(
+x86_user_code!(
     RING3_SPIN,
     "
 2:
@@ -24,7 +24,7 @@ user_code!(
 );
 
 // A loop in ring 3 with no syscall that counts in R12.
-user_code!(
+x86_user_code!(
     RING3_COUNT,
     "
     xor r12d, r12d
@@ -139,7 +139,7 @@ fn check_children(a: u32, b: u32) -> Result<(), Outcome> {
 }
 
 // getpid, then a loop in ring 3 with no syscall.
-user_code!(
+x86_user_code!(
     GETPID_SPIN,
     "
     mov eax, 39

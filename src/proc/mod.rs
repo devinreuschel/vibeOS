@@ -18,5 +18,10 @@ pub mod ktest;
 pub(crate) mod proc_init;
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod syscall_init;
+#[cfg(target_arch = "aarch64")]
+#[path = "syscall_init_aarch64.rs"]
+pub(crate) mod syscall_init_aarch64;
+#[cfg(target_arch = "aarch64")]
+pub(crate) use syscall_init_aarch64 as syscall_init;
 pub(crate) mod uaccess_init;
 pub(crate) mod user_init;

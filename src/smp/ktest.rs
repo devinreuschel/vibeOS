@@ -1,23 +1,35 @@
 //! In-guest tests for smp (kernel_tests only). Rows: [`TESTS`].
 
+#[cfg(target_arch = "x86_64")]
 use vibeos::acpi::MAX_CPUS;
+#[cfg(target_arch = "x86_64")]
 use vibeos::apic::TimerMode;
+#[cfg(target_arch = "x86_64")]
 use vibeos::atomic::statics::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+#[cfg(target_arch = "x86_64")]
 use vibeos::limits::PID_MAX;
-use vibeos::thread::{Tcb, ThreadId};
+#[cfg(target_arch = "x86_64")]
+use vibeos::thread::Tcb;
+use vibeos::thread::ThreadId;
 
+#[cfg(target_arch = "x86_64")]
 use crate::apic_init;
 use crate::arch;
+#[cfg(target_arch = "x86_64")]
 use crate::ipi_init;
-use crate::ktest::{
-    FrameCount, Outcome, Test, cpu_remote, quiescent_free_frames, registry_tid, sleep_until,
-    spin_until_ns, test,
-};
+#[cfg(target_arch = "x86_64")]
+use crate::ktest::cpu_remote;
+use crate::ktest::{FrameCount, Outcome, Test, registry_tid, test};
+#[cfg(target_arch = "x86_64")]
+use crate::ktest::{quiescent_free_frames, sleep_until, spin_until_ns};
 use crate::per_cpu_init;
-use crate::sched::ktest::{RequeueGuard, fill_threads, set_requeue_next_cpu};
+use crate::sched::ktest::fill_threads;
+#[cfg(target_arch = "x86_64")]
+use crate::sched::ktest::{RequeueGuard, set_requeue_next_cpu};
 use crate::sched_init;
 use crate::smp_init;
 use crate::thread_init;
+#[cfg(target_arch = "x86_64")]
 use crate::time_init;
 
 pub(crate) fn test_per_cpu_bsp() -> Outcome {
@@ -62,6 +74,7 @@ pub(crate) fn test_per_cpu_bsp() -> Outcome {
     Outcome::Ok
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_per_cpu_identity() -> Outcome {
     let n = per_cpu_init::cpu_count();
     if n == 0 {
@@ -127,10 +140,13 @@ pub(crate) fn test_per_cpu_identity() -> Outcome {
 }
 
 /// Bit `cpu_id` of each AP whose owner-only check failed or ran.
+#[cfg(target_arch = "x86_64")]
 static IDENTITY_BAD: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(target_arch = "x86_64")]
 static IDENTITY_SEEN: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(target_arch = "x86_64")]
 fn identity_on_ap(_: *mut ()) {
     let c = per_cpu_init::current();
     let id = c.cpu_id;
@@ -148,6 +164,12 @@ fn identity_on_ap(_: *mut ()) {
     IDENTITY_SEEN.fetch_or(1u64 << id, Ordering::Release);
 }
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn test_trampoline_page() -> Outcome {
+    Outcome::Skip("x86 AP trampoline")
+}
+
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_trampoline_page() -> Outcome {
     let Some(page) = crate::boot::info().trampoline_page else {
         return Outcome::Fail("boot chose no trampoline page");
@@ -236,6 +258,7 @@ pub(crate) fn test_trampoline_page() -> Outcome {
     Outcome::Ok
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_failed_ap_cleanup() -> Outcome {
     // First-fit KVA may map a fresh PT page on the first IST/stack wave.
     // unmap_4k does not return that PT. Warm up, then the measured wave
@@ -254,6 +277,66 @@ pub(crate) fn test_failed_ap_cleanup() -> Outcome {
     } else {
         Outcome::Ok
     }
+}
+
+/// The stalled AP parked after losing the handshake, and every online CPU
+/// has the workers bring-up started for it.
+pub(crate) fn late_ap_agrees() -> Outcome {
+    if !smp_init::stalled_ap_parked() {
+        return Outcome::Fail("stalled AP did not park");
+    }
+    let online = per_cpu_init::online_mask();
+    let workers = crate::work_init::started_mask();
+    if online != workers {
+        return crate::fail_fmt!("online {online:#x} workers {workers:#x}");
+    }
+    Outcome::Ok
+}
+
+/// Opt-in: `vibeos.ktest=stalled_ap_leak` holds the first AP past the ready
+/// timeout, then releases it. It must park, stay offline, and leave the
+/// online mask equal to the worker set (ROADMAP §11.4, F032).
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn test_stalled_ap_leak() -> Outcome {
+    if !smp_init::stalled_ap_leaked() {
+        return Outcome::Fail("bring-up did not leak a stalled AP");
+    }
+    let n = per_cpu_init::cpu_count();
+    if n < 3 {
+        return Outcome::Fail("needs 3 CPUs");
+    }
+    if per_cpu_init::is_online(1) {
+        return Outcome::Fail("stalled AP came online");
+    }
+    let last = n as u32 - 1;
+    if !per_cpu_init::is_online(last) {
+        return Outcome::Fail("next AP did not come up");
+    }
+    let mut online = 0u32;
+    let mut i = 0u32;
+    while i < n as u32 {
+        if per_cpu_init::is_online(i) {
+            online += 1;
+        }
+        i += 1;
+    }
+    if online + 1 != n as u32 {
+        return crate::fail_fmt!("online {online} of {n}, want one hole");
+    }
+    let n0 = quiescent_free_frames();
+    if !exercise_fail_cleanup() {
+        return Outcome::Fail("pre-SIPI free alloc failed");
+    }
+    let n1 = quiescent_free_frames();
+    if n0 != n1 {
+        return crate::fail_fmt!("pre-SIPI free leaked {n0} -> {n1}");
+    }
+    let agreed = late_ap_agrees();
+    if !matches!(agreed, Outcome::Ok) {
+        return agreed;
+    }
+    crate::ktest_info!("stalled AP leaked and parked; online {online}/{n}");
+    Outcome::Ok
 }
 
 /// AP bring-up on a full thread table (ROADMAP §10.4, F037): with no slot
@@ -306,12 +389,14 @@ pub(crate) fn ap_bringup_full_thread_table() -> Outcome {
 }
 
 /// How long [`percpu_remote_view`] waits for this CPU's `ticks` to move.
+#[cfg(target_arch = "x86_64")]
 const TICK_WAIT_NS: u64 = 200_000_000;
 
 /// `per_cpu_init::cpu` hands out each CPU's `PerCpuRemote`, and the owner
 /// keeps its fields current: `ready` and distinct `apic_id`s on every
 /// online CPU, `runq_len` after a `with_current` scope, and `ticks` with
 /// IF on.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn percpu_remote_view() -> Outcome {
     let n = per_cpu_init::cpu_count();
     if n == 0 {
@@ -384,6 +469,7 @@ pub(crate) fn percpu_remote_view() -> Outcome {
 /// through `thread_init`, which must not trip the IF=0 assertion of
 /// `per_cpu_init::current`, and finds them equal to its TCB's; in a debug
 /// build `per_cpu_init::current()` itself trips it.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn current_at_if1() -> Outcome {
     if !crate::arch::current::interrupts_enabled() {
         return Outcome::Fail("registry runs with IF off");
@@ -431,23 +517,36 @@ pub(crate) fn current_at_if1() -> Outcome {
 }
 
 /// `current_migrate_if1`'s threads.
+#[cfg(target_arch = "x86_64")]
 const MIGRATE_THREADS: usize = 4;
 /// How long each thread reads with IF=1.
+#[cfg(target_arch = "x86_64")]
 const MIGRATE_MS: u64 = 2_000;
+#[cfg(target_arch = "x86_64")]
 static MIGRATE_START: AtomicBool = AtomicBool::new(false);
+#[cfg(target_arch = "x86_64")]
 static MIGRATE_EXIT: AtomicBool = AtomicBool::new(false);
+#[cfg(target_arch = "x86_64")]
 static MIGRATE_TCB: [AtomicPtr<Tcb>; MIGRATE_THREADS] =
     [const { AtomicPtr::new(core::ptr::null_mut()) }; MIGRATE_THREADS];
+#[cfg(target_arch = "x86_64")]
 static MIGRATE_PID: [AtomicU32; MIGRATE_THREADS] = [const { AtomicU32::new(0) }; MIGRATE_THREADS];
 /// Each thread's verdict: one of the `MIG_*` values.
+#[cfg(target_arch = "x86_64")]
 static MIGRATE_RESULT: [AtomicU32; MIGRATE_THREADS] =
     [const { AtomicU32::new(MIG_RUNNING) }; MIGRATE_THREADS];
+#[cfg(target_arch = "x86_64")]
 const MIG_RUNNING: u32 = 0;
+#[cfg(target_arch = "x86_64")]
 const MIG_OK: u32 = 1;
+#[cfg(target_arch = "x86_64")]
 const MIG_WRONG_TCB: u32 = 2;
+#[cfg(target_arch = "x86_64")]
 const MIG_WRONG_PID: u32 = 3;
+#[cfg(target_arch = "x86_64")]
 const MIG_NEVER_MOVED: u32 = 4;
 
+#[cfg(target_arch = "x86_64")]
 fn migrate_body(i: usize) {
     while !MIGRATE_START.load(Ordering::Acquire) {
         core::hint::spin_loop();
@@ -485,18 +584,22 @@ fn migrate_body(i: usize) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn migrate_0() {
     migrate_body(0);
 }
 
+#[cfg(target_arch = "x86_64")]
 fn migrate_1() {
     migrate_body(1);
 }
 
+#[cfg(target_arch = "x86_64")]
 fn migrate_2() {
     migrate_body(2);
 }
 
+#[cfg(target_arch = "x86_64")]
 fn migrate_3() {
     migrate_body(3);
 }
@@ -506,6 +609,7 @@ fn migrate_3() {
 /// `current_pid()` with IF=1 for 2 s while C-REQUEUE-HOOK moves each
 /// preempted one to the next online CPU; any value not its own fails, and
 /// so does a thread that never changed CPU.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn current_migrate_if1() -> Outcome {
     if crate::ktest::second_cpu().is_none() {
         return Outcome::Skip("needs 2 CPUs");
@@ -568,10 +672,13 @@ pub(crate) fn current_migrate_if1() -> Outcome {
 }
 
 /// Ticks each online CPU must gain, and the `now_ns` bound on the wait.
+#[cfg(target_arch = "x86_64")]
 const PERCPU_TICKS_WANT: u64 = 10;
+#[cfg(target_arch = "x86_64")]
 const PERCPU_TICKS_WAIT_NS: u64 = 2_000_000_000;
 
 /// One CPU's tick count through its remote view (C-PERCPU).
+#[cfg(target_arch = "x86_64")]
 fn remote_ticks(id: u32) -> Option<u64> {
     // Relaxed: a counter read that pairs with no other access; only its
     // growth is compared.
@@ -582,6 +689,7 @@ fn remote_ticks(id: u32) -> Option<u64> {
 /// timer arm runs (`arm_tsc_deadline`, `rearm_deadline` and `arm_ap`'s
 /// `TscDeadline` arm under TSC-deadline; the periodic arm otherwise). In
 /// PIT mode `apic_init::arm_ap` arms nothing and APs never tick.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn percpu_ticks_advance() -> Outcome {
     let mode = apic_init::timer_mode();
     if mode == TimerMode::Pit {
@@ -634,6 +742,7 @@ pub fn exercise_fail_cleanup() -> bool {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn trampoline_installed() -> bool {
     let Some(page) = crate::boot::info().trampoline_page else {
         return false;
@@ -648,12 +757,20 @@ pub fn trampoline_installed() -> bool {
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
     test("per_cpu_bsp", test_per_cpu_bsp),
+    #[cfg(target_arch = "x86_64")]
     test("per_cpu_identity", test_per_cpu_identity),
     test("trampoline_page", test_trampoline_page),
+    #[cfg(target_arch = "x86_64")]
     test("failed_ap_cleanup", test_failed_ap_cleanup),
     test("ap_bringup_full_thread_table", ap_bringup_full_thread_table).deadline(60_000),
+    #[cfg(target_arch = "x86_64")]
     test("percpu_remote_view", percpu_remote_view),
+    #[cfg(target_arch = "x86_64")]
     test("percpu_ticks_advance", percpu_ticks_advance),
+    #[cfg(target_arch = "x86_64")]
     test("current_at_if1", current_at_if1),
+    #[cfg(target_arch = "x86_64")]
     test("current_migrate_if1", current_migrate_if1),
+    #[cfg(target_arch = "x86_64")]
+    test("stalled_ap_leak", test_stalled_ap_leak).opt_in(),
 ];

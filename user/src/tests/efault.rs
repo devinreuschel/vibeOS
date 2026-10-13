@@ -285,6 +285,7 @@ fn valid_args(p: &Pages, sys: Sys) -> Result<([u64; 6], Option<u32>), &'static s
             ([u64::from(fd), buf, 512, 0, 0, 0], Some(fd))
         }
         Sys::Psinfo => ([buf, 64, 0, 0, 0, 0], None),
+        Sys::Openat => ([(-100i64) as u64, path, 0, 0, 0, 0], None),
         _ => return Err("no valid arguments for this call"),
     })
 }

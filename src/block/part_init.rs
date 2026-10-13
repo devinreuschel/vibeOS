@@ -340,5 +340,6 @@ pub fn init() {
             }
         }
     }
+    // Release: pairs with the Acquire load in `block::ktest::part_live`.
     LIVE.store(true, Ordering::Release);
 }

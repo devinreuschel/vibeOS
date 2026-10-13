@@ -10,25 +10,27 @@
 //! contents §4.3 lists, then EFER.NXE, then `mov cr3`. Steps §4.3 also
 //! makes explicit: the caller runs `invlpg` after every single-PTE edit
 //! and, for a kernel-half edit, drops PT and calls
-//! `paging::tlb_shootdown_others` (`Mapper` does neither), and no
-//! splitting of 2 MiB pages when patching MMIO attributes. The kernel
+//! `paging::tlb_shootdown_others` (`Mapper` does neither). Device MMIO
+//! is reached only through `ioremap`. The kernel
 //! tables are reached only through [`current_mapper`], whose
 //! [`MapperGuard`] holds PT for as long as it lives, so holding the guard
 //! is the proof that PT is held.
 
 use core::fmt::Write;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use vibeos::lock::RANK_PT;
+#[cfg(target_arch = "x86_64")]
 use vibeos::marker;
 use vibeos::paging::{
-    self, FrameAlloc, IoremapWindow, MapError, MapMode, PAGE_SIZE_2M, PAGE_SIZE_4K, PageFlags,
-    PageSize, PhysAddr, VirtAddr,
+    self, FrameAlloc, IoremapWindow, MapError, MapMode, PAGE_SIZE_1G, PAGE_SIZE_2M, PAGE_SIZE_4K,
+    PageFlags, PageSize, PhysAddr, VirtAddr,
 };
+use vibeos::physmap::{PhysmapRun, PhysmapSlot, phys_in_slot, walk_physmap};
 use vibeos::pmm::Frames;
 
-use crate::arch::current::{Arch, Mapper, enable_nx, flush_local_global, stack_pointer};
+use crate::arch::current::{Arch, Mapper, enable_nx, stack_pointer};
 use crate::boot::{self, BootInfo};
 use crate::pmm_init;
 use crate::sync_init::{SpinMutex, SpinMutexGuard};
@@ -36,15 +38,33 @@ use vibeos::arch::PageTable;
 
 // ------------------ constants matching DESIGN §4.1 ------------------
 
-/// The physmap constants live in `vibeos::paging` (MEMORY.md §4.1); these
-/// paths stay for the callers that name them here.
-pub use vibeos::paging::{HHDM_BASE, PHYSMAP_CAP};
+/// This port's physmap slot (MEMORY.md §4.1).
+pub fn physmap_slot() -> PhysmapSlot {
+    #[cfg(target_arch = "x86_64")]
+    {
+        vibeos::physmap::PHYSMAP_X86_64
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        vibeos::physmap::PHYSMAP_AARCH64
+    }
+}
+
+/// Limine's HHDM offset, from the one `BootInfo` capture.
+pub fn hhdm_offset() -> u64 {
+    crate::boot::info().hhdm_offset
+}
 
 /// Low identity window base and size (DESIGN §4.1). It exists for AP
 /// bring-up; [`teardown_identity`] removes all of it but the trampoline
 /// page after `smp: done`.
 const LOW_ID_BASE: u64 = 0;
 const LOW_ID_SIZE: u64 = 512 * 1024 * 1024;
+
+/// Release/Acquire: `install` sets true after the window is mapped;
+/// `teardown_identity` sets false before it unmaps. `identity_covers`
+/// reads it.
+static IDENTITY_LIVE: AtomicBool = AtomicBool::new(false);
 
 // Linker-provided section boundaries. Names match `linker.ld`.
 unsafe extern "C" {
@@ -72,11 +92,12 @@ fn sym_addr(sym: &u8) -> u64 {
 struct BuddyFrames;
 
 // SAFETY: `FrameAlloc`'s contract; the buddy hands out order-0 frames, and
-// every buddy frame lies inside the physmap at `HHDM_BASE`, mapped writable
+// every buddy frame lies inside the physmap at `hhdm_offset()`, mapped writable
 // (invariant I14, established at `mm::pmm_init::init`).
 unsafe impl FrameAlloc for BuddyFrames {
     fn alloc_frame(&mut self) -> Option<Frames> {
         let f = pmm_init::with_buddy(|b| b.alloc(0))?;
+        // Relaxed: a count; pairs with nothing.
         TABLE_PAGES.fetch_add(1, Ordering::Relaxed);
         Some(f)
     }
@@ -131,9 +152,12 @@ pub fn with_pt<R>(f: impl FnOnce(&mut MapperGuard) -> R) -> R {
 
 static MAP_END: AtomicU64 = AtomicU64::new(0);
 static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "aarch64")]
+static EMPTY_TTBR0: AtomicU64 = AtomicU64::new(0);
 
 /// Physmap high water from [`install`]. BARs above this go through ioremap.
 pub fn map_end() -> u64 {
+    // Relaxed: the BSP writes `MAP_END` before any reader; pairs with nothing.
     MAP_END.load(Ordering::Relaxed)
 }
 
@@ -141,7 +165,16 @@ pub fn map_end() -> u64 {
 /// from this root; `current_mapper` always walks it so later kernel maps
 /// do not land on a private user PML4 slot.
 pub fn kernel_cr3() -> u64 {
+    // Acquire: pairs with the Release store in `install`.
     KERNEL_CR3.load(Ordering::Acquire)
+}
+
+/// Permanent empty TTBR0 root (ASID 0). Kernel threads load it; a
+/// missing publish is 0.
+#[cfg(target_arch = "aarch64")]
+pub fn empty_user_root() -> u64 {
+    // Acquire: pairs with the Release store in `install`.
+    EMPTY_TTBR0.load(Ordering::Acquire)
 }
 
 /// Reserve and map `[phys, phys+len)` into the ioremap window with UC
@@ -167,6 +200,7 @@ pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
         let mut alloc = BuddyFrames;
         // PT is held, and only the kernel mapper takes table pages, so
         // a change in this count is this call's.
+        // Relaxed: a count; pairs with nothing.
         let tables0 = TABLE_PAGES.load(Ordering::Relaxed);
         // SAFETY: `Mapper::map_range`'s contract; the caller vouches that
         // `[phys, phys + len)` is device MMIO no cacheable alias touches
@@ -192,6 +226,7 @@ pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
             // after `pt` drops, before this fn returns; established here.
             unsafe { unmap_window_range(&mut pt, base_va, base_pa, round_len) };
             let foreign = matches!(e, MapError::AlreadyMapped | MapError::PageSizeMismatch);
+            // Relaxed: a count; pairs with nothing.
             let tables_left = TABLE_PAGES.load(Ordering::Relaxed) != tables0;
             if !foreign && !tables_left {
                 // PT has been held since `reserve`, so this is the latest
@@ -242,30 +277,29 @@ unsafe fn unmap_window_range(pt: &mut MapperGuard, va: VirtAddr, pa: PhysAddr, l
     }
 }
 
-/// Patch a physmap-covered MMIO region UC in place. Preserves 2 MiB
-/// page size. Returns the leaf count touched, or `MapError` if any VA
-/// in the region is not currently mapped through the physmap (in which
-/// case the caller wanted `ioremap`).
+/// Map `[va, va+len)` through `pt`. Local `invlpg` only.
 ///
 /// # Safety
-/// Only sound after `install`; the physmap must cover `[phys, phys+len)`.
-pub unsafe fn patch_physmap_uc(phys: PhysAddr, len: u64) -> Result<usize, MapError> {
-    // SAFETY: `Mapper::patch_physmap_uc`'s contract; `install` has run, so
-    // the kernel root `current_mapper` walks is the one the CPU uses (this
-    // fn's `# Safety` contract, established here), and the guard holds the
-    // page-table lock (invariant I48, established at
-    // `mm::paging_init::current_mapper`).
-    let n = unsafe { current_mapper().patch_physmap_uc(VirtAddr(HHDM_BASE), phys, len) }?;
-    let mut off: u64 = 0;
-    let hhdm_end = HHDM_BASE.wrapping_add(phys.as_u64()).wrapping_add(len);
-    let mut va = HHDM_BASE.wrapping_add(phys.as_u64());
-    while va < hhdm_end {
-        Arch::flush_local(VirtAddr(va));
-        paging::tlb_shootdown_others(VirtAddr(va));
-        off += PAGE_SIZE_4K;
-        va = HHDM_BASE.wrapping_add(phys.as_u64()).wrapping_add(off);
+/// Same contract as `Mapper::map_range`.
+pub unsafe fn map_range_locked(
+    pt: &mut MapperGuard,
+    va: VirtAddr,
+    pa: PhysAddr,
+    len: u64,
+    flags: PageFlags,
+    mode: MapMode,
+) -> Result<(), MapError> {
+    let mut alloc = BuddyFrames;
+    // SAFETY: `Mapper::map_range`'s contract, which this fn's `# Safety`
+    // passes on, established here; `pt` holds the page-table lock
+    // (invariant I48, established at `mm::paging_init::current_mapper`).
+    unsafe { pt.map_range(va, pa, len, flags, mode, &mut alloc)? };
+    let mut off = 0u64;
+    while off < len {
+        Arch::flush_local(VirtAddr(va.as_u64() + off));
+        off = off.saturating_add(PAGE_SIZE_4K);
     }
-    Ok(n)
+    Ok(())
 }
 
 /// Take PT and build a `Mapper` over the kernel PML4 inside the returned
@@ -282,7 +316,7 @@ pub(crate) fn current_mapper() -> MapperGuard {
     // it, the boot tables CR3 holds) is never freed, and PT is held for the
     // guard's life, so this is the only live `Mapper` over it; established
     // here.
-    let mapper = unsafe { Mapper::new(PhysAddr(root), HHDM_BASE) };
+    let mapper = unsafe { Mapper::new(PhysAddr(root), hhdm_offset()) };
     MapperGuard { mapper, pt }
 }
 
@@ -312,6 +346,7 @@ pub unsafe fn map_4k_locked(
 ///
 /// # Safety
 /// Same contract as `Mapper::map_page`. Must run after [`install`].
+#[cfg(feature = "kernel_tests")]
 pub unsafe fn map_4k(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
     // SAFETY: `map_4k_locked`'s contract, which this fn's `# Safety` passes
     // on, established here.
@@ -320,107 +355,9 @@ pub unsafe fn map_4k(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(),
     Ok(())
 }
 
-/// Map one 2 MiB leaf through `pt`. Local `invlpg` only.
-///
-/// # Safety
-/// Same contract as `Mapper::map_page`.
-pub unsafe fn map_2m_locked(
-    pt: &mut MapperGuard,
-    va: VirtAddr,
-    pa: PhysAddr,
-    flags: PageFlags,
-) -> Result<(), MapError> {
-    let mut alloc = BuddyFrames;
-    // SAFETY: `Mapper::map_page`'s contract, which this fn's `# Safety`
-    // passes on, established here; `pt` holds the page-table lock
-    // (invariant I48, established at `mm::paging_init::current_mapper`).
-    unsafe {
-        pt.map_page(va, pa, flags, PageSize::Size2M, MapMode::Fresh, &mut alloc)?;
-    }
-    Arch::flush_local(va);
-    Ok(())
-}
-
-/// Map one 2 MiB leaf in the live tables, drop PT, then shootdown.
-///
-/// # Safety
-/// Same contract as `Mapper::map_page`. Must run after [`install`].
-pub unsafe fn map_2m(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
-    // SAFETY: `map_2m_locked`'s contract, which this fn's `# Safety` passes
-    // on, established here.
-    with_pt(|pt| unsafe { map_2m_locked(pt, va, pa, flags) })?;
-    paging::tlb_shootdown_others(va);
-    Ok(())
-}
-
-/// Map missing physmap leaves covering `[phys, phys+len)` as write-back.
-/// Already-present leaves are left alone (so a WB framebuffer is not
-/// UC-patched). Used for VGA BAR0 when the BAR outruns Limine's surface.
-///
-/// Returns whether `phys` itself translates through the HHDM physmap.
-///
-/// # Safety
-/// `[phys, phys+len)` is RAM, or device memory that no other mapping
-/// reaches with another memory type (invariant I17): the leaves this maps
-/// are write-back.
-pub unsafe fn ensure_physmap_wb(phys: PhysAddr, len: u64) -> bool {
-    if len == 0 {
-        return true;
-    }
-    let start = phys.as_u64() & !(PAGE_SIZE_4K - 1);
-    if start >= PHYSMAP_CAP {
-        return false;
-    }
-    let Some(raw_end) = phys.as_u64().checked_add(len) else {
-        return false;
-    };
-    let end = paging_align_up(raw_end, PAGE_SIZE_4K).min(PHYSMAP_CAP);
-    let flags = paging::physmap_flags();
-    let mut p = start;
-    while p < end {
-        let va = VirtAddr(HHDM_BASE.wrapping_add(p));
-        if let Some((_, sz, _)) = translate(va) {
-            let span = sz.bytes();
-            let next = (p & !(span - 1)).saturating_add(span);
-            p = if next > p { next } else { p + PAGE_SIZE_4K };
-            continue;
-        }
-        let rem = end - p;
-        let try_2m = p & (PAGE_SIZE_2M - 1) == 0 && rem >= PAGE_SIZE_2M;
-        if try_2m {
-            // SAFETY: `map_2m`'s contract; `[p, p + 2 MiB)` lies in the range
-            // this fn's `# Safety` contract vouches for (invariant I17,
-            // established here), and its physmap VA was unmapped just now.
-            match unsafe { map_2m(va, PhysAddr(p), flags) } {
-                Ok(()) => {
-                    p += PAGE_SIZE_2M;
-                    continue;
-                }
-                Err(MapError::AlreadyMapped) => {
-                    p += PAGE_SIZE_4K;
-                    continue;
-                }
-                Err(MapError::Misaligned)
-                | Err(MapError::NotMapped)
-                | Err(MapError::OutOfFrames)
-                | Err(MapError::PageSizeMismatch)
-                | Err(MapError::NonCanonical) => {}
-            }
-        }
-        // SAFETY: `map_4k`'s contract; `[p, p + 4 KiB)` lies in the range
-        // this fn's `# Safety` contract vouches for (invariant I17,
-        // established here), and a present leaf there returns
-        // `AlreadyMapped` rather than being replaced.
-        match unsafe { map_4k(va, PhysAddr(p), flags) } {
-            Ok(()) | Err(MapError::AlreadyMapped) => p += PAGE_SIZE_4K,
-            Err(MapError::Misaligned)
-            | Err(MapError::NotMapped)
-            | Err(MapError::OutOfFrames)
-            | Err(MapError::PageSizeMismatch)
-            | Err(MapError::NonCanonical) => break,
-        }
-    }
-    translate(VirtAddr(HHDM_BASE.wrapping_add(phys.as_u64()))).is_some()
+/// Whether `phys` aliases inside this port's physmap slot at the HHDM offset.
+pub fn phys_mapped(phys: u64) -> bool {
+    phys_in_slot(physmap_slot(), hhdm_offset(), phys)
 }
 
 /// Unmap one leaf through `pt`. Local `invlpg` only.
@@ -467,6 +404,7 @@ pub fn dump_ranges_to(w: &mut impl Write) -> core::fmt::Result {
             let sz = match size {
                 PageSize::Size4K => "4k",
                 PageSize::Size2M => "2m",
+                PageSize::Size1G => "1g",
             };
             res = writeln!(
                 w,
@@ -516,19 +454,19 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         boot::halt_with("vibeOS: paging: no frame for the PML4");
     };
     let root = PhysAddr(root.into_entry());
-    let hhdm_ptr = root.as_u64().wrapping_add(HHDM_BASE) as *mut u64;
+    let hhdm_ptr = root.as_u64().wrapping_add(hhdm_offset()) as *mut u64;
     for i in 0..Arch::ENTRIES {
         // SAFETY: `root` is the order-0 buddy frame above, which Limine's
-        // HHDM maps writable at `HHDM_BASE` (invariant I14, established at
+        // HHDM maps writable at `hhdm_offset()` (invariant I14, established at
         // `mm::pmm_init::init`); `i < Arch::ENTRIES` words stay inside it.
         unsafe { hhdm_ptr.add(i).write_volatile(0) };
     }
     // SAFETY: `Mapper::new`'s contract; `root` is the zeroed PML4 above,
-    // owned by the kernel for good, and `HHDM_BASE` reaches every buddy
+    // owned by the kernel for good, and `hhdm_offset()` reaches every buddy
     // frame (invariant I14, established at `mm::pmm_init::init`). Boot is
     // single-CPU with IRQs off (this fn's `# Safety` contract), the one
     // case invariant I48 excepts; established here.
-    let mut mapper = unsafe { Mapper::new(root, HHDM_BASE) };
+    let mut mapper = unsafe { Mapper::new(root, hhdm_offset()) };
 
     // ---- 1. Kernel image, per section ----
     // SAFETY: the linker script (`linker.ld`) defines this and each `&__*`
@@ -583,53 +521,69 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         paging::kernel_data_flags(),
     );
 
-    // ---- 2. Physmap [0, map_end) with 2 MiB pages ----
-    let map_end = physmap_extent(info);
-    // SAFETY: `Mapper::map_range`'s contract; the physmap maps `[0, map_end)`
-    // once, at `HHDM_BASE`, in a root nothing else maps yet (invariant I14,
-    // established here).
-    let physmap = unsafe {
-        mapper.map_range(
-            VirtAddr(HHDM_BASE),
-            PhysAddr(0),
-            map_end,
-            paging::physmap_flags(),
-            MapMode::Fresh,
-            &mut alloc,
-        )
-    };
-    if physmap.is_err() {
-        boot::halt_with("vibeOS: paging: physmap map failed");
-    }
+    // ---- 2. RAM-only physmap (MEMORY.md §4.1, ROADMAP §11.2) ----
+    let mut map_end = 0u64;
+    let walk = walk_physmap(
+        physmap_slot(),
+        hhdm_offset(),
+        info.ram_ranges(),
+        info.kernel_phys.clone(),
+        have_1g_pages(),
+        |run| {
+            map_end = map_end.max(run.pa.as_u64().saturating_add(run.len));
+            // SAFETY: `map_physmap_run`'s contract; each run is a RAM-typed
+            // span inside the slot, mapped once at its HHDM alias in a root
+            // nothing else maps yet (invariant I14, established here).
+            if unsafe { map_physmap_run(&mut mapper, &mut alloc, run) }.is_err() {
+                boot::halt_with("vibeOS: paging: physmap map failed");
+            }
+        },
+    );
+    let _ = walk;
 
-    // ---- 2b. Modules past map_end ----
-    // Limine loads modules top-down, so with RAM past `PHYSMAP_CAP` the
-    // initrd lies above `map_end`. Map each such module's pages at its
-    // physmap alias, as `acpi_init` maps tables above `map_end`. A module
-    // this fails for stays unmapped, and `fat_init::init` then leaves the
-    // initrd not live (its recorded error state, DESIGN §2.5).
-    for m in info.modules() {
-        let start = m.start.max(map_end) & !(PAGE_SIZE_4K - 1);
-        let end = paging_align_up(m.end, PAGE_SIZE_4K);
-        if end <= start || end > vibeos::heap::HEAP_START - HHDM_BASE {
-            continue;
-        }
-        // SAFETY: `Mapper::map_range`'s contract; `[start, end)` lies above
-        // `map_end`, so nothing in this root maps it yet, and it maps once,
-        // at its own physmap alias below the heap slot (invariant I14,
-        // established here).
-        let r = unsafe {
-            mapper.map_range(
-                VirtAddr(HHDM_BASE + start),
-                PhysAddr(start),
-                end - start,
-                paging::physmap_flags(),
+    // ---- 3. Console UART (aarch64) / low identity (x86_64) ----
+    #[cfg(target_arch = "aarch64")]
+    {
+        let uart = crate::machine_init::info()
+            .and_then(|d| d.console_uart())
+            .unwrap_or(0x0900_0000);
+        let va = VirtAddr(hhdm_offset().wrapping_add(uart & !0xFFF));
+        let pa = PhysAddr(uart & !0xFFF);
+        // SAFETY: one Device page for the console UART, mapped in the new
+        // root before `set_root`; established here.
+        let uart_map = unsafe {
+            mapper.map_page(
+                va,
+                pa,
+                paging::mmio_flags(),
+                PageSize::Size4K,
                 MapMode::Fresh,
                 &mut alloc,
             )
         };
-        if r.is_err() {
-            continue;
+        if uart_map.is_err() {
+            boot::halt_with("vibeOS: paging: uart map failed");
+        }
+        let fw = crate::machine_init::info()
+            .and_then(|d| d.fw_cfg)
+            .map(|d| d.base)
+            .unwrap_or(0x0902_0000);
+        let va = VirtAddr(hhdm_offset().wrapping_add(fw & !0xFFF));
+        let pa = PhysAddr(fw & !0xFFF);
+        // SAFETY: one Device page for fw_cfg, mapped in the new root
+        // before `set_root`; established here.
+        let fw_map = unsafe {
+            mapper.map_page(
+                va,
+                pa,
+                paging::mmio_flags(),
+                PageSize::Size4K,
+                MapMode::Fresh,
+                &mut alloc,
+            )
+        };
+        if fw_map.is_err() {
+            boot::halt_with("vibeOS: paging: fw_cfg map failed");
         }
     }
 
@@ -638,8 +592,11 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // present, read-only and executable, and not GLOBAL, so the teardown's
     // flush need not reach it; every other page writable, NX and GLOBAL.
     // Rest: 2 MiB leaves, writable + NX + GLOBAL, so the TLB survives CR3
-    // reloads (DESIGN §4.3 TLB section) until `teardown_identity`.
+    // reloads (DESIGN §4.3 TLB section) until `teardown_identity`, whose
+    // `flush_identity` invalidates one address per leaf of this layout.
+    #[cfg(target_arch = "x86_64")]
     let tramp = info.trampoline_page;
+    #[cfg(target_arch = "x86_64")]
     let low_4k = |va: u64| {
         if Some(va) == tramp {
             PageFlags(PageFlags::PRESENT)
@@ -651,6 +608,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // identity window maps `[0, 512 MiB)` onto itself once, in the low half
     // no other kernel mapping uses, for the AP trampoline (DESIGN §4.1);
     // established here.
+    #[cfg(target_arch = "x86_64")]
     let low_id = unsafe {
         (0..PAGE_SIZE_2M)
             .step_by(PAGE_SIZE_4K as usize)
@@ -680,6 +638,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
                 )
             })
     };
+    #[cfg(target_arch = "x86_64")]
     if low_id.is_err() {
         boot::halt_with("vibeOS: paging: low identity map failed");
     }
@@ -708,12 +667,41 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     enable_nx();
 
     // ---- 6. Install ----
+    // Release: pairs with the Acquire load in `kernel_cr3`.
     KERNEL_CR3.store(mapper.root().as_u64(), Ordering::Release);
     // SAFETY: the new root maps the kernel image, the physmap (so every
-    // pointer computed as `phys + HHDM_BASE` stays valid, invariant I14),
+    // pointer computed as `phys + hhdm_offset()` stays valid, invariant I14),
     // the low identity window and the boot stack, so execution continues
     // across the switch; established here.
     unsafe { Arch::set_root(mapper.root()) };
+    #[cfg(target_arch = "aarch64")]
+    {
+        // `set_root` left TTBR0 on the empty root and dropped the
+        // identity map. Table address only: ASID lives above bit 47.
+        let pa =
+            crate::arch::aarch64::cpu::read_ttbr0() & vibeos::arch::aarch64::paging::DESC_ADDR_MASK;
+        if pa == 0 {
+            crate::boot::halt_with("vibeOS: paging: no empty TTBR0");
+        }
+        // Release: pairs with the Acquire load in `empty_user_root`.
+        EMPTY_TTBR0.store(pa, Ordering::Release);
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let uart = crate::machine_init::info()
+            .and_then(|d| d.console_uart())
+            .unwrap_or(0x0900_0000);
+        crate::serial::raw::set_mmio(hhdm_offset().wrapping_add(uart & !0xFFF));
+        let fw = crate::machine_init::info()
+            .and_then(|d| d.fw_cfg)
+            .map(|d| d.base)
+            .unwrap_or(0x0902_0000);
+        crate::boot::fw_cfg_init::set_mmio_va(hhdm_offset().wrapping_add(fw & !0xFFF));
+    }
+    // Release: pairs with the Acquire load in `identity_covers`.
+    #[cfg(target_arch = "x86_64")]
+    IDENTITY_LIVE.store(true, Ordering::Release);
+    // Relaxed: the BSP writes it before any reader; pairs with nothing.
     MAP_END.store(map_end, Ordering::Relaxed);
 
     PagingReport {
@@ -731,21 +719,51 @@ pub(crate) fn identity_window() -> core::ops::Range<u64> {
     LOW_ID_BASE..LOW_ID_BASE + LOW_ID_SIZE
 }
 
+/// True while the low identity window still maps `[phys, phys+len)`.
+/// Firmware tables outside RAM-typed ranges are read this way at
+/// `acpi_init::init` (BOOT.md step 8), before KVA/`memremap` exist.
+pub fn identity_covers(phys: u64, len: u64) -> bool {
+    // Acquire: pairs with the Release stores in `install` and
+    // `teardown_identity`.
+    if !IDENTITY_LIVE.load(Ordering::Acquire) {
+        return false;
+    }
+    let window = identity_window();
+    match phys.checked_add(len) {
+        Some(end) => phys >= window.start && end <= window.end,
+        None => false,
+    }
+}
+
 /// Identity leaves unmapped per PT hold in [`teardown_identity`] (DESIGN
 /// §2.9 rule 2).
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 const TEARDOWN_BATCH: usize = 64;
 
 /// Remove the low identity window after `smp: done`, all but the leaf that
-/// maps `keep` (the trampoline page), then flush the whole TLB, global
-/// entries included, on this CPU and every other online one, so a kernel
-/// read of VA 0 faults on each (DESIGN §4.1, §4.3). The page tables stay:
-/// a kernel table page is never freed.
+/// maps `keep` (the trampoline page), then drop the window's translations,
+/// global ones included, on this CPU and every other online one, so a
+/// kernel read of VA 0 faults on each (DESIGN §4.1, §4.3). The page tables
+/// stay: a kernel table page is never freed.
 ///
 /// # Safety
 /// Once, after every AP is up; nothing on any CPU uses an identity address
 /// but the trampoline page from here, and this CPU's stack lies outside
 /// the window.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub unsafe fn teardown_identity(keep: Option<u64>) {
+    // Acquire: pairs with nothing.
+    if !IDENTITY_LIVE.load(Ordering::Acquire) {
+        return;
+    }
+    // Release: pairs with the Acquire load in `identity_covers`.
+    IDENTITY_LIVE.store(false, Ordering::Release);
     let window = identity_window();
     let mut va = window.start;
     while va < window.end {
@@ -753,28 +771,45 @@ pub unsafe fn teardown_identity(keep: Option<u64>) {
         let mut n = 0usize;
         while n < TEARDOWN_BATCH && va < window.end {
             let size = match pt.translate(VirtAddr(va)) {
+                Some((_, PageSize::Size1G, _)) => paging::PAGE_SIZE_1G,
                 Some((_, PageSize::Size2M, _)) => PAGE_SIZE_2M,
                 Some((_, PageSize::Size4K, _)) | None => PAGE_SIZE_4K,
             };
             if keep != Some(va) {
                 // SAFETY: `Mapper::unmap_page`'s contract; the caller keeps
                 // every CPU off the window (this fn's `# Safety` contract),
-                // and the whole-TLB flush below runs on every CPU before
-                // this returns; established here.
+                // and the flush below runs on every CPU before this
+                // returns; established here.
                 let _unmapped = unsafe { pt.unmap_page(VirtAddr(va)) };
                 n += 1;
             }
             va += size;
         }
     }
-    flush_local_global();
-    crate::ipi_init::call_mask(u64::MAX, flush_tlb_all_ipi, core::ptr::null_mut(), true);
+    flush_identity(core::ptr::null_mut());
+    crate::ipi_init::call_mask(u64::MAX, flush_identity, core::ptr::null_mut(), true);
 }
 
-/// `flush_local_global` on a CPU `teardown_identity` calls through
-/// `ipi_init::call_mask`: it takes no lock and allocates nothing.
-fn flush_tlb_all_ipi(_: *mut ()) {
-    flush_local_global();
+/// Drop this CPU's translations of the identity window, global ones
+/// included, with one `invlpg` per leaf `install` mapped there: nothing
+/// writes CR4 after `arch::cpu::init_control_regs` (DESIGN §11.4), so no
+/// `CR4.PGE` toggle flushes them all. It takes no lock and allocates
+/// nothing, so `teardown_identity` runs it through `ipi_init::call_mask`.
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
+fn flush_identity(_: *mut ()) {
+    let window = identity_window();
+    let mut va = window.start;
+    while va < window.end {
+        Arch::flush_local(VirtAddr(va));
+        va += if va < window.start + PAGE_SIZE_2M {
+            PAGE_SIZE_4K
+        } else {
+            PAGE_SIZE_2M
+        };
+    }
 }
 
 /// Print the phase-1 §1.2 exit marker and the diagnostic follow-ups.
@@ -782,7 +817,10 @@ fn flush_tlb_all_ipi(_: *mut ()) {
 /// its own follow-up printing.
 pub fn report(r: &PagingReport) {
     // Exit-gate marker: DESIGN §2.6 shape.
+    #[cfg(target_arch = "x86_64")]
     crate::marker!(marker::PAGING_CR3_OK);
+    #[cfg(target_arch = "aarch64")]
+    crate::marker!("vibeOS: paging: ttbr ok");
 
     crate::marker!(
         "vibeOS: paging: map_end {:#x} ({} MiB)",
@@ -840,17 +878,51 @@ fn map_kernel_section(
     len
 }
 
-/// Covers usable RAM, the kernel image, every framebuffer, and every
-/// Limine module (the initrd, which `fat_init` reads and writes in place),
-/// capped at [`PHYSMAP_CAP`]. Never raw memmap entries (DESIGN §4.1).
-fn physmap_extent(info: &BootInfo) -> u64 {
-    let hi = info
-        .usable()
-        .map(|r| r.end)
-        .chain(info.framebuffers().map(|fb| fb.phys + fb.size))
-        .chain(info.modules().map(|m| m.end))
-        .fold(info.kernel_phys.end, u64::max);
-    paging_align_up(hi, PAGE_SIZE_2M).min(PHYSMAP_CAP)
+/// CPUID.80000001H:EDX[26] (`pdpe1gb`).
+fn have_1g_pages() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use crate::arch::x86_64::cpu;
+        let ext = cpu::cpuid(0x8000_0000, 0).0;
+        ext >= 0x8000_0001 && cpu::cpuid(0x8000_0001, 0).3 & (1 << 26) != 0
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Map one coalesced physmap run. 1 GiB uses `map_page`; 4 KiB / 2 MiB use
+/// `map_range`.
+///
+/// # Safety
+/// Same contract as `Mapper::map_page` / `map_range` for `run`.
+unsafe fn map_physmap_run(
+    mapper: &mut Mapper,
+    alloc: &mut BuddyFrames,
+    run: PhysmapRun,
+) -> Result<(), MapError> {
+    let flags = paging::physmap_flags();
+    if run.size == PageSize::Size1G {
+        let mut off = 0u64;
+        while off < run.len {
+            // SAFETY: this fn's `# Safety` contract, established here.
+            unsafe {
+                mapper.map_page(
+                    VirtAddr(run.va.as_u64() + off),
+                    PhysAddr(run.pa.as_u64() + off),
+                    flags,
+                    PageSize::Size1G,
+                    MapMode::Fresh,
+                    alloc,
+                )?;
+            }
+            off = off.saturating_add(PAGE_SIZE_1G);
+        }
+        return Ok(());
+    }
+    // SAFETY: this fn's `# Safety` contract, established here.
+    unsafe { mapper.map_range(run.va, run.pa, run.len, flags, MapMode::Fresh, alloc) }
 }
 
 /// Walk Limine's active PML4 (via current CR3) and copy the entry
@@ -875,10 +947,10 @@ fn physmap_extent(info: &BootInfo) -> u64 {
     reason = "boot protocol invariant (DESIGN §3.3): Limine's PML4 maps the boot stack"
 )]
 unsafe fn duplicate_pml4_entry_from_current(mapper: &mut Mapper, va: VirtAddr) {
-    let src = Arch::root().as_u64().wrapping_add(HHDM_BASE) as *const u64;
+    let src = Arch::root().as_u64().wrapping_add(hhdm_offset()) as *const u64;
     let idx = Arch::index(va, Arch::LEVELS);
     // SAFETY: CR3 still holds Limine's PML4 (this fn's `# Safety` contract,
-    // established here), which Limine's HHDM maps at `HHDM_BASE`, and
+    // established here), which Limine's HHDM maps at `hhdm_offset()`, and
     // `idx < 512`.
     let entry = unsafe { src.add(idx).read_volatile() };
     if entry & PageFlags::PRESENT == 0 {
@@ -890,9 +962,9 @@ unsafe fn duplicate_pml4_entry_from_current(mapper: &mut Mapper, va: VirtAddr) {
             va.as_u64()
         );
     }
-    let dst = mapper.root().as_u64().wrapping_add(HHDM_BASE) as *mut u64;
+    let dst = mapper.root().as_u64().wrapping_add(hhdm_offset()) as *mut u64;
     // SAFETY: `mapper`'s root is the new PML4, a buddy frame reached at
-    // `HHDM_BASE` (`Mapper::new`'s contract, invariant I14), and `idx < 512`;
+    // `hhdm_offset()` (`Mapper::new`'s contract, invariant I14), and `idx < 512`;
     // established here.
     let existing = unsafe { dst.add(idx).read_volatile() };
     assert!(

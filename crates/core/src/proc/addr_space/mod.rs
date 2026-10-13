@@ -512,7 +512,7 @@ impl<A: PageTable, C> AddressSpace<A, C> {
             let page = VirtAddr(va + off);
             match self.mapper.translate(page) {
                 None => {}
-                Some((_, PageSize::Size2M, _)) => {
+                Some((_, PageSize::Size2M | PageSize::Size1G, _)) => {
                     return Err(AsError::Map(MapError::PageSizeMismatch));
                 }
                 Some((_, PageSize::Size4K, _)) => {

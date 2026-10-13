@@ -1,0 +1,19 @@
+AArch64 vibeos-log-ring
+(* Trace ring: invalidate seq, release fence, store the field, STLR the
+   new seq. The reader accepts only a stable seq. A stable new seq with
+   the old field, or a new field whose recheck still sees the old seq,
+   is forbidden. *)
+{
+[seq]=2; [field]=1;
+0:X1=seq; 0:X2=field;
+1:X1=seq; 1:X2=field;
+}
+ P0              | P1              ;
+ MOV W0,#0       | LDAR W3,[X1]    ;
+ STR W0,[X1]     | LDR W4,[X2]     ;
+ DMB ISH         | DMB ISHLD       ;
+ MOV W0,#9       | LDR W5,[X1]     ;
+ STR W0,[X2]     |                 ;
+ MOV W0,#3       |                 ;
+ STLR W0,[X1]    |                 ;
+exists ((1:X3=3 /\ 1:X5=3 /\ 1:X4=1) \/ (1:X4=9 /\ 1:X5=2))

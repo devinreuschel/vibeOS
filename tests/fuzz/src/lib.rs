@@ -64,6 +64,11 @@ pub const TARGETS: &[Target] = &[
         covers: &["fs/fat/mod.rs"],
     },
     Target {
+        name: "fdt_parse",
+        run: fdt_parse,
+        covers: &["machine/fdt.rs"],
+    },
+    Target {
         name: "kbd_decode",
         run: kbd_decode,
         covers: &["console/kbd.rs::Decoder::feed", "shell/mod.rs::tokenize"],
@@ -128,6 +133,11 @@ pub fn part_parse(data: &[u8]) {
 /// `FatVol::mount` over a [`image::Sparse`] image, then a walk and a write.
 pub fn fat_mount(data: &[u8]) {
     targets::fat::mount(data);
+}
+
+/// `fdt::parse` and `fdt::pick_pl011` on the input as one blob.
+pub fn fdt_parse(data: &[u8]) {
+    targets::fdt::parse(data);
 }
 
 /// `vibefs::mount` over a [`image::Sparse`] image, then a walk and `fsck`.

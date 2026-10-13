@@ -23,7 +23,9 @@ from tests.harness.harness import (
     KtestSummary,
     QemuConfig,
     RunResult,
+    apply_arch_cli,
     boot_contract_markers,
+    check_el2_boot,
     check_ktest_output,
     contains_panic,
     default_iso,
@@ -33,6 +35,7 @@ from tests.harness.harness import (
     expected_lapic_mode,
     ktest_devices,
     ktest_lines,
+    ktest_pass_status,
     ktest_summary,
     make_disk,
     make_pattern_disk,
@@ -46,6 +49,23 @@ DISK_BYTES = 4 * 1024 * 1024
 # The main boot's second virtio-blk disk (`vdb`, 2048 sectors), blank, for
 # `block_two_disk_instances`.
 DISK2_BYTES = 1 * 1024 * 1024
+
+
+def mmio_disk(arch: str) -> str | None:
+    """A second raw image for aarch64 virtio-mmio (F047), or None."""
+    if arch != "aarch64":
+        return None
+    return make_disk(DISK_BYTES, "vibeos-vblk-mmio-")
+
+
+def unlink_disks(*paths: str | None) -> None:
+    for path in paths:
+        if path is None:
+            continue
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 # `serial_lines_whole` (ROADMAP §10.2, F138): CPU 0 prints SERIAL_WHOLE_N
 # numbered lines while every AP prints noise lines; each ends in SERIAL_PAD.
@@ -305,6 +325,8 @@ def expected_clocksource(cfg: QemuConfig) -> str:
     §10.3): `tsc` under KVM, whose guests the harness gives an invariant TSC,
     so one without it fails instead of testing the HPET again; else `hpet`,
     or `acpi_pm` with the HPET off. TCG never reports an invariant TSC."""
+    if cfg.arch == "aarch64":
+        return "cntvct"
     if effective_accel_name(cfg) == "kvm":
         return "tsc"
     return "hpet" if _hpet_on(cfg) else "acpi_pm"
@@ -330,7 +352,10 @@ def check_boot_cpu(lines: list[str], cfg: QemuConfig) -> None:
     `lapic_timer` mode `run_e2e.py`'s boot contract expects of the same
     CPU, HPET and accelerator (L1197): `tsc-deadline` under KVM `-cpu max`,
     `periodic` under TCG or `-tsc-deadline`, `pit` with HPET off.
+    aarch64 has no LAPIC; the generic timer marker is the contract.
     """
+    if cfg.arch == "aarch64":
+        return
     if _wants_invtsc(cfg.cpu):
         absent = INVTSC_ABSENT in lines
         results.current().record("marker", INVTSC_MARKER, "failed" if absent else "passed")
@@ -344,6 +369,34 @@ def check_boot_cpu(lines: list[str], cfg: QemuConfig) -> None:
     heads = [ln for ln in lines if ln.startswith(LAPIC_TIMER_PREFIX)]
     got = heads[0][len(LAPIC_TIMER_PREFIX) :].rstrip(")") if heads else "no lapic_timer line"
     raise HarnessError(f"lapic_timer mode: want {want}, got {got}")
+
+
+def check_aarch64_s7(lines: list[str], cfg: QemuConfig) -> None:
+    """Issue #205: `dt` nodes, GIC, chosen timer, vectors, and `cntvct`."""
+    _require_line(
+        lines,
+        lambda ln: ln.startswith("vibeOS: dt: ") and ln.endswith(" nodes"),
+        "missing vibeOS: dt: <n> nodes",
+    )
+    want_gic = f"vibeOS: gic: v{cfg.gic_version}"
+    _require_line(lines, lambda ln: ln == want_gic, f"missing {want_gic}")
+    _require_line(
+        lines,
+        lambda ln: ln.startswith("vibeOS: time: timer "),
+        "missing vibeOS: time: timer",
+    )
+    _require_line(
+        lines,
+        lambda ln: ln.startswith("vibeOS: time: cntfrq ") and ln.endswith("/s"),
+        "missing vibeOS: time: cntfrq",
+    )
+    _require_line(lines, lambda ln: ln == "vibeOS: vectors ok", "missing vibeOS: vectors ok")
+    _require_line(
+        lines,
+        lambda ln: ln == f"{CLOCKSOURCE_PREFIX}cntvct",
+        f"missing {CLOCKSOURCE_PREFIX}cntvct",
+    )
+    check_el2_boot(lines, cfg.machine, cfg.smp)
 
 
 def _ktest_boot(
@@ -373,7 +426,9 @@ def _ktest_boot(
     results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
     klines = frame.kernel_lines(raw.lines)
     results.current().record_ktest_lines(klines)
-    verdict = check_ktest_output(raw.lines, raw.exit_code)
+    verdict = check_ktest_output(
+        raw.lines, raw.exit_code, pass_status=ktest_pass_status(cfg)
+    )
     write_stack_summary(label, check_stack_depth(klines, enforce=False))
     check_stack_depth(klines, enforce=enforce_stack)
     skips.check_skips(
@@ -388,6 +443,8 @@ def _ktest_boot(
     if SERIAL_FRAME_OK in klines:
         _check_serial_frame(raw.lines)
     check_boot_cpu(klines, cfg)
+    if cfg.arch == "aarch64":
+        check_aarch64_s7(klines, cfg)
     _require_line(klines, _block_name("vda"), "missing virtio-blk marker")
     if not parts:
         return raw
@@ -471,8 +528,13 @@ def _proof_boot(
         env, ktest=ktest, ktest_repeat=repeat, cmdline=f"{env.cmdline} {cmdline}".strip()
     )
     disk = make_disk(DISK_BYTES, "vibeos-vblk-") if devices is None else None
+    mmio = mmio_disk(env.arch) if devices is None else None
     try:
-        extra = ktest_devices(disk, env.smp) if disk is not None else devices or ()
+        extra = (
+            ktest_devices(disk, env.smp, arch=env.arch, mmio_disk=mmio)
+            if disk is not None
+            else devices or ()
+        )
         cfg = penv.qemu(extra=extra, boot_order="d")
         raw = _ktest_boot(
             cfg,
@@ -484,11 +546,7 @@ def _proof_boot(
             parts=devices is None,
         )
     finally:
-        if disk is not None:
-            try:
-                os.unlink(disk)
-            except OSError:
-                pass
+        unlink_disks(disk, mmio)
     print(f"[ktest] {label}:", file=sys.stderr)
     print_ktest_summary(ktest_summary(raw.lines), raw.exit_code)
     return raw
@@ -587,15 +645,15 @@ def _vblk_readonly_boot(env: EnvConfig) -> None:
     """`vblk_readonly` alone on a `readonly=on` pattern image: a write
     and a discard fail with `ReadOnly`, and reads go on."""
     disk = make_pattern_disk(DISK_BYTES, "vibeos-vblk-ro-")
+    mmio = mmio_disk(env.arch)
     try:
-        devices = ktest_devices(disk, env.smp, readonly=True)
+        devices = ktest_devices(
+            disk, env.smp, readonly=True, arch=env.arch, mmio_disk=mmio
+        )
         raw = _single_test_boot(env, VBLK_READONLY_TEST, "vblk readonly", devices=devices)
         check_select_run(raw.lines, {VBLK_READONLY_TEST: 1}, ())
     finally:
-        try:
-            os.unlink(disk)
-        except OSError:
-            pass
+        unlink_disks(disk, mmio)
 
 
 VBLK_BAD_SECTOR_TEST = "vblk_bad_sector"
@@ -605,32 +663,35 @@ VBLK_BAD_SECTOR_TEST = "vblk_bad_sector"
 FAT_BAD_SECTOR_TEST = "fat_bad_sector_eio"
 
 
+def _bad_sector_tests(arch: str) -> tuple[str, ...]:
+    """`vblk_bad_sector`, and `fat_bad_sector_eio` where its programs exist.
+
+    Those programs are `x86_user_code`, a zero page on aarch64, so the
+    syscall half stays on x86."""
+    if arch == "aarch64":
+        return (VBLK_BAD_SECTOR_TEST,)
+    return (VBLK_BAD_SECTOR_TEST, FAT_BAD_SECTOR_TEST)
+
+
 def _vblk_bad_sector_boot(env: EnvConfig) -> None:
-    """`vblk_bad_sector`, then `fat_bad_sector_eio`, on a pattern image
-    behind `blkdebug`, which fails every read of `VBLK_BAD_SECTOR`: that
-    read fails alone, after its retries, and the disk stays `Ready`; then
-    `read`, `write`, `open` and `execve` of FAT objects on that sector each
-    return `EIO` to ring 3."""
+    """`vblk_bad_sector`, then `fat_bad_sector_eio` on x86, on a pattern
+    image behind `blkdebug`, which fails every read of `VBLK_BAD_SECTOR`:
+    that read fails alone, after its retries, and the disk stays `Ready`;
+    then `read`, `write`, `open` and `execve` of FAT objects on that sector
+    each return `EIO` to ring 3."""
+    names = _bad_sector_tests(env.arch)
     disk = make_pattern_disk(DISK_BYTES, "vibeos-vblk-bad-")
     conf = None
+    mmio = mmio_disk(env.arch)
     try:
         conf = write_blkdebug_config(VBLK_BAD_SECTOR, "vibeos-blkdebug-")
-        devices = ktest_devices(disk, env.smp, blkdebug=conf)
-        raw = _single_test_boot(
-            env,
-            f"{VBLK_BAD_SECTOR_TEST},{FAT_BAD_SECTOR_TEST}",
-            "vblk bad sector",
-            devices=devices,
+        devices = ktest_devices(
+            disk, env.smp, blkdebug=conf, arch=env.arch, mmio_disk=mmio
         )
-        check_select_run(raw.lines, {VBLK_BAD_SECTOR_TEST: 1, FAT_BAD_SECTOR_TEST: 1}, ())
+        raw = _single_test_boot(env, ",".join(names), "vblk bad sector", devices=devices)
+        check_select_run(raw.lines, {n: 1 for n in names}, ())
     finally:
-        for path in (disk, conf):
-            if path is None:
-                continue
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+        unlink_disks(disk, conf, mmio)
 
 
 def print_ktest_summary(summary: KtestSummary, exit_code: int | None) -> None:
@@ -689,9 +750,14 @@ def ktest_deadline_trip(env: EnvConfig) -> None:
     `check_deadline_trip` checks them."""
     penv = dataclasses.replace(env, ktest=TRIP_TEST, ktest_repeat=None)
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
+    mmio = mmio_disk(env.arch)
     try:
         # The trip panics on purpose: QMP's `GUEST_PANICKED` ends it too.
-        cfg = penv.qemu(extra=ktest_devices(disk, env.smp), boot_order="d", expect="panic")
+        cfg = penv.qemu(
+            extra=ktest_devices(disk, env.smp, arch=env.arch, mmio_disk=mmio),
+            boot_order="d",
+            expect="panic",
+        )
         try:
             raw = run_qemu_until_exit(
                 cfg,
@@ -708,10 +774,7 @@ def ktest_deadline_trip(env: EnvConfig) -> None:
             _record("ktest_deadline_trip", False)
             raise
     finally:
-        try:
-            os.unlink(disk)
-        except OSError:
-            pass
+        unlink_disks(disk, mmio)
     _record("ktest_deadline_trip", True)
     print(f"[ktest] deadline trip: {TRIP_TEST} failed on its deadline", file=sys.stderr)
 
@@ -725,12 +788,18 @@ HPET_OFF_KTEST: tuple[str, ...] = ("pit_tick_rate", "clocksource_if_off_50ms", "
 NO_TSC_DEADLINE = "-tsc-deadline"
 
 
-def hpet_off_config(env: EnvConfig, disk: str) -> QemuConfig:
+def hpet_off_config(
+    env: EnvConfig, disk: str, *, mmio_disk: str | None = None
+) -> QemuConfig:
     """The hpet=off boot: `-machine pc,hpet=off`, `-cpu <model>,-tsc-deadline`
     (the KVM leg's model offers TSC-deadline, which takes the tick without an
     HPET), and `vibeos.ktest=` set to `HPET_OFF_KTEST`, which overrides
     `VIBEOS_KTEST` and keeps `VIBEOS_KTEST_REPEAT`."""
-    cfg = env.qemu(extra=ktest_devices(disk, env.smp), hpet=False, boot_order="d")
+    cfg = env.qemu(
+        extra=ktest_devices(disk, env.smp, arch=env.arch, mmio_disk=mmio_disk),
+        hpet=False,
+        boot_order="d",
+    )
     parts = [p.strip() for p in cfg.cpu.split(",")]
     cpu = cfg.cpu if NO_TSC_DEADLINE in parts else f"{cfg.cpu},{NO_TSC_DEADLINE}"
     return dataclasses.replace(cfg, cpu=cpu, ktest=",".join(HPET_OFF_KTEST))
@@ -776,8 +845,9 @@ def hpet_off_boot(env: EnvConfig) -> None:
     `_ktest_boot`'s allowance; recorded in the results file, then checked
     by `check_hpet_off_boot`."""
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
+    mmio = mmio_disk(env.arch)
     try:
-        cfg = hpet_off_config(env, disk)
+        cfg = hpet_off_config(env, disk, mmio_disk=mmio)
         raw = run_qemu_until_exit(
             cfg,
             timeout_s=env.timeout,
@@ -787,10 +857,7 @@ def hpet_off_boot(env: EnvConfig) -> None:
         results.current().record_ktest_lines(frame.kernel_lines(raw.lines))
         check_hpet_off_boot(raw.lines, raw.exit_code, cfg)
     finally:
-        try:
-            os.unlink(disk)
-        except OSError:
-            pass
+        unlink_disks(disk, mmio)
     print("[ktest] hpet=off boot:", file=sys.stderr)
     print_ktest_summary(ktest_summary(raw.lines), raw.exit_code)
 
@@ -807,6 +874,8 @@ class ProofBoot:
     applies: Callable[[int, bool], bool]
     # Whether it runs when `VIBEOS_KTEST` selects the main boot's rows.
     with_selection: bool = False
+    # `hpet-off` is the PIT boot (`-machine pc,hpet=off`). The rest are portable.
+    arches: tuple[str, ...] = ("x86_64", "aarch64")
 
     def run(self, env: EnvConfig) -> None:
         getattr(sys.modules[__name__], self.func)(env)
@@ -816,22 +885,58 @@ def _always(smp: int, hpet_off: bool) -> bool:
     return True
 
 
-# In run order. A shard (`ktest_shards.SHARDS`) runs the ones it names.
+# In run order. x86 shards name them in `SHARDS`. aarch64 names the portable
+# ones in `AARCH64_PROOF` and `aff-off` on `aarch64_boots`.
 PROOF_BOOTS: tuple[ProofBoot, ...] = (
-    ProofBoot("hpet-off", "hpet=off boot", "hpet_off_boot", lambda smp, h: h, True),
+    ProofBoot("hpet-off", "hpet=off boot", "hpet_off_boot", lambda smp, h: h, True, ("x86_64",)),
     ProofBoot("select", "select boot", "ktest_select_boot", _always),
     ProofBoot("repeat", "repeat boot", "_repeat_boot", lambda smp, h: smp == 2),
     ProofBoot("deadline-trip", "deadline trip boot", "ktest_deadline_trip", lambda s, h: s >= 2),
     ProofBoot("planted", "planted stack boot", "_planted_boot", _always),
-    ProofBoot("fat", "fat 16k stack boot", "_fat_boot", _always),
+    # The FAT boot's self-IPI is `apic_init::send_ipi_cpu` on an x86 vector.
+    # aarch64's `send_ipi_cpu` returns without delivering, so the boot stays
+    # on x86.
+    ProofBoot("fat", "fat 16k stack boot", "_fat_boot", _always, arches=("x86_64",)),
     ProofBoot("vblk-readonly", "vblk readonly boot", "_vblk_readonly_boot", _always),
     ProofBoot("vblk-bad-sector", "vblk bad sector boot", "_vblk_bad_sector_boot", _always),
+    ProofBoot("stalled-ap", "stalled AP leak boot", "_stalled_ap_boot", lambda s, h: s >= 4),
+    # aarch64 only, at `-smp 4`, named on `test-kernel-smp4-5`'s `aarch64_boots`.
+    ProofBoot(
+        "aff-off",
+        "aarch64 AFF_OFF free boot",
+        "_aff_off_boot",
+        lambda s, _h: s >= 4,
+        arches=("aarch64",),
+    ),
 )
 
 
-def proof_boot_names(smp: int, hpet_off: bool) -> list[str]:
+def proof_boot_names(smp: int, hpet_off: bool, arch: str = "x86_64") -> list[str]:
     """The proof boots the union target runs at `smp` CPUs, in order."""
-    return [b.name for b in PROOF_BOOTS if b.applies(smp, hpet_off)]
+    return [b.name for b in PROOF_BOOTS if arch in b.arches and b.applies(smp, hpet_off)]
+
+
+def shard_plan(name: str, arch: str, smp: int, hpet_off: bool) -> tuple[str | None, list[str]]:
+    """`(range word, proof boots)` shard `name` runs on `arch`.
+
+    Both empty is a failed plan: `main` exits 1 instead of reporting success."""
+    word = ktest_shards.range_word_for(name, arch)
+    want = set(proof_boot_names(smp, hpet_off, arch))
+    boots = [b for b in ktest_shards.boots_for(name, arch) if b in want]
+    return word, boots
+
+
+def _stalled_ap_boot(env: EnvConfig) -> None:
+    """`stalled_ap_leak`: hold one AP past the ready timeout, then release it.
+
+    It must park (ROADMAP §11.4, F032).
+    """
+    _proof_boot(env, "stalled-ap", ktest="stalled_ap_leak", repeat=None)
+
+
+def _aff_off_boot(env: EnvConfig) -> None:
+    """`failed_ap_cleanup`: one AP stays OFF, `CPU_ON` not issued (F032)."""
+    _proof_boot(env, "aff-off", ktest="failed_ap_cleanup", repeat=None)
 
 
 def main_boot(env: EnvConfig, range_word: str | None) -> int:
@@ -843,9 +948,13 @@ def main_boot(env: EnvConfig, range_word: str | None) -> int:
     skip_persist = env_flag("VIBEOS_SKIP_PERSIST")
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
     disk2 = make_disk(DISK2_BYTES, "vibeos-vblk2-")
+    mmio = mmio_disk(env.arch)
     try:
         cfg = menv.qemu(
-            extra=ktest_devices(disk, env.smp, extra_disks=(disk2,)), boot_order="d"
+            extra=ktest_devices(
+                disk, env.smp, extra_disks=(disk2,), arch=env.arch, mmio_disk=mmio
+            ),
+            boot_order="d",
         )
         try:
             raw = _ktest_boot(
@@ -871,11 +980,7 @@ def main_boot(env: EnvConfig, range_word: str | None) -> int:
                 return 1
             print("[ktest] persist reboot: intact", file=sys.stderr)
     finally:
-        for path in (disk, disk2):
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+        unlink_disks(disk, disk2, mmio)
     return 0
 
 
@@ -887,22 +992,32 @@ def main(argv: list[str] | None = None) -> int:
         help="after the default boot, boot HPET_OFF_KTEST with the PIT driving the tick",
     )
     parser.add_argument(
+        "--arch",
+        choices=("x86_64", "aarch64"),
+        help="guest architecture (sets VIBEOS_ARCH; Makefile already exports it)",
+    )
+    parser.add_argument(
         "--shard",
-        choices=sorted(ktest_shards.SHARDS),
+        choices=sorted(ktest_shards.shard_names()),
         help="run one per-push shard of its variant (tests/harness/ktest_shards.py)",
     )
     args = parser.parse_args([] if argv is None else argv)
+    apply_arch_cli(args.arch)
     env = env_config(default_iso=default_iso("ktest"), default_timeout=BOOT_ALLOWANCE_S)
-    results.Results(env.tier)
+    results.Results(env.tier, env.arch)
     if args.shard is None:
-        boots = proof_boot_names(env.smp, args.hpet_off)
+        boots = proof_boot_names(env.smp, args.hpet_off, env.arch)
         rc = main_boot(env, None)
     else:
-        shard = ktest_shards.SHARDS[args.shard]
+        shard = ktest_shards.shard_for(args.shard)
         # A shard runs what it names that the union target would run here.
-        union = proof_boot_names(env.smp, ktest_shards.VARIANTS[shard.variant].hpet_off)
-        boots = [b for b in shard.boots if b in union]
-        rc = 0 if shard.rows is None else main_boot(env, shard.range_word())
+        word, boots = shard_plan(
+            args.shard, env.arch, env.smp, ktest_shards.VARIANTS[shard.variant].hpet_off
+        )
+        if word is None and not boots:
+            print(f"[ktest] FAIL: {args.shard} runs no boot on {env.arch}", file=sys.stderr)
+            return 1
+        rc = 0 if word is None else main_boot(env, word)
     if rc:
         return rc
     for boot in PROOF_BOOTS:

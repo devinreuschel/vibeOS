@@ -18,6 +18,7 @@ use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(target_arch = "x86_64")]
 use vibeos::desc::InterruptFrame;
 use vibeos::fmt_util::{self, StackBuf};
 use vibeos::irq::stop::{CrashRegs, StopHow};
@@ -31,8 +32,6 @@ use vibeos::symtab;
 
 use crate::per_cpu_init;
 use crate::serial::raw;
-#[cfg(target_arch = "x86_64")]
-use crate::x86;
 
 unsafe extern "C" {
     static __kernel_vma_start: u8;
@@ -79,9 +78,9 @@ static BOOT_STACK_HI: AtomicU64 = AtomicU64::new(0);
 pub fn note_boot_stack(rsp: u64) {
     let hi = rsp.checked_add(0xFFF).map_or(rsp, |v| v & !0xFFF);
     let lo = hi.saturating_sub(crate::boot::LIMINE_STACK_BYTES);
-    // Relaxed: written once on the BSP before any other CPU runs; the
-    // dump's reads are ordered by the stop that precedes them.
+    // Relaxed: written once on the BSP before any other CPU runs; pairs with nothing.
     BOOT_STACK_LO.store(lo, Ordering::Relaxed);
+    // Relaxed: written once on the BSP before any other CPU runs; pairs with nothing.
     BOOT_STACK_HI.store(hi, Ordering::Relaxed);
 }
 
@@ -111,6 +110,7 @@ pub(crate) fn known_stacks(out: &mut [StackRange; 8]) -> usize {
             push(StackRange::new(st.base().as_u64(), st.top().as_u64()));
         }
     }
+    // Relaxed: the stop before the dump orders the BSP's stores; pairs with nothing.
     push(StackRange::new(
         BOOT_STACK_LO.load(Ordering::Relaxed),
         BOOT_STACK_HI.load(Ordering::Relaxed),
@@ -231,7 +231,6 @@ fn hex(w: &mut StackBuf<'_>, n: u64) {
     w.push_bytes(fmt_util::write_hex(n, &mut b));
 }
 
-#[cfg(target_arch = "x86_64")]
 fn dump_regs(rbp: u64, rsp: u64, rflags: u64, rip: u64) {
     line(|w| {
         w.push_bytes(b"vibeOS: regs: rbp=0x");
@@ -243,7 +242,7 @@ fn dump_regs(rbp: u64, rsp: u64, rflags: u64, rip: u64) {
         w.push_bytes(b" rip=0x");
         hex(w, rip);
         w.push_bytes(b" cr3=0x");
-        hex(w, x86::read_cr3());
+        hex(w, crate::arch::cpu::read_cr3());
     });
 }
 
@@ -313,7 +312,6 @@ fn dump_backtrace(rip: u64, rbp: u64) {
 /// or end the guest on it, then the halt.
 fn finish() -> ! {
     raw::write_owner(b"vibeOS: panic: halted");
-    #[cfg(target_arch = "x86_64")]
     crate::log::pvpanic_init::signal(vibeos::log::pvpanic::Step::Halt);
     crate::arch::current::halt();
 }
@@ -337,12 +335,11 @@ fn panic(info: &PanicInfo) -> ! {
     // IF=0 before anything else: a second panicking CPU must reach
     // `begin_dump` without taking an interrupt (DESIGN §2.5 step 1).
     crate::arch::current::irq_disable();
-    #[cfg(target_arch = "x86_64")]
     let (rip, rbp, rsp, rflags) = (
-        x86::read_rip(),
-        x86::read_rbp(),
-        x86::read_rsp(),
-        x86::rflags(),
+        crate::arch::current::instruction_pointer(),
+        crate::arch::current::frame_pointer(),
+        crate::arch::current::stack_pointer(),
+        crate::arch::current::irq_flags(),
     );
     let regs = CrashRegs {
         rip,

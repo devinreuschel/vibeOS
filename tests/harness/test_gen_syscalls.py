@@ -21,6 +21,7 @@ from scripts.gen_syscalls import (
     ROOT,
     SYSCALL_MD,
     TABLE,
+    USER_AARCH64_OUT,
     USER_ERRNO_OUT,
     USER_OUT,
     X86_OUT,
@@ -161,7 +162,10 @@ class GenerateTest(unittest.TestCase):
 
     def test_emits_every_output(self) -> None:
         self.assertEqual(set(self.out), {e.path for e in EMITTERS})
-        self.assertEqual(set(self.out), {KERNEL_OUT, X86_OUT, USER_OUT, SYSCALL_MD, USER_ERRNO_OUT})
+        self.assertEqual(
+            set(self.out),
+            {KERNEL_OUT, X86_OUT, USER_OUT, USER_AARCH64_OUT, SYSCALL_MD, USER_ERRNO_OUT},
+        )
         kernel = self.out[KERNEL_OUT]
         x86 = self.out[X86_OUT]
         self.assertTrue(kernel.startswith("// @generated"))
@@ -538,7 +542,7 @@ class ValidationTest(unittest.TestCase):
 
     def test_script_docstring_names_its_outputs(self) -> None:
         doc = gen_syscalls.__doc__ or ""
-        for p in (KERNEL_OUT, X86_OUT, USER_OUT, USER_ERRNO_OUT, KERROR):
+        for p in (KERNEL_OUT, X86_OUT, USER_OUT, USER_AARCH64_OUT, USER_ERRNO_OUT, KERROR):
             self.assertIn(str(p), doc)
         self.assertTrue(re.search(r"--check", doc))
 

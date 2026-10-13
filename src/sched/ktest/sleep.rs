@@ -206,16 +206,20 @@ pub(crate) fn in_hard_irq_top_bottom() -> Outcome {
     BOTTOM_HARD.store(0, Ordering::Release);
     let g = crate::arch::current::InterruptGuard::enter();
     let me = thread_init::current_cpu();
-    let v = match irq_init::allocate_vector(me) {
+    let irq = match irq_init::allocate(me) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
-    if irq_init::set_threaded(v, Some(top_half), bottom_half, None).is_err() {
-        let _ = irq_init::free_vector(v);
+    if irq_init::set_threaded(irq, Some(top_half), bottom_half, None).is_err() {
+        let _ = irq_init::free_vector(irq);
         return Outcome::Fail("set_threaded");
     }
+    let Some(v) = irq_init::vector(irq) else {
+        let _ = irq_init::free_vector(irq);
+        return Outcome::Fail("no hwirq");
+    };
     if apic_init::send_ipi_cpu(me, v).is_err() {
-        let _ = irq_init::free_vector(v);
+        let _ = irq_init::free_vector(irq);
         return Outcome::Fail("send_ipi_cpu");
     }
     drop(g);
@@ -223,7 +227,7 @@ pub(crate) fn in_hard_irq_top_bottom() -> Outcome {
         || TOP_HARD.load(Ordering::Acquire) != 0 && BOTTOM_HARD.load(Ordering::Acquire) != 0,
         500_000_000,
     );
-    if irq_init::free_vector(v).is_err() {
+    if irq_init::free_vector(irq).is_err() {
         return Outcome::Fail("free_vector");
     }
     if !done {

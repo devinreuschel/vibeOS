@@ -47,6 +47,10 @@ pub enum Event {
     SetRoot(u64),
     FlushPage(u64),
     FlushAll,
+    /// Break-before-make maintenance after the invalid store, for this VA.
+    BbmBreak(u64),
+    /// Barriers after the new store of break-before-make.
+    BbmMake,
     Wmb,
     Rmb,
     Mb,
@@ -235,7 +239,7 @@ static NEXT_CPU: AtomicU32 = AtomicU32::new(0);
 /// A new thread's state: the defaults, on a CPU id no other thread started
 /// with.
 fn thread_state() -> State {
-    // Relaxed: the counter only hands out distinct ids; it orders nothing.
+    // Relaxed: the counter only hands out distinct ids; pairs with nothing.
     let id = NEXT_CPU.fetch_add(1, Ordering::Relaxed);
     State {
         cpu_id: id,
@@ -312,16 +316,10 @@ pub fn take_events() -> EventLog {
     with(|s| core::mem::replace(&mut s.log, EventLog::EMPTY))
 }
 
-/// Revision 0; a table address at or above the direct map is translated,
-/// any other is taken as physical.
 impl BootHandover for Arch {
     type Info = Boot;
-    const BASE_REVISION: u64 = 0;
     fn info() -> &'static Boot {
         &BOOT
-    }
-    fn table_phys(raw: u64, hhdm_offset: u64) -> u64 {
-        raw.checked_sub(hhdm_offset).unwrap_or(raw)
     }
 }
 
@@ -383,11 +381,25 @@ impl PageTable for Arch {
     const LEVELS: u8 = paging::LEVELS;
     const ENTRIES: usize = paging::PTES_PER_TABLE;
     const KERNEL_ROOT_FIRST: usize = paging::KERNEL_PML4_FIRST;
+    const KERNEL_VA_START: u64 = 0xFFFF_8000_0000_0000;
+    const KERNEL_UXN: u64 = 0;
     fn index(va: VirtAddr, level: u8) -> usize {
         paging::index(va, level)
     }
-    fn make_entry(pa: PhysAddr, flags: PageFlags) -> u64 {
+    fn make_entry(_va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> u64 {
         paging::make_pte(pa, flags)
+    }
+    fn make_table(pa: PhysAddr) -> u64 {
+        paging::make_pte(
+            pa,
+            PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER),
+        )
+    }
+    fn va_ok(va: u64) -> bool {
+        crate::paging::is_canonical(va)
+    }
+    fn is_kernel_va(va: VirtAddr) -> bool {
+        va.as_u64() >= Self::KERNEL_VA_START
     }
     fn entry_phys(entry: u64) -> PhysAddr {
         paging::pte_phys(entry)
@@ -397,6 +409,9 @@ impl PageTable for Arch {
     }
     fn root() -> PhysAddr {
         with(|s| PhysAddr::new(s.root))
+    }
+    fn user_root() -> PhysAddr {
+        Self::root()
     }
     unsafe fn set_root(root: PhysAddr) {
         with(|s| {
@@ -409,6 +424,12 @@ impl PageTable for Arch {
     }
     fn flush_local_all() {
         record(Event::FlushAll);
+    }
+    fn bbm_break(va: VirtAddr) {
+        record(Event::BbmBreak(va.as_u64()));
+    }
+    fn bbm_make() {
+        record(Event::BbmMake);
     }
 }
 

@@ -511,7 +511,11 @@ second boot alone. SMP stays before console; the old
 table that listed console as step 15 before SMP was drift and is gone.
 The harness pins `<mode>` for the QEMU config: TCG (CI, `make test`) cannot
 advertise `CPUID.01H:ECX[24]`, so `-cpu max` expects `periodic`; `-machine pc,hpet=off`
-expects `pit`; KVM `-cpu max` expects `tsc-deadline`. Default QEMU also requires
+expects `pit`; KVM `-cpu max` expects `tsc-deadline`. On aarch64, `virtualization=on`
+in `VIBEOS_MACHINE` pins `<el>` to `2 vhe` and `<timer>` to `el2 hyp-virt`, or to
+`el2 hyp-phys` when the machine type is `virt-8.2`; `check_el2_boot` then requires
+one `el: 2 vhe` line per CPU. Without that property both placeholders stay open.
+Default QEMU also requires
 the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit` asserts
 `calibrated pit` instead. `make test-lapic-fallback`
 (`-cpu qemu64,-tsc-deadline`) runs in-guest tests on the periodic path.
@@ -551,12 +555,16 @@ With `-smp N`, additionally:
 - `vibeOS: sched: cpu<i> ready` for every `i` in `0..N`
 - `vibeOS: time: lapic_timer ok (<mode>)` naming the selected timer path
   (`tsc-deadline`, `periodic`, or `pit`) rather than inferring it
+- with `virtualization=on`, `vibeOS: el: 2 vhe` once per CPU, and
+  `vibeOS: time: timer el2 hyp-virt` (`el2 hyp-phys` on `virt-8.2`)
 
 e2e also reads the boot log's memory diagnostics, the registry's `pmm:` and `meminfo:` rows, which
 print before `sched: cpu0 ready`, in every production mode (default, `EXPECT_PIT`, highmem, and UEFI;
 `check_meminfo` in `run_e2e.py`). Each `meminfo:` line (told apart by its text up to the first digit) and each `pmm:` line appears
 once; the `meminfo:` frame total equals the `pmm: <n> total` line's; free is at most the
 `pmm: <n> free 4KiB frames` count; used is total minus free; and heap use is at most heap capacity.
+A boot with `VIBEOS_MEM=9G` (`make test-e2e-highmem`) also requires that frame total times 4096
+to be above 8 GiB, so RAM above the old physmap cap is in the buddy (ROADMAP §11.2).
 
 Two diagnostics come from the kernel command line (BOOT.md §3.2): the kernel prints
 `vibeOS: boot: cmdline: <text>` once, after `limine: rev <n> ok` and before `pmm:` (ROADMAP §10.2),
@@ -821,13 +829,13 @@ number of images checked, and the trace's write and flush counts.
 | e2e | `-cdrom build/vibeos.iso -m 128M -smp 2 -cpu max -no-reboot -display none -serial stdio -monitor unix:...,server=on,wait=off -qmp unix:...,server=on,wait=off -S -accel tcg -device pvpanic -device vmcoreinfo -action panic=pause` (`harness.qemu_argv`; the two forensics devices, `FORENSICS_DEVICES`, are on every x86_64 boot: `vmcoreinfo` takes the kernel's note, [VMCOREINFO.md](VMCOREINFO.md); every harness boot starts halted, `-S`, until `cont` on its QMP socket, and `-action panic=pause`, `PANIC_ACTION`, keeps a panicked guest up for its core, §8.3), and `-fw_cfg name=opt/vibeos/cmdline,string=<words>` when the boot has command-line words (`VIBEOS_CMDLINE`, then `vibeos.ktest=`; a comma doubled) |
 | UEFI (`VIBEOS_BIOS=uefi`, `make test-e2e-uefi`) | as e2e plus `-drive if=pflash,format=raw,unit=0,readonly=on,file=<code>` and `-drive if=pflash,format=raw,unit=1,file=<copy>`, where `<copy>` is a fresh copy of the pair's variable-store template made for each QEMU start (`harness.new_vars_copy`, in one per-process temporary directory that exit removes), and `-boot order=d,menu=off` with `-fw_cfg` entries turning off OVMF's PXE and setup (`harness.OVMF_BOOT_ARGS`). A comma in a path is doubled. Never `-bios` |
 | `make run`, `make run-panic`, `make debug` | e2e's argv, so with `-device pvpanic` and `-device vmcoreinfo`, from `tests/harness/run_interactive.py` (`run`, `panic`, `debug`), which builds it with `env_config` and `harness.qemu_argv` and adds no `-monitor`, `-qmp` or `-S`: `make run` opens a display window instead of `-display none`, `make run-panic` boots `build/vibeos-panic.iso` with `-display none`, and `make debug` is `make run` plus `-s -S`. COM1 is the terminal (`-serial stdio`), and the launcher ignores `SIGINT` while QEMU runs |
-| ktest | as e2e (so with `-device pvpanic` and `-device vmcoreinfo`) plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu` (planned, ROADMAP §11.7: `-device edu,dma_mask=0xFFFFFFFF` on both architectures), `-device virtio-rng-pci,disable-legacy=on`, a second virtio-rng at `00:1d.0` (`-device virtio-rng-pci,disable-legacy=on,addr=0x1d`, which the driver refuses since one is bound: `rng_second_probe_refused`), a virtio-blk at `00:1e.0` on a 1 MiB `null-co` node (`-blockdev driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on` + `-device virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e`), whose probe a `kernel_tests` hook fails after `QENABLE` at every boot (`virtio_probe_fail_quiesces`), two virtio-blk disks (`-drive file=…,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`, then the same for a blank 1 MiB `vibehd1`, which binds as `vdb`; the proof boots take only the first, `harness.ktest_devices(..., extra_disks=...)`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`); neither forensics device is PCI. After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
+| ktest | as e2e (so with `-device pvpanic` and `-device vmcoreinfo`) plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04` on x86_64, `-device e1000e`, `-device edu,dma_mask=0xFFFFFFFF`, `-device virtio-rng-pci,disable-legacy=on`, a second virtio-rng at `00:1d.0` (`-device virtio-rng-pci,disable-legacy=on,addr=0x1d`, which the driver refuses since one is bound: `rng_second_probe_refused`), a virtio-blk at `00:1e.0` on a 1 MiB `null-co` node (`-blockdev driver=null-co,node-name=probeblk,size=1048576,read-zeroes=on` + `-device virtio-blk-pci,drive=probeblk,disable-legacy=on,addr=0x1e`), whose probe a `kernel_tests` hook fails after `QENABLE` at every boot (`virtio_probe_fail_quiesces`), two virtio-blk disks (`-drive file=…,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`, then the same for a blank 1 MiB `vibehd1`, which binds as `vdb`; the proof boots take only the first, `harness.ktest_devices(..., extra_disks=...)`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`); neither forensics device is PCI. After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
 | vibefs crash | as e2e plus `-boot order=d` and the volatile-cache device: `-drive file.driver=nbd,file.server.type=unix,file.server.path=<sock>,format=raw,if=none,id=vibehd,cache=<writeback\|none\|writethrough>` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>,write-cache=on` (`harness.virtio_blk_args(..., nbd=True)`). QEMU 8.2 accepts the `file.driver=nbd` form; `cache=unsafe` is refused, since it drops flushes |
 | ktest, PIT tick (`make test-kernel`'s hpet=off boot) | as ktest plus `-machine pc,hpet=off` and `-cpu <VIBEOS_QEMU_CPU>,-tsc-deadline`, with `vibeos.ktest=` set to `run_ktest.HPET_OFF_KTEST` (`pit_tick_rate` among them) |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` (`LAPIC_FALLBACK_CPU` in the Makefile) |
 | KVM leg (nightly `kvm` job, §8.6) | `-accel kvm -cpu max,+invtsc` through `VIBEOS_QEMU_ACCEL=kvm` and `VIBEOS_QEMU_CPU=max,+invtsc`, since QEMU leaves invariant TSC out of its default migratable vCPU even under KVM; `/dev/kvm` is opened to the runner user by GitHub's documented udev rule; the LAPIC fallback runs on `qemu64,+invtsc,-tsc-deadline` (`make test-lapic-fallback LAPIC_FALLBACK_CPU=…`), so the invariant-TSC check still applies and the mode is `periodic` |
 | SMP stress | `-smp 4` |
-| aarch64 (`ARCH=aarch64`) | Planned (ROADMAP §11.7): `qemu-system-aarch64 -machine virt,acpi=off,gic-version=3`, with `-cpu max` under TCG or `-cpu host` under HVF (`virt` defaults to the 32-bit `cortex-a15`); the §10.2 probe's firmware code read-only on pflash unit 0 and a per-run copy of its variable-store template on unit 1; the ISO on a CD-ROM, `-device virtio-scsi-pci -device scsi-cd,drive=cd0 -drive if=none,id=cd0,media=cdrom,readonly=on,file=<iso>`, so the ktest disks are the only virtio-blk devices; and `-device ramfb`, `virtio-keyboard-pci`, `virtio-tablet-pci`, `pvpanic-pci`, and `vmcoreinfo` |
+| aarch64 (`ARCH=aarch64`) | `qemu-system-aarch64 -machine virt,acpi=off,gic-version=<VIBEOS_GIC>` (default 3), `-global virtio-mmio.force-legacy=off` (QEMU 8.2 `virt` otherwise builds Version=1 windows), with `-cpu neoverse-v1` under TCG (AAVMF 2025.11 takes a synchronous exception at 0x47EFE008 on `-cpu max` and on `max,lpa2=off`, because QEMU leaves PARange at 52 bits, EDK2 #11962; an explicit `VIBEOS_QEMU_CPU`, including `max`, is not remapped) or `-cpu host` under HVF (`virt` defaults to the 32-bit `cortex-a15`); the §10.2 probe's firmware code read-only on pflash unit 0 and a per-run copy of its variable-store template on unit 1; `harness.OVMF_BOOT_ARGS` (`-boot order=d,menu=off` and the Tianocore PXE/setup-off fw_cfg entries), so AAVMF BDS does not PXE-stall; the ISO on a virtio-scsi CD-ROM, `-device virtio-scsi-pci,id=scsi0 -drive if=none,id=cd0,format=raw,media=cdrom,readonly=on,file=<iso> -device scsi-cd,drive=cd0,bootindex=0`, so the ktest disks are the only virtio-blk devices; and `-device ramfb`, `virtio-keyboard-pci`, `virtio-tablet-pci`, `pvpanic-pci`, and `vmcoreinfo`. Pass is PSCI `SYSTEM_OFF` (QEMU exits 0); there is no `isa-debug-exit` |
 | Interrupt debugging | `-d int,cpu_reset`, plus `-machine q35` when chipset behavior matters |
 
 TCG is the per-push accelerator: the harness and `make test` default to `-accel tcg`, and KVM runs
@@ -851,12 +859,14 @@ sets none of them: `make run`, `make run-panic` and `make debug` honour the same
 | Variable | Default | Who honours it |
 |----------|---------|----------------|
 | `VIBEOS_ISO` | per driver, from `harness.default_iso(variant)` (`build/vibeos.iso`, `build/vibeos-ktest.iso`, `build/vibeos-vibefs-crash.iso`) | all drivers; `run_interactive` |
-| `VIBEOS_SMP` | `2` | all drivers; `run_interactive` |
+| `VIBEOS_ARCH` | `x86_64` | all drivers (`qemu_argv`, `env_config`); `aarch64` is ROADMAP §11.3 / §11.7 |
+| `VIBEOS_GIC` | `3` on aarch64 | `qemu_argv` (`gic-version=2` or `3`) |
+| `VIBEOS_SMP` | `2` (`1` on aarch64) | all drivers; `run_interactive` |
 | `VIBEOS_QEMU_CPU` | `max` | all drivers; `run_interactive` |
 | `VIBEOS_MEM` | `128M` | all drivers; `run_interactive` |
 | `VIBEOS_BIOS` | unset or `seabios`: SeaBIOS; `uefi`: the x86_64 firmware pair the probe finds, on pflash; anything else fails and names `VIBEOS_FW_X86_64` | all drivers; `run_interactive` |
 | `VIBEOS_FW_X86_64` | probed (the firmware table below) | all drivers and `run_interactive` under `VIBEOS_BIOS=uefi`; `make test-e2e-uefi`; `setup.sh` |
-| `VIBEOS_FW_AARCH64` | probed (the firmware table below) | `run_interactive.py firmware aarch64` and `setup.sh`; planned (ROADMAP §11.7): the aarch64 QEMU line |
+| `VIBEOS_FW_AARCH64` | probed (the firmware table below) | aarch64 boots (always UEFI); `run_interactive.py firmware aarch64` and `setup.sh` |
 | `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all drivers; `run_interactive` |
 | `VIBEOS_TIMEOUT` | `60` in every driver: the §8.2 boot allowance: the whole of an e2e, ps2 or crash boot, and a ktest boot before `begin` and after `end` | all drivers; `run_interactive` only when set |
 | `VIBEOS_QEMU_EXTRA` | empty | all drivers; `run_interactive` |
@@ -877,7 +887,7 @@ sets none of them: `make run`, `make run-panic` and `make debug` honour the same
 | `VIBEOS_NBD_CACHE` | `nbd-cache` | `run_vibefs_crash` |
 | `VIBEOS_VIBEFS_CAT` | `vibefs-cat` | `run_vibefs_crash` |
 | `VIBEOS_PREBUILT` | unset | the Makefile: `1` makes `make test-*` use the files `make prebuilt` packed (`build/prebuilt.tar`, unpacked in place) and build nothing, as a CI tier job does (§8.6) |
-| `VIBEOS_QEMU_VERSION` | unset; the QEMU version a CI job pins | `qemu_argv`, only under `CI` on Linux: it fails before the first boot when `qemu-system-x86_64 --version` differs, or when the variable is unset (§8.6, Runners) |
+| `VIBEOS_QEMU_VERSION` | unset; the QEMU version a CI job pins | `qemu_argv`, only under `CI` on Linux: it fails before the first boot when that arch's `qemu-system-* --version` differs, or when the variable is unset (§8.6, Runners) |
 
 UEFI firmware is found by one probe, `harness.probe_firmware(arch)`, which reads one table of
 (code image, variable-store template) pairs per architecture, `harness.FIRMWARE_TABLE`, in this
@@ -887,6 +897,7 @@ order (ROADMAP §10.2, I1, F079):
 |--------------|------------|-------------------------|-------------|
 | x86_64 | `OVMF_CODE_4M.fd` | `OVMF_VARS_4M.fd` | `/usr/share/OVMF` (Ubuntu's `ovmf`) |
 | x86_64 | `edk2-x86_64-code.fd` | `edk2-i386-vars.fd` | `<prefix>/share/qemu` (Homebrew's `qemu`) |
+| aarch64 | `AAVMF_CODE.no-secboot.fd` | `AAVMF_VARS.fd` | `/usr/share/AAVMF` (Ubuntu's `qemu-efi-aarch64`) |
 | aarch64 | `AAVMF_CODE.fd` | `AAVMF_VARS.fd` | `/usr/share/AAVMF` (Ubuntu's `qemu-efi-aarch64`) |
 | aarch64 | `edk2-aarch64-code.fd` | `edk2-arm-vars.fd` | `<prefix>/share/qemu` (Homebrew's `qemu`) |
 
@@ -896,7 +907,9 @@ Homebrew ships no vars file named for either 64-bit architecture, so its 32-bit 
 fails and names both paths, and never falls through to a later row. `VIBEOS_FW_X86_64` and
 `VIBEOS_FW_AARCH64` override the probe with a code image, whose template is its row's in the same
 directory; a missing file, or an image no row of that architecture names, fails. Secure-boot builds
-need SMM and `q35`, so the table leaves them out. The code image boots read-only from pflash, so a
+need SMM and `q35` on x86_64, and on aarch64 they refuse unsigned Limine, so the table prefers
+`AAVMF_CODE.no-secboot.fd` (Ubuntu 26.04's `AAVMF_CODE.fd` may be the Secure Boot image) and leaves
+the `.secboot` / `.ms` images out. The code image boots read-only from pflash, so a
 code-only image boots whatever its size (Homebrew's `edk2-x86_64-code.fd` is 0x37C000 bytes, which
 `-bios` refuses because it is no multiple of 64 KiB).
 
@@ -922,14 +935,15 @@ ELFs carry no symbols, so gdb warns that they add none.
 `make help` prints the live inventory. Do not hand-maintain a second list here.
 
 `make check` is the fast local gate (rustfmt `--check`; clippy `-D warnings` on `vibeos-core` and hostlib
-for the host, on `vibeos-core` for `x86_64-unknown-none`, and on the kernel with its default features; host
+for the host, on `vibeos-core` for `$(TARGET)`, and on the kernel for `$(TARGET)` with its default features; host
 unit tests, the `release_assert_` host tests again with debug assertions off, harness unit tests,
 ruff and mypy; a production-feature link under the `hookcheck`
 profile, whose ELF `scripts/check_test_hooks.py` checks for test-only symbols, Q2's `nm` check; then every
 `scripts/check_*.py`; then `cargo deny check licenses bans sources` against `deny.toml`, ROADMAP §10.9's
 dependency policy; and the `tests/fuzz` build and replay (§8.1)). Right after the `vibeos-core` clippy lines it builds `vibeos-core` with its MSRV
-(`make check-msrv`: `cargo +<MSRV> check` for the host with `std` and for `x86_64-unknown-none`, under
-`RUSTFLAGS=--cap-lints=warn`, so it proves only that the crate builds). A missing `ruff`, `mypy`, `cargo-deny`,
+(`make check-msrv`: `cargo +<MSRV> check` for the host with `std` and for `$(TARGET)`, under
+`RUSTFLAGS=--cap-lints=warn`, so it proves only that the crate builds). `./setup.sh` installs
+`x86_64-unknown-none` and `aarch64-unknown-none-softfloat` for that toolchain. A missing `ruff`, `mypy`, `cargo-deny`,
 `fsck.fat` or MSRV toolchain fails it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`, which skips that check and
 prints it. CI runs it as the `check` job before QEMU (DESIGN §8.6).
 `make test-forensics` (`tests/harness/run_forensics.py`, in `make test`) tests the core tool on
@@ -996,10 +1010,15 @@ dispatched, or run on a tag. A `pull_request` run never counts as proof of a com
 **CI budget.** Every push to `main` and every pull-request update runs `check` and, alongside it,
 one `build` job per architecture (x86_64 now; from Phase 11 aarch64 on the arm64 runner, which also
 runs `make test-unit` and the hostlib tests natively, §11.4's aarch64 switch roundtrip among them).
-`build` runs `make prebuilt`, which builds every ISO variant and the host `mkfs`/`fsck`/`nbd-cache`/
+`build` runs `make prebuilt`, which builds the ISO variants that architecture's tiers
+run (x86_64: every ISO; aarch64: default and ktest) and the host `mkfs`/`fsck`/`nbd-cache`/
 `vibefs-cat` tools once and packs them, with the host triple they were built for, into
-`build/prebuilt.tar`, uploaded as `prebuilt-<arch>`. A matrix of `tier` jobs per architecture
-(`needs: [check, build]`, `fail-fast: false`, TCG) downloads it and runs the same `make test-*`
+`build/prebuilt.tar`, uploaded as `prebuilt-<arch>`. A push to `main` also uploads the
+production ISO as `vibeos-<arch>.iso` (7 days; the file inside stays `build/vibeos.iso`).
+`release.yml` publishes `dist/vibeos.iso` from its own build and does not download this
+artifact. `scripts/check_workflows.py` (`rule_matrix_artifact_names`) fails when two legs
+of a matrix job upload the same artifact name. A matrix of `tier` jobs per architecture
+(`needs: [check, build]`, `fail-fast: false`, TCG) downloads `prebuilt-<arch>` and runs the same `make test-*`
 targets with `VIBEOS_PREBUILT=1`, which defines no ISO or host-tool rule, so a tier builds nothing
 and a missing file fails with `No rule to make target`: the Makefile stays the one definition of
 each tier. Tiers are grouped to about 40 s of QEMU each, a group over 60 s split at target
@@ -1057,6 +1076,40 @@ one QEMU at a time), until a `ci` run measures them:
 | x86_64 | vibefs-crash-2 | `test-vibefs-crash-2` | 25 |
 | x86_64 | vibefs-crash-plants | `test-vibefs-crash-plants` | 15 |
 | x86_64 | forensics | `test-forensics` | 60 |
+| aarch64 | e2e-1 | `test-e2e` | 40 |
+| aarch64 | kernel-1 | `test-kernel-1` | 40 |
+| aarch64 | kernel-2 | `test-kernel-2` | 40 |
+| aarch64 | kernel-3 | `test-kernel-3` | 40 |
+| aarch64 | kernel-4 | `test-kernel-4` | 24 |
+| aarch64 | kernel-5 | `test-kernel-5` | 24 |
+| aarch64 | kernel-6 | `test-kernel-6` | 24 |
+| aarch64 | kernel-7 | `test-kernel-7` | 24 |
+| aarch64 | kernel-8 | `test-kernel-8` | 36 |
+| aarch64 | kernel-9 | `test-kernel-9` | 24 |
+| aarch64 | kernel-smp4-1 | `test-kernel-smp4-1` | 40 |
+| aarch64 | kernel-smp4-2 | `test-kernel-smp4-2` | 40 |
+| aarch64 | kernel-smp4-3 | `test-kernel-smp4-3` | 40 |
+| aarch64 | kernel-smp4-4 | `test-kernel-smp4-4` | 24 |
+| aarch64 | kernel-smp4-5 | `test-kernel-smp4-5` | 24 |
+| aarch64 | kernel-smp4-6 | `test-kernel-smp4-6` | 36 |
+| aarch64 | kernel-smp4-7 | `test-kernel-smp4-7` | 24 |
+| aarch64 | kernel-smp4-8 | `test-kernel-smp4-8` | 24 |
+| aarch64 | gic-fallback-1 | `test-gic-fallback-1` | 40 |
+| aarch64 | gic-fallback-2 | `test-gic-fallback-2` | 40 |
+| aarch64 | gic-fallback-3 | `test-gic-fallback-3` | 40 |
+| aarch64 | gic-fallback-4 | `test-gic-fallback-4` | 24 |
+| aarch64 | gic-fallback-5 | `test-gic-fallback-5` | 24 |
+| aarch64 | gic-fallback-6 | `test-gic-fallback-6` | 24 |
+| aarch64 | gic-fallback-7 | `test-gic-fallback-7` | 24 |
+| aarch64 | gic-fallback-8 | `test-gic-fallback-8` | 36 |
+| aarch64 | gic-fallback-9 | `test-gic-fallback-9` | 24 |
+
+aarch64's portable proof boots (`select`, `repeat`, `deadline-trip`, `planted`,
+`vblk-readonly`, `vblk-bad-sector`, and `stalled-ap` at `-smp 4`) are `test-kernel-7` to `9`,
+`test-kernel-smp4-6` to `8`, and the `-smp 2` set again as `test-gic-fallback-7` to `9`.
+`aff-off` stays on `test-kernel-smp4-5`. `hpet-off` and `fat` stay on x86: the FAT boot sends a
+self-IPI through `apic_init::send_ipi_cpu`, which does not deliver on aarch64. Those rows' figures
+are one to three boots at the x86 proof-boot cost, about 12 s each, until a `ci` run measures them.
 
 `test-e2e-init-fault` boots twice (`init_fault`, then `init_no_sh`, about 10 s more under TCG), so
 e2e-2's figure, measured before the second boot, is low by that much.
@@ -1084,27 +1137,29 @@ which the scheduled jobs and the gate run, still rerun the whole registry there.
 | Job | When | What |
 |---|---|---|
 | `check` | push / PR | Installs `x86_64-unknown-none`, the MSRV toolchain with the host and `x86_64-unknown-none` targets, and cargo-deny's pinned release archive, checked against the SHA-256 the step records. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff and mypy at pinned versions, the MSRV build, `scripts/check_*.py`, `cargo deny check licenses bans sources`); on a pull request, `scripts/check_gate_inputs.py` against its merge base; then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines <floor>`, the floor in `tests/gates/inputs.toml`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
-| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, and each of `panic_test`, `gp_test`, `panic_nest_test`, `panic_stop_test` and `hang_test`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
+| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (x86_64: `kernel_tests`, `vibefs_crash`, and each of `panic_test`, `gp_test`, `panic_nest_test`, `panic_stop_test` and `hang_test`, plus `kernel_shell`; aarch64: default, `kernel_tests`, `kernel_shell`, and `make ARCH=aarch64 check-msrv`) (the default set also runs in `check` on x86_64, and that recipe passes `--target $(TARGET)`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos-<arch>.iso` (7 days). |
 | `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 2, so the e2e tiers run two QEMUs at a time on the runner's 4 CPUs; a tier of one target runs one). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
-| `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |
+| `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `gatelib.pr_diff_base` (`BASE_SHA`, or `origin/$GITHUB_BASE_REF` when that is not `main`, or `origin/main`) and skips them when no such ref exists. |
 | `ci-pass` | every per-push run | `needs:` every other job, `if: always()`; fails unless each succeeded, a job gated on the event being allowed to skip (`scripts/check_gate_inputs.py --ci-pass`, which the job runs with `NEEDS: ${{ toJSON(needs) }}` and `SKIPPABLE: ticks`; its static rules fail when the job misses one, lacks `if: always()`, or lists in `SKIPPABLE` a job whose `if:` does not test `github.event_name`) |
 | `smp-stress` `stress` | weekly Monday 06:00 UTC + dispatch, `sched-lane-4` | `make test-smp-stress`: the in-guest tier at `-smp 4`, under the §8.2 per-run deadlines and no whole-run timeout. It and both `repeat-kernel` jobs upload a failed run's `build/cores/` as `cores-x86_64-<job>` |
+| `smp-stress` `stress-aarch64` | same workflow, `sched-lane-4` | `ARCH=aarch64 make test-smp-stress` on `ubuntu-26.04-arm`: the in-guest tier at `-smp 4`, then `weak_order_probe` in its own boot (`VIBEOS_KTEST=weak_order_probe`); a failed run's `build/cores/` as `cores-aarch64-stress` |
 | `smp-stress` `repeat-kernel` | same workflow, `sched-lane-4` | `VIBEOS_KTEST_REPEAT=20 make test-kernel`: every in-guest test 20 times in one `-smp 2` boot |
 | `smp-stress` `repeat-kernel-smp4` | same workflow, `sched-lane-5` | `VIBEOS_KTEST_REPEAT=20 make test-kernel-smp4`: the same at `-smp 4` |
 | `nightly-canary` | same workflow, non-blocking, `sched-lane-5` | undated latest nightly, `make iso && make test-unit` |
 | `smp-stress` `fuzz` | same workflow, `sched-lane-5` | cargo-fuzz 0.13.2 (`cargo install cargo-fuzz --locked --version 0.13.2`, the version `make fuzz` requires), then `make fuzz FUZZ_TIME=900`: each of the 12 targets for 15 minutes (about 3 job-hours) on the pinned toolchain; on failure `build/fuzz/artifacts/` is uploaded as `fuzz-artifacts` |
-| `release` | `workflow_dispatch` from `main`, with the release tag | `build` (`contents: read`, `actions: read`) fails on any ref but `refs/heads/main`, then runs `main`'s own `scripts/release_check.py` from a sparse checkout, before any code of the tag's tree: the tag is annotated, its commit is on `main`, a `ci` run that proves that commit (`gatelib.run_proves_commit`, ROADMAP §10.9) concluded `success`, and one annotated `phase-<N>` tag sits on it. It checks that commit out with `persist-credentials: false`, restores no cache, and runs `setup.sh` (a fresh Limine clone and host tool), `make gate PHASE=<N>`, `make release-artifacts OUT=dist` (the release profile), the third-party notices and the ISO's xorriso version, `make CARGO_PROFILE=release` over `test-e2e`, `test-e2e-uefi`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem` and `test-e2e-strace`, and `cmp build/vibeos.iso dist/vibeos.iso`; it uploads the tag's commit as `commit-input` (CI history, below), writes the notes with `scripts/changelog_section.py`, and uploads `dist/` with its `SHA256SUMS` as `release`, and `results-x86_64-build` and `runner-build`. `publish` (`contents: write`, `needs: build`) checks out nothing and runs no repository script: `sha256sum -c SHA256SUMS`, then the pinned release action publishes `vibeos.iso` as the one image, with `vibeos.iso.xorriso-version` and `THIRD-PARTY-NOTICES.txt`, at the verified commit. `scripts/check_workflows.py` keeps that shape (`rule_release_*`): `workflow_dispatch` with a required `tag` as the one trigger, no cache, no workflow-wide write, no checkout, local action, or command outside `PRIVILEGED_COMMANDS` in a job with a write grant or the `release` environment, and `vibeos.iso` as the one published image, after `build`. The owner's steps are [RELEASING.md](RELEASING.md). From ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. From ROADMAP §18.7 the `sign` job is two key jobs, `sign-files` and `sign-manifest`, with an unprivileged `assemble` job between them, since images hold the signed kernels and Limine binaries and the manifest lists the images (ROADMAP §22.1). |
+| `release` | `workflow_dispatch` from `main`, with the release tag | `build` (`contents: read`, `actions: read`) fails on any ref but `refs/heads/main`, then runs `main`'s own `scripts/release_check.py` from a sparse checkout, before any code of the tag's tree: the tag is annotated, its commit is on `main`, a `ci` run that proves that commit (`gatelib.run_proves_commit`, ROADMAP §10.9) concluded `success`, and one annotated `phase-<N>` tag sits on it. It checks that commit out with `persist-credentials: false`, restores no cache, and runs `setup.sh` (a fresh Limine archive and host tool), `make gate PHASE=<N>`, `make release-artifacts OUT=dist` (the release profile), the third-party notices and the ISO's xorriso version, `make CARGO_PROFILE=release` over `test-e2e`, `test-e2e-uefi`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem` and `test-e2e-strace`, and `cmp build/vibeos.iso dist/vibeos.iso`; it uploads the tag's commit as `commit-input` (CI history, below), writes the notes with `scripts/changelog_section.py`, and uploads `dist/` with its `SHA256SUMS` as `release`, and `results-x86_64-build` and `runner-build`. `publish` (`contents: write`, `needs: build`) checks out nothing and runs no repository script: `sha256sum -c SHA256SUMS`, then the pinned release action publishes `vibeos.iso` as the one image, with `vibeos.iso.xorriso-version` and `THIRD-PARTY-NOTICES.txt`, at the verified commit. `scripts/check_workflows.py` keeps that shape (`rule_release_*`): `workflow_dispatch` with a required `tag` as the one trigger, no cache, no workflow-wide write, no checkout, local action, or command outside `PRIVILEGED_COMMANDS` in a job with a write grant or the `release` environment, and `vibeos.iso` as the one published image, after `build`. The owner's steps are [RELEASING.md](RELEASING.md). From ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. From ROADMAP §18.7 the `sign` job is two key jobs, `sign-files` and `sign-manifest`, with an unprivileged `assemble` job between them, since images hold the signed kernels and Limine binaries and the manifest lists the images (ROADMAP §22.1). |
 | `ci-history` | `ci`, `release`, `nightly`, `smp-stress` or `macos` run completes; daily 04:23 UTC; dispatch | `record` (on a completed run): the run's record on the `ci-history` branch. `daily` (schedule, dispatch): the packed size and the 500 MB rotation (`--rotate`), the backfill (`--backfill --limit 200`), then the completeness check, which turns it red on a missing record (CI history, below). Each job holds `contents: write` and `actions: read` only and checks out nothing. Both jobs run in `sched-lane-6`. |
 | `macos` | daily 04:23 UTC + dispatch, `sched-lane-9` | `macos-15` arm64 with Homebrew's `qemu`, `xorriso`, `dosfstools` and `zstd`; jobs `check` (cargo-deny 0.20.2 from `cargo install`, `make check`, then `./setup.sh --kani && make models`) and `test` (`make -k test-e2e-uefi test`, with Homebrew's edk2 firmware on pflash, `test-vibefs-crash-plants` among `test`'s tiers; a failed run's `build/cores/` as `cores-macos-test`); each uploads `build/results/`. |
 | `nightly` `kvm` | daily 03:17 UTC + dispatch, `sched-lane-0` | The x86_64 KVM leg (ROADMAP §10.1): `/dev/kvm` opened by GitHub's documented udev rule, job env `VIBEOS_QEMU_ACCEL=kvm` and `VIBEOS_QEMU_CPU=max,+invtsc`, then `make test-kernel`, `make test-e2e`, `VIBEOS_SMP=1 make test-e2e`, `make test-lapic-fallback LAPIC_FALLBACK_CPU=qemu64,+invtsc,-tsc-deadline`, `VIBEOS_KTEST='lifetime_*,exit_burst,fork_oom' VIBEOS_KTEST_REPEAT=20 make test-kernel-smp4` (exit-gate line §10.10), and `make test-irqoff` (the IF-off tracer's build variant, ROADMAP §10.2), each step run even after an earlier one failed. GitHub assigns each job's host CPU at random (AMD EPYC or Intel Xeon, several models), so `scripts/runner_info.py` writes the CPU model beside the guest's invariant-TSC bit to the job summary and to `build/runner.json`, uploaded as `runner-kvm`, which fills the CI-history record's `runner`; a regression threshold compares a number only with history from the same CPU model. `build/results/` is uploaded as `results-x86_64-kvm` (90 days), and a failed run's `build/cores/` as `cores-x86_64-kvm`. |
 | `nightly` `release-profile` | daily 03:17 UTC + dispatch, `sched-lane-1` | `make CARGO_PROFILE=release test-e2e test-kernel` under TCG, in its own job, since the release and dev ISOs share their names under `build/` (ROADMAP §10.2, F137; BOOT.md §3.5); the runner record and the uploads as `results-x86_64-release-profile` and `runner-release-profile`, and a failed run's `build/cores/` as `cores-x86_64-release-profile`. `release.yml` runs the production-image e2e targets on the release-profile image it publishes. |
 | `nightly` `repro` | daily 03:17 UTC + dispatch, `sched-lane-2` | `make repro`: every ISO variant built twice from one commit, with a different checkout path, `CARGO_HOME` and `RUSTUP_HOME`, compared byte for byte, and no host path in any output (`scripts/repro_build.py`); the builds run one after the other under `$RUNNER_TEMP`, the first one's `target/` and homes deleted before the second starts (DESIGN §3.6) |
-| `nightly` `models` | daily 03:17 UTC + dispatch, `sched-lane-2` | `./setup.sh --kani && make models`: every loom model and every Kani proof (ROADMAP §10.8); no QEMU |
+| `nightly` `models` | daily 03:17 UTC + dispatch, `sched-lane-2` | `./setup.sh --kani && make models`: every loom model and every Kani proof (ROADMAP §10.8); then `make litmus` (herd7 on `tests/litmus/`, ROADMAP §11.7). No guest. |
 | `nightly` `miri` | daily 03:17 UTC + dispatch, `sched-lane-2` | `make miri`: `vibeos-core`'s host tests under Miri (ROADMAP §10.8); `timeout-minutes` 330, since a serial run took over 2 hours on a 4-CPU host |
 | `nightly` `irqoff` | daily 03:17 UTC + dispatch, `sched-lane-3` | `make test-irqoff` under TCG: the in-guest tier and the e2e boot on the `irqoff` build variant, whose tracer fails a run on an IF=0 stretch over its budget (ROADMAP §10.2); a failed run's `build/cores/` as `cores-x86_64-irqoff` |
 | `nightly` `deny-advisories` | daily 03:17 UTC + dispatch, `sched-lane-3` | cargo-deny's pinned release archive, checked against its SHA-256 as in `check`, then `cargo deny check advisories`, which fetches the RustSec database and so stays out of `make check` |
 | `nightly` `provenance-fetch` | daily 03:17 UTC + dispatch, `sched-lane-3` | `python3 scripts/check_provenance.py --fetch`: each provenance header's upstream file at its pinned revision (DESIGN §1.5) |
 | `nightly` `budget` | daily 03:17 UTC + dispatch, `sched-lane-3` | `make ci-budget` (`ci_history.py --budget` and `--tiers`, Scheduled capacity below) against the `ci-history` branch, which it clones alone |
+| `nightly` `el2` | daily 03:17 UTC + dispatch, `sched-lane-1` | On `ubuntu-26.04-arm`, `ARCH=aarch64` `make test-e2e` twice: `-machine virt,acpi=off,gic-version=3,virtualization=on` then `virt-8.2` with the same, then `make test-kernel-smp4` on `virt` with `virtualization=on` (ROADMAP §11.7 EL2 boot). That registry includes `sysreg_compare` (ROADMAP §11.4). The harness requires `el: 2 vhe` on every CPU and `time: timer el2 hyp-virt` (`el2 hyp-phys` on `virt-8.2`). A failed run's `build/cores/` as `cores-aarch64-el2` |
 
 The `ticks` job (ROADMAP §10.9) runs after the jobs that run the tiers, the `tier` matrix, and reads
 the `build/results/` files they upload. A pull request run tests the merge of its head with its
@@ -1225,8 +1280,10 @@ the trigger, runner, tier, and upstream rules this section states where they app
 `read-all` or `write-all`, and on any grant other than `contents: read` or `none`, at the top or in a
 job, without a comment beside it naming its need (`rule_permissions`); and on a remote `uses:` not
 pinned as `@<40 hex>  # <version>`, where `./` paths and `docker://…@sha256:` pass
-(`rule_action_pins`). `tests/harness/test_workflows.py` holds a failing and a passing case for each
-clause and runs every rule on the real files.
+(`rule_action_pins`). A cache step whose `path` is `limine`, or whose `key` starts with
+`limine-`, fails unless that key names `setup.sh`'s `LIMINE_TAG` and `LIMINE_COMMIT`
+(`rule_limine_cache`), so a pin bump cannot restore an older clone. `tests/harness/test_workflows.py`
+holds a failing and a passing case for each clause and runs every rule on the real files.
 
 Rule; not yet enforced: a job that holds a signing key or a write token runs no code from the
 candidate commit, restores no cache, checks out nothing (ROADMAP §10.9's history job checks out
@@ -1239,21 +1296,23 @@ arm64 jobs), whose apt QEMU 10.2.1 (`1:10.2.1+ds-1ubuntu3`) meets every QEMU min
 `dma-remap` and Phase 25's GHES injection). A line that needs QEMU 11.1 or later builds that release
 from its tarball, checked by SHA-256 and cached by version; none does yet. Every job that installs
 `qemu-system-*` sets `VIBEOS_QEMU_VERSION` to the version it pins, and when `CI` is set on Linux,
-`harness.qemu_argv` runs `ensure_qemu_pinned`, which compares `qemu-system-x86_64 --version` with
-that pin before the first boot and fails on a mismatch or an unset pin, so an image update that
+`harness.qemu_argv` runs `ensure_qemu_pinned`, which compares that arch's `qemu-system-* --version`
+with that pin before the first boot and fails on a mismatch or an unset pin, so an image update that
 moves QEMU fails every tier loudly instead of changing what they test; move the pin and this
 paragraph together. `make check`, the macOS job, and a dev host's QEMU (Homebrew's included) are
 not checked. `scripts/check_workflows.py` fails on a `runs-on:` label other than these two and
 `macos-*` (`rule_runs_on`, which resolves `${{ matrix.X }}` to the matrix's values), and on a job
 that names `qemu-system` without a `VIBEOS_QEMU_VERSION` of the form `N.N.N` (`rule_qemu_pin`).
-Planned (ROADMAP §11.7): every job that boots an aarch64 guest runs on an arm64 runner
-(`ubuntu-26.04-arm`, or the scheduled macOS job's arm64 image), never on an x86_64 one. TCG adds no
-ordering to an aarch64 guest's loads and stores, so only an arm64 host lets a weak reordering reach
-guest code; an x86_64 host runs them in its TSO order. `scripts/check_workflows.py` will check it. From
-ROADMAP Phase 11 on, `make gate` also needs two dev-host records that loop the -smp 4 in-guest tier
-and smp-stress under HVF for 30 minutes each (`tests/gates/common.toml`), the only gate that runs
-those tests on a weakly ordered CPU directly. The weekly aarch64 smp-stress leg records whether TCG
-there showed any weak outcome (`weak_order_probe`).
+Every job that boots an aarch64 guest runs on an arm64 runner (`ubuntu-26.04-arm`, or the scheduled
+macOS job's arm64 image), never on an x86_64 one. TCG adds no ordering to an aarch64 guest's loads
+and stores, so only an arm64 host lets a weak reordering reach guest code; an x86_64 host runs them
+in its TSO order. `scripts/check_workflows.py` (`rule_aarch64_arm`) fails a `test-*` or `run` target
+for aarch64 unless `runs-on` names an arm64 image. From ROADMAP Phase 11 on, `make gate` also checks
+two dev-host records that loop the -smp 4 in-guest tier and smp-stress under HVF for 30 minutes each
+(`tests/gates/common.toml`), the only gate that runs those tests on a weakly ordered CPU directly.
+The weekly aarch64 smp-stress leg records whether TCG there showed any weak outcome
+(`weak_order_probe`). x86_64 jobs stay on `ubuntu-26.04`; aarch64 build and tier jobs use
+`ubuntu-26.04-arm`.
 
 **Scheduled capacity.** The Free plan's 20 concurrent jobs are the owner's account's, shared with
 its other repositories, and scheduled and dispatched workflows hold 10 of them as lanes (ROADMAP
@@ -1285,10 +1344,10 @@ workflow (`rule_lane_map`). `Reserved for` is `nightly`, `weekly`, `scheduled`, 
 | Lane | Reserved for | Jobs |
 |---|---|---|
 | `sched-lane-0` | nightly | `nightly.yml` `kvm` |
-| `sched-lane-1` | nightly | `nightly.yml` `release-profile` |
+| `sched-lane-1` | nightly | `nightly.yml` `release-profile`, `el2` |
 | `sched-lane-2` | nightly | `nightly.yml` `repro`, `models`, `miri` |
 | `sched-lane-3` | nightly | `nightly.yml` `budget`, `deny-advisories`, `provenance-fetch`, `irqoff` |
-| `sched-lane-4` | weekly | `smp-stress.yml` `stress`, `repeat-kernel` |
+| `sched-lane-4` | weekly | `smp-stress.yml` `stress`, `stress-aarch64`, `repeat-kernel` |
 | `sched-lane-5` | weekly | `smp-stress.yml` `repeat-kernel-smp4`, `nightly-canary`, `fuzz` |
 | `sched-lane-6` | history | `ci-history.yml` (every job) |
 | `sched-lane-7` | none | multi-day chains (soaks, campaigns); a ROADMAP §22.1 release window |
@@ -1299,8 +1358,8 @@ Release windows: none
 
 | Workflow | Cadence | Jobs per run | Job-hours per run | Peak concurrent jobs | Lanes |
 |---|---|---|---|---|---|
-| `smp-stress.yml` | weekly `0 6 * * 1` and dispatch | 5 | 7.7 (estimated) | 2 | `sched-lane-4`, `sched-lane-5` |
-| `nightly.yml` | daily `17 3 * * *` and dispatch | 9 | 9.1 (estimated) | 4 | `sched-lane-0`, `sched-lane-1`, `sched-lane-2`, `sched-lane-3` |
+| `smp-stress.yml` | weekly `0 6 * * 1` and dispatch | 6 | 9.0 (estimated) | 2 | `sched-lane-4`, `sched-lane-5` |
+| `nightly.yml` | daily `17 3 * * *` and dispatch | 10 | 10.5 (estimated) | 4 | `sched-lane-0`, `sched-lane-1`, `sched-lane-2`, `sched-lane-3` |
 | `ci-history.yml` | each completed `ci`, `release`, `nightly`, `smp-stress` or `macos` run (`record`); daily `23 4 * * *` and dispatch (`daily`) | 1 | 0.05 per `record`, 0.3 per `daily` (estimated) | 1 | `sched-lane-6` |
 | `macos.yml` | daily `23 4 * * *` and dispatch | 2 | 2.5 (estimated) | 1 | `sched-lane-9` |
 
@@ -1371,10 +1430,11 @@ issues by kind, branch, and signature. From ROADMAP §22.5, fuzz jobs run in `fu
 key, and publish only the target, the run, and a keyed crash id, so a crash's reproducer stays
 private until its fix is published.
 
-`-D warnings` reaches host builds through `[build] rustflags`, and every kernel build and clippy run
-(`make iso`, every ISO variant, `make check`) through `[target.x86_64-unknown-none] rustflags` in
-`.cargo/config.toml`, which replaces `[build] rustflags` for the kernel target, since Cargo reads one
-rustflags source. A job that sets `RUSTFLAGS` drops both (ROADMAP §10.1, F147).
+`-D warnings` reaches host builds through `[build] rustflags`, and a kernel build or clippy through the
+`[target.<triple>]` rustflags of the triple it passes (`x86_64-unknown-none` by default,
+`aarch64-unknown-none-softfloat` with `ARCH=aarch64`), which replaces `[build] rustflags` for that
+target, since Cargo reads one rustflags source. `make check` passes `--target $(TARGET)` to the kernel
+clippy. A job that sets `RUSTFLAGS` drops both tables (ROADMAP §10.1, F147).
 
 GitHub Actions records per-step duration. Measured on `main` at `88370e5` (run 35796216463): `check`
 53 s, then the ladder 160 s, serialized by `needs: check`. The ladder spends 58 s on setup, toolchain,
@@ -1419,8 +1479,9 @@ itself, every expected-failure and skip list, `tests/contract/markers.toml`, `de
 workflows, the Makefile's `check` and `gate` recipes, KERNEL_REVIEW.md, and the lint settings:
 `clippy.toml`, `[workspace.lints]`, and `pyproject.toml`'s `[tool.ruff]` and `[tool.mypy]`) and holds
 the floor above. `scripts/check_gate_inputs.py` compares the pull request's head with its merge base
-(the `check` job on every pull request; `make check` against `origin/main` when that ref exists,
-otherwise its static rules only) and fails when the pull request lowers the floor, which no trailer
+(the `check` job on every pull request; `make check` against `BASE_SHA` when set, otherwise
+`origin/$GITHUB_BASE_REF` when that names a branch other than `main`, otherwise `origin/main`
+when that ref exists, and otherwise its static rules only) and fails when the pull request lowers the floor, which no trailer
 allows; adds or changes a skip or expected-failure entry with no `Gate-change: <list> <entry>
 <class>: <reason>` trailer, the class one of the list's condition fields and one the entry sets;
 edits or removes any other input (a recipe or table: its text) with no `Gate-change: <path>: <rule or

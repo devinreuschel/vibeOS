@@ -9,12 +9,15 @@
 //! The KVA free-list lives under the page-table lock. Unmap, drop PT,
 //! shootdown, then free VA to the tail ([`release_va`]).
 
+use core::mem::MaybeUninit;
+
 use vibeos::ipi::{SHOOT_RANGE_PAGES, SHOOT_RANGES, ShootRange};
+use vibeos::kalloc::TryBox;
 use vibeos::kva::{
     DEFAULT_STACK_PAGES, KVA_END, KVA_SIZE, KVA_START, Kva, KvaError, KvaStats, PAGE_SIZE,
 };
 use vibeos::lock::RANK_PT;
-use vibeos::paging::{MapError, PhysAddr, VirtAddr, heap_flags, stack_flags};
+use vibeos::paging::{MapError, MapMode, PageFlags, PhysAddr, VirtAddr, heap_flags, stack_flags};
 use vibeos::pmm::Frames;
 pub use vibeos::thread::GuardedStack;
 use vibeos::thread::MAX_STACK_PAGES;
@@ -69,27 +72,43 @@ pub(super) fn release_va(va: VirtAddr, len: u64) {
     paging_init::with_pt(|_pt| with_kva(|k| k.free(va.as_u64(), len)));
 }
 
-/// Reserve `pages+1` VA, map the upper `pages` from separate order-0
-/// frames, leave the bottom page unmapped. The one constructor of a
-/// [`GuardedStack`]; [`free_stack`] takes it back.
-pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
-    if pages == 0 || pages > MAX_STACK_PAGES {
+/// Reserve `2S` VA for a power-of-two stack of `pages` pages, map the
+/// upper `S`, leave the lower `S` unmapped (DESIGN §4.5). Writes the
+/// handle in a [`TryBox`] so the frame-token array is not on the
+/// caller's stack. [`alloc_guarded_stack`] takes the handle out;
+/// [`free_stack`] takes it back.
+#[inline(never)]
+pub fn alloc_boxed_stack(pages: usize) -> Result<TryBox<GuardedStack>, KvaError> {
+    if pages == 0 || pages > MAX_STACK_PAGES || !pages.is_power_of_two() {
         return Err(KvaError::Size);
     }
-    let guard = paging_init::with_pt(|_pt| with_kva(|k| k.alloc_guarded(pages)))
-        .map(VirtAddr)
-        .ok_or(KvaError::NoVa)?;
-    let base = VirtAddr(guard.as_u64() + PAGE_SIZE);
-    let mut frames: [Option<Frames>; MAX_STACK_PAGES] = [const { None }; MAX_STACK_PAGES];
+    let slot = TryBox::<GuardedStack>::try_new_uninit().map_err(|_| KvaError::NoFrames)?;
+    let raw = TryBox::into_raw(slot);
+    let Some(guard) =
+        paging_init::with_pt(|_pt| with_kva(|k| k.alloc_guarded(pages))).map(VirtAddr)
+    else {
+        // SAFETY: `raw` is the exclusive uninit box `try_new_uninit`
+        // allocated; nothing wrote it; established here.
+        drop(unsafe { TryBox::<MaybeUninit<GuardedStack>>::from_raw(raw) });
+        return Err(KvaError::NoVa);
+    };
+    let base = VirtAddr(guard.as_u64() + pages as u64 * PAGE_SIZE);
+    // SAFETY: `GuardedStack::write_empty`'s contract; `raw` is the exclusive
+    // uninit allocation and `guard` came from `Kva::alloc_guarded(pages)`
+    // just above; established here.
+    let p = unsafe { GuardedStack::write_empty(raw, guard, pages) };
     let mut mapped = 0usize;
     let r = paging_init::with_pt(|pt| {
         while mapped < pages {
             let va = VirtAddr(base.as_u64() + PAGE_SIZE * mapped as u64);
             let f = pmm_init::with_buddy(|b| b.alloc(0)).ok_or(KvaError::NoFrames)?;
             let pa = PhysAddr(f.base());
-            frames[mapped] = Some(f);
+            // SAFETY: `write_empty`'s follow-up; `mapped < pages`, `f` is
+            // the fresh frame this loop owns, and page `mapped` maps it
+            // next; established here.
+            unsafe { (*p).set_frame(mapped, f) };
             // SAFETY: `map_4k_locked`'s contract; `pa` is the fresh frame
-            // above and `va` a page of the range `alloc_guarded` just
+            // above and `va` a page of the 2S range `alloc_guarded` just
             // reserved, which nothing else maps; `pt` holds the page-table
             // lock (invariant I48, established at
             // `mm::paging_init::current_mapper`).
@@ -104,27 +123,38 @@ pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
         // Unmap and shoot down what was mapped, and only then free the
         // frames and the VA.
         unmap_shootdown(base, mapped);
-        free_frames(&mut frames);
-        release_va(guard, (pages as u64 + 1) * PAGE_SIZE);
+        // SAFETY: `p` is the exclusive handle `write_empty` started; no
+        // other accessor; established here.
+        unsafe { free_frames((*p).frames_mut()) };
+        release_va(guard, Kva::guarded_va_len(pages));
+        // SAFETY: every frame slot is `None` after `free_frames`; dropping
+        // the box drops an empty handle; established here.
+        drop(unsafe { TryBox::from_raw(p) });
         return Err(e);
     }
     shoot_span(base, pages);
     #[cfg(feature = "kernel_tests")]
     fill_stack(base, pages);
-    // SAFETY: `[guard, guard + (pages + 1) pages)` came from
-    // `Kva::alloc_guarded(pages)` above, upper page `i` maps `frames[i]`
-    // (the loop above), the other slots are `None`, the guard page was
-    // never mapped, and this is the only handle built for the range (the
-    // contract `GuardedStack::from_raw_parts` states, established here).
-    Ok(unsafe { GuardedStack::from_raw_parts(guard, pages, frames) })
+    // SAFETY: `TryBox::from_raw`'s contract; `p` is the exclusive
+    // initialized `GuardedStack` `write_empty` and the map loop finished;
+    // established here.
+    Ok(unsafe { TryBox::from_raw(p) })
+}
+
+/// [`alloc_boxed_stack`], then take the handle out for callers that own
+/// a [`GuardedStack`] by value (bootstrap, IST, tests).
+#[inline(never)]
+pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
+    Ok(alloc_boxed_stack(pages)?.into_inner())
 }
 
 /// Fill a fresh stack's `pages` mapped pages above `base` with
 /// `stack_depth::PATTERN`, for the depth scan (DESIGN §4.5, TESTING §8.2).
+/// [`alloc_boxed_stack`] calls this after the span is mapped.
 #[cfg(feature = "kernel_tests")]
 fn fill_stack(base: VirtAddr, pages: usize) {
     let words = pages * (PAGE_SIZE as usize / 8);
-    // SAFETY: `alloc_guarded_stack` mapped `[base, base + pages)` writable
+    // SAFETY: `alloc_boxed_stack` mapped `[base, base + pages)` writable
     // from fresh frames and shot the span down, and no handle to it exists
     // yet, so nothing else reads or writes it; established here.
     let s = unsafe { core::slice::from_raw_parts_mut(base.as_u64() as *mut u64, words) };
@@ -161,8 +191,9 @@ fn free_frames(frames: &mut [Option<Frames>]) {
 
 /// Unmap `stack`, shoot it down, then free its frames and its VA.
 pub fn free_stack(stack: GuardedStack) {
-    // SAFETY: `free_stack_shootdown`'s contract; the one constructor of a
-    // `GuardedStack` is `alloc_guarded_stack`, so this KVA allocated it, and
+    // SAFETY: `free_stack_shootdown`'s contract; the constructors of a
+    // `GuardedStack` are `alloc_guarded_stack` and `alloc_boxed_stack`, so
+    // this KVA allocated it, and
     // the handle moves here only once no CPU runs on the stack (invariant
     // I10, established at `sched::thread_init::finish_switch`).
     unsafe { free_stack_shootdown(stack) };
@@ -288,7 +319,7 @@ unsafe fn free_batch(mut head: u64) -> (u64, usize) {
         // and its frames and VA are freed only after that round, established
         // here.
         let (guard, pages, parts) = unsafe { stack.into_raw_parts() };
-        let base = VirtAddr(guard.as_u64() + PAGE_SIZE);
+        let base = VirtAddr(guard.as_u64() + pages as u64 * PAGE_SIZE);
         // SAFETY: `unmap_only_locked`'s contract; no CPU runs on the stack
         // (invariant I10, established at `thread_init::finish_switch`), and
         // the round below completes before its frames and VA are freed.
@@ -312,7 +343,7 @@ unsafe fn free_batch(mut head: u64) -> (u64, usize) {
     vibeos::paging::tlb_shootdown_ranges(&ranges[..nr]);
     free_frames(&mut frames[..nf]);
     for &(guard, pages) in &vas[..k] {
-        release_va(guard, (pages as u64 + 1) * PAGE_SIZE);
+        release_va(guard, Kva::guarded_va_len(pages));
     }
     (head, k)
 }
@@ -444,9 +475,9 @@ unsafe fn free_stack_shootdown(stack: GuardedStack) {
     // before the frames and the VA are freed (the contract
     // `GuardedStack::into_raw_parts` states, met here).
     let (guard, pages, mut frames) = unsafe { stack.into_raw_parts() };
-    unmap_shootdown(VirtAddr(guard.as_u64() + PAGE_SIZE), pages);
+    unmap_shootdown(VirtAddr(guard.as_u64() + pages as u64 * PAGE_SIZE), pages);
     free_frames(&mut frames);
-    release_va(guard, (pages as u64 + 1) * PAGE_SIZE);
+    release_va(guard, Kva::guarded_va_len(pages));
 }
 
 /// Unmap `n` pages, drop PT, shootdown. Frees nothing: the caller owns
@@ -482,6 +513,83 @@ fn shoot_span(va: VirtAddr, n: usize) {
         vibeos::paging::tlb_shootdown_others(VirtAddr(va.as_u64() + i as u64 * PAGE_SIZE));
         i += 1;
     }
+}
+
+/// Map `[phys, phys+len)` into KVA with `flags`. `memunmap` frees it.
+///
+/// # Safety
+/// `[phys, phys+len)` is memory the kernel may map at this type, and no
+/// other mapping of it uses a conflicting type (invariant I17).
+pub unsafe fn memremap(phys: PhysAddr, len: u64, flags: PageFlags) -> Option<VirtAddr> {
+    if len == 0 {
+        return None;
+    }
+    let page_off = phys.as_u64() & (PAGE_SIZE - 1);
+    let span = page_off.checked_add(len)?;
+    let pages = span.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+    let va = paging_init::with_pt(|_pt| with_kva(|k| k.alloc(pages)))?;
+    let base = VirtAddr(va);
+    let base_pa = PhysAddr(phys.as_u64() & !(PAGE_SIZE - 1));
+    // SAFETY: `map_range_locked`'s contract; `va` is a fresh KVA range and
+    // the caller vouches for `phys` (this fn's `# Safety`); established here.
+    let r = paging_init::with_pt(|pt| unsafe {
+        paging_init::map_range_locked(pt, base, base_pa, pages, flags, MapMode::Fresh)
+    });
+    if r.is_err() {
+        paging_init::with_pt(|pt| {
+            let mut off = 0u64;
+            while off < pages {
+                // SAFETY: these leaves, if any, are the ones `map_range`
+                // just placed, unused; established here.
+                let _ = unsafe { paging_init::unmap_4k_locked(pt, VirtAddr(va + off)) };
+                off = off.saturating_add(PAGE_SIZE);
+            }
+        });
+        let mut off = 0u64;
+        while off < pages {
+            vibeos::paging::tlb_shootdown_others(VirtAddr(va + off));
+            off = off.saturating_add(PAGE_SIZE);
+        }
+        release_va(base, pages);
+        return None;
+    }
+    let mut off = 0u64;
+    while off < pages {
+        vibeos::paging::tlb_shootdown_others(VirtAddr(va + off));
+        off = off.saturating_add(PAGE_SIZE);
+    }
+    Some(VirtAddr(va + page_off))
+}
+
+/// Unmap a `memremap` range and return its VA to KVA.
+///
+/// # Safety
+/// `va` and `len` are what `memremap` returned / was given, and nothing
+/// uses the mapping any more.
+pub unsafe fn memunmap(va: VirtAddr, len: u64) {
+    if len == 0 {
+        return;
+    }
+    let page_off = va.as_u64() & (PAGE_SIZE - 1);
+    let start = va.as_u64() - page_off;
+    let Some(span) = page_off.checked_add(len) else {
+        return;
+    };
+    let pages = span.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+    paging_init::with_pt(|pt| {
+        let mut off = 0u64;
+        while off < pages {
+            // SAFETY: this fn's `# Safety` contract, established here.
+            let _ = unsafe { paging_init::unmap_4k_locked(pt, VirtAddr(start + off)) };
+            off = off.saturating_add(PAGE_SIZE);
+        }
+    });
+    let mut off = 0u64;
+    while off < pages {
+        vibeos::paging::tlb_shootdown_others(VirtAddr(start + off));
+        off = off.saturating_add(PAGE_SIZE);
+    }
+    release_va(VirtAddr(start), pages);
 }
 
 /// Unmap `n` pages from `va` through `pt`. Local `invlpg` only.

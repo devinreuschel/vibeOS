@@ -2,7 +2,7 @@
 
 pub(crate) mod apic_init;
 mod boot;
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -76,8 +76,8 @@ pub fn publish_tsc_per_ms(v: u64) {
 /// Make [`CycleCounter::now`] read with `rdtscp` from here on; `time_init`
 /// calls it once, when [`has_rdtscp`] holds.
 pub fn publish_rdtscp(on: bool) {
-    // Relaxed: the flag only picks which serialized read of the same
-    // counter runs; either is right, so it orders nothing.
+    // Relaxed: pairs with nothing. The flag only picks which serialized
+    // read of the same counter runs, and either is right.
     USE_RDTSCP.store(on, Ordering::Relaxed);
 }
 
@@ -135,6 +135,7 @@ impl InterruptMask for Arch {
 impl CycleCounter for Arch {
     #[inline]
     fn now() -> u64 {
+        // Relaxed: as in `publish_rdtscp`; pairs with nothing.
         rdtsc_ser(USE_RDTSCP.load(Ordering::Relaxed))
     }
 
@@ -185,8 +186,9 @@ impl Barriers for Arch {
         unsafe {
             asm!("sfence", options(nostack, preserves_flags));
         }
-        // Keep a compiler fence so a future port cannot "optimize" this
-        // into a comment. The atomic fence above is the contract.
+        // Release: pairs with nothing. A compiler fence keeps a future port
+        // from "optimizing" this into a comment; the atomic fence above is the
+        // contract.
         compiler_fence(Ordering::Release);
     }
 
@@ -200,6 +202,7 @@ impl Barriers for Arch {
         unsafe {
             asm!("lfence", options(nostack, preserves_flags));
         }
+        // Acquire: pairs with nothing, as in `dma_wmb`; the fence above is the contract.
         compiler_fence(Ordering::Acquire);
     }
 

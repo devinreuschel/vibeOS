@@ -1,16 +1,23 @@
-//! QEMU's fw_cfg device on x86_64 (ROADMAP §10.2, C-FWCFG): the selector
+//! QEMU's fw_cfg device (ROADMAP §10.2, C-FWCFG): on x86_64 the selector
 //! at port 0x510, the data byte at 0x511, and the DMA address at 0x514 and
-//! 0x518, as QEMU's `docs/specs/fw_cfg.rst` defines them. Encodings are in
-//! `vibeos::boot`.
+//! 0x518; on aarch64 the MMIO window QEMU's `docs/specs/fw_cfg.rst`
+//! defines (data at 0x0, selector BE16 at 0x8, DMA address BE64 at 0x10).
+//! Encodings are in `vibeos::boot`.
 //!
 //! Invariant I57: nothing here touches a port before CPUID.1:ECX[31]
-//! reports a hypervisor, so bare metal never sees a write to 0x510, and one
-//! CPU at a time drives the device (boot before `smp: done`, then boot-time
-//! callers and the in-guest registry). The selector is device-global with
-//! no lock; a caller that can race adds a ranked lock (DESIGN §2.1).
+//! reports a hypervisor, so bare metal never sees a write to 0x510, and
+//! one CPU at a time drives the device (boot before `smp: done`, then
+//! boot-time callers and the in-guest registry). On aarch64 the same
+//! module writes the mapped MMIO window after
+//! `arch::aarch64::boot::map_early_console`. The selector is device-global
+//! with no lock; a caller that can race adds a ranked lock (DESIGN §2.1).
 
+#[cfg(target_arch = "aarch64")]
+use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicU8, Ordering};
 
+#[cfg(target_arch = "aarch64")]
+use vibeos::arch::Barriers;
 use vibeos::boot::{
     FW_CFG_DIR_ENTRY, FW_CFG_DMA_ERROR, FW_CFG_DMA_SELECT, FW_CFG_DMA_WRITE, FW_CFG_FILE_DIR,
     FW_CFG_ID, FW_CFG_ID_DMA, FW_CFG_QEMU, FW_CFG_SIGNATURE, fw_cfg_dma_access,
@@ -22,12 +29,24 @@ pub use vibeos::boot::FwCfgFile;
 
 use crate::arch::current::Arch;
 use crate::dma_init;
+#[cfg(target_arch = "x86_64")]
 use crate::x86;
 
+#[cfg(target_arch = "x86_64")]
 const PORT_SELECTOR: u16 = 0x510;
+#[cfg(target_arch = "x86_64")]
 const PORT_DATA: u16 = 0x511;
+#[cfg(target_arch = "x86_64")]
 const PORT_DMA_HI: u16 = 0x514;
+#[cfg(target_arch = "x86_64")]
 const PORT_DMA_LO: u16 = 0x518;
+/// Data byte, selector, and DMA address offsets in the MMIO window.
+#[cfg(target_arch = "aarch64")]
+const MMIO_DATA: u64 = 0x00;
+#[cfg(target_arch = "aarch64")]
+const MMIO_SELECTOR: u64 = 0x08;
+#[cfg(target_arch = "aarch64")]
+const MMIO_DMA: u64 = 0x10;
 
 /// Directory entries walked at most: QEMU's machines hold far fewer.
 const DIR_MAX: u32 = 1024;
@@ -43,6 +62,10 @@ const UNPROBED: u8 = 0;
 const ABSENT: u8 = 1;
 const PRESENT: u8 = 2;
 const PRESENT_DMA: u8 = 3;
+
+/// Mapped fw_cfg window (HHDM + PA). Zero until `set_mmio_va`.
+#[cfg(target_arch = "aarch64")]
+static MMIO_VA: AtomicU64 = AtomicU64::new(0);
 
 /// The probe's answer, set once by [`probe`]. The Release store pairs with
 /// the Acquire load in [`state`], so a CPU that reads PRESENT also sees the
@@ -92,11 +115,36 @@ impl FwCfgError {
 }
 
 /// CPUID.1:ECX[31], the hypervisor-present bit.
+#[cfg(target_arch = "x86_64")]
 pub fn hypervisor() -> bool {
     let (_, _, ecx, _) = x86::cpuid(1, 0);
     ecx & (1 << 31) != 0
 }
 
+/// QEMU `virt` is always a hypervisor; fw_cfg is MMIO (ROADMAP §11.5).
+#[cfg(target_arch = "aarch64")]
+pub fn hypervisor() -> bool {
+    true
+}
+
+/// Point later accesses at a mapped fw_cfg window. Early console map,
+/// then paging takeover.
+#[cfg(target_arch = "aarch64")]
+pub fn set_mmio_va(va: u64) {
+    // Release: pairs with the Acquire load in `mmio_va`.
+    MMIO_VA.store(va, Ordering::Release);
+}
+
+#[cfg(target_arch = "aarch64")]
+fn mmio_va() -> Option<u64> {
+    // Acquire: pairs with the Release store in `set_mmio_va`.
+    match MMIO_VA.load(Ordering::Acquire) {
+        0 => None,
+        va => Some(va),
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
 fn select(key: u16) {
     debug_assert!(hypervisor(), "fw_cfg: port access without a hypervisor");
     // SAFETY: invariant I57, established at `boot::fw_cfg_init::probe`:
@@ -105,11 +153,37 @@ fn select(key: u16) {
     unsafe { x86::outw(PORT_SELECTOR, key) }
 }
 
+#[cfg(target_arch = "aarch64")]
+fn select(key: u16) {
+    let Some(va) = mmio_va() else {
+        return;
+    };
+    let p = va.wrapping_add(MMIO_SELECTOR) as *mut u16;
+    // SAFETY: invariant I57, established at `arch::aarch64::boot::map_early_console`
+    // and `paging_init::install`: `va` is the Device-mapped fw_cfg window,
+    // offset 8 is the 16-bit big-endian selector, and one CPU drives it.
+    unsafe { Arch::mmio_write(p, key.to_be()) };
+}
+
+#[cfg(target_arch = "x86_64")]
 fn read_bytes(out: &mut [u8]) {
     for b in out {
         // SAFETY: invariant I57, established at `boot::fw_cfg_init::probe`:
         // port 0x511 is fw_cfg's data byte after `select`.
         *b = unsafe { x86::inb(PORT_DATA) };
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn read_bytes(out: &mut [u8]) {
+    let Some(va) = mmio_va() else {
+        return;
+    };
+    let p = va.wrapping_add(MMIO_DATA) as *const u8;
+    for b in out {
+        // SAFETY: invariant I57, established at `arch::aarch64::boot::map_early_console`
+        // and `paging_init::install`: offset 0 is fw_cfg's data byte after `select`.
+        *b = unsafe { Arch::mmio_read(p) };
     }
 }
 
@@ -134,9 +208,11 @@ fn probe() -> u8 {
 }
 
 fn state() -> u8 {
+    // Acquire: pairs with the Release store below.
     match STATE.load(Ordering::Acquire) {
         UNPROBED => {
             let s = probe();
+            // Release: pairs with the Acquire load above.
             STATE.store(s, Ordering::Release);
             s
         }
@@ -238,9 +314,22 @@ pub(super) fn transfer(
     // `has_dma` found the signature and the DMA feature, so 0x514 and
     // 0x518 are the DMA address register, big-endian in two halves; the
     // low write starts the transfer.
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         x86::outl(PORT_DMA_HI, ((dev >> 32) as u32).to_be());
         x86::outl(PORT_DMA_LO, (dev as u32).to_be());
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let Some(va) = mmio_va() else {
+            return Err(FwCfgError::Absent);
+        };
+        let p = va.wrapping_add(MMIO_DMA) as *mut u64;
+        // SAFETY: invariant I57, established at `boot::fw_cfg_init::probe`:
+        // `has_dma` found the signature and the DMA feature, so offset
+        // 0x10 is the 64-bit big-endian DMA address register; the write
+        // starts the transfer. The window is the one `set_mmio_va` published.
+        unsafe { Arch::mmio_write(p, dev.to_be()) };
     }
     for _ in 0..DMA_POLLS {
         let mut word = [0u8; 4];

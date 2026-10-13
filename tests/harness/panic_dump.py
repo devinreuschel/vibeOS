@@ -60,10 +60,11 @@ FRAME_PREFIX = "  0x"
 def check_stop(raw: Iterable[str]) -> None:
     """F135 at `-smp 5`: the owner (CPU 0 or 1, from its `thread` line)
     reports the other of the pair `stopped (panic)`, CPUs 2 and 3
-    `stopped (poll)` and CPU 4 `stopped (nmi)`, none `not stopped`; one
-    message, banner and `halted`; a backtrace frame; the owner-NMI line; and
-    no numbered line after the first `vibeOS: panic:` line (a `logrec:`
-    replay of one does not count: it starts with `vibeOS: logrec:`)."""
+    `stopped (poll)` and CPU 4 `stopped (nmi)` on x86_64 (`not stopped` on
+    aarch64, which has no NMI), none of the others `not stopped`; one
+    message, banner and `halted`; a backtrace frame; the owner-NMI line on
+    x86_64; and no numbered line after the first `vibeOS: panic:` line (a
+    `logrec:` replay of one does not count: it starts with `vibeOS: logrec:`)."""
     lines = frame.kernel_lines(raw)
     _common(lines, "panic-stop")
     first = next((i for i, t in enumerate(lines) if t.startswith("vibeOS: panic:")), None)
@@ -76,7 +77,10 @@ def check_stop(raw: Iterable[str]) -> None:
     if len(owners) != 1 or owners[0] not in ("0", "1"):
         raise HarnessError(f"panic-stop: owner cpus {owners!r}, expected one of 0 and 1")
     owner = int(owners[0])
+    aarch64 = any(t.startswith("vibeOS: el:") or t.startswith("vibeOS: gic:") for t in lines)
     want = {1 - owner: "panic", 2: "poll", 3: "poll", 4: "nmi"}
+    if aarch64:
+        want[4] = "not stopped"
     got: dict[int, str] = {}
     for t in lines:
         m = CPU_RE.match(t)
@@ -89,13 +93,14 @@ def check_stop(raw: Iterable[str]) -> None:
     for cpu, how in sorted(want.items()):
         if got.get(cpu) != how:
             seen = got.get(cpu, "no line")
-            raise HarnessError(f"panic-stop: cpu {cpu} {seen!r}, expected 'stopped ({how})'")
+            expect = how if how == "not stopped" else f"stopped ({how})"
+            raise HarnessError(f"panic-stop: cpu {cpu} {seen!r}, expected {expect!r}")
     extra = sorted(set(got) - set(want))
     if extra:
         raise HarnessError(f"panic-stop: unexpected cpu lines for {extra!r}")
     if not any(t.startswith(FRAME_PREFIX) for t in lines[first:]):
         raise HarnessError("panic-stop: no backtrace frame")
-    if OWNER_NMI not in lines:
+    if not aarch64 and OWNER_NMI not in lines:
         raise HarnessError(f"panic-stop: no {OWNER_NMI!r} line: the owner's own NMI did not return")
 
 

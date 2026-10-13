@@ -13,10 +13,14 @@ from scripts.check_gates import (
     MapError,
     gate_lines,
     lands_in_sections,
+    load_common,
     load_map,
+    make_goal,
+    makefile_targets,
     norm,
     strip_code_spans,
     validate,
+    validate_common,
     workflow_self_hosted,
 )
 
@@ -226,6 +230,33 @@ class Main(unittest.TestCase):
 
     def test_repo_map_valid(self) -> None:
         self.assertEqual(check_gates.main([]), 0)
+
+
+class Common(unittest.TestCase):
+    def test_make_goal_skips_assignments(self) -> None:
+        self.assertEqual(
+            make_goal("VIBEOS_QEMU_ACCEL=hvf make test-kernel-smp4 ARCH=aarch64"),
+            "test-kernel-smp4",
+        )
+        self.assertIsNone(make_goal("echo hi"))
+
+    def test_missing_target_fails(self) -> None:
+        entries = load_common(
+            '[[entry]]\nname = "hvf"\ncmd = "make nope ARCH=aarch64"\n'
+        )
+        got = validate_common(entries, makefile_targets("test-kernel-smp4:\n"), "common.toml")
+        self.assertTrue(any("nope" in p for p in got), got)
+
+    def test_existing_target_passes(self) -> None:
+        entries = load_common(
+            "[[entry]]\n"
+            'name = "hvf"\n'
+            'cmd = "VIBEOS_QEMU_ACCEL=hvf make test-kernel-smp4 ARCH=aarch64"\n'
+        )
+        self.assertEqual(
+            validate_common(entries, makefile_targets("test-kernel-smp4:\n\ttrue\n"), "c"),
+            [],
+        )
 
 
 if __name__ == "__main__":

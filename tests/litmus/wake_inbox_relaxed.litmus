@@ -1,0 +1,10 @@
+AArch64 vibeos-wake-inbox-relaxed
+{
+0:X1=word; 0:X2=summary;
+1:X1=word; 1:X2=summary;
+}
+ P0                 | P1              ;
+ MOV W0,#1          | MOV W0,#0       ;
+ LDSET W0,W5,[X1]   | SWP W0,W3,[X2]  ;
+ LDSET W0,W6,[X2]   | SWP W0,W4,[X1]  ;
+exists (1:X3=1 /\ 1:X4=0)

@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use vibeos::block::part;
 use vibeos::boot::cmdline;
+use vibeos::machine::fdt;
 use vibeos::pci::Bdf;
 use vibeos::{acpi, elf, fat, pci, shell, vibefs, virtio};
 use vibeos_fuzz::cfgspace::FakeCfg;
@@ -319,6 +320,14 @@ fn accept_devices() {
         );
     }
     assert_eq!(c.init_env().count(), 2);
+    let d = fdt::parse(&seed_data("fdt_parse", "two-uarts")).expect("fdt two-uarts");
+    assert_eq!(d.console_uart(), Some(0x900_0000));
+    assert_eq!(
+        fdt::pick_pl011(&seed_data("fdt_parse", "two-uarts")),
+        Some(0x900_0000)
+    );
+    let r = fdt::parse(&seed_data("fdt_parse", "reserved-both")).expect("fdt reserved");
+    assert_eq!(r.reserved_count, 2);
 }
 
 /// The quoted rows of `scripts/check_core_stable.py`'s `PARSERS` table, as

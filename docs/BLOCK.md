@@ -300,7 +300,9 @@ since every completed write is already durable.
 kick, and `get_used` runs `dma_mb` after its `used_event` store, so neither a
 kick nor an interrupt is lost ([section 4.7](MEMORY.md#47-dma); F016). `kick` writes the doorbell at the notify formula in
 [section 9.3](PITFALLS.md#93-interrupts). The doorbell
-value is the queue index; `kick` writes 0 for every queue (ROADMAP §11.5, F047).
+value is the queue index (virtio 1.2 sections 4.1.5.2 and 4.2.2).
+`block_vblk_mmio_smp` at `-smp 4` over `virtio-blk-device,num-queues=4`
+proves it (ROADMAP §11.5, F047).
 
 ## 10.5 Partitions
 

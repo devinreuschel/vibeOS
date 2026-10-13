@@ -115,6 +115,20 @@ pub struct KvaStats {
     pub free_ranges: usize,
 }
 
+/// Smallest `s >= range_start` with `s ≡ offset (mod align)`.
+fn first_aligned(range_start: u64, align: u64, offset: u64) -> Option<u64> {
+    if align == 0 {
+        return None;
+    }
+    let rem = range_start % align;
+    let delta = if rem <= offset {
+        offset - rem
+    } else {
+        align - rem + offset
+    };
+    range_start.checked_add(delta)
+}
+
 // Node links are `u16`, and `alloc`'s cap of `MAX_RANGES - 2` live ranges
 // leaves room for at least one.
 const _: () = assert!(MAX_RANGES <= u16::MAX as usize);
@@ -195,23 +209,65 @@ impl Kva {
     /// First-fit. `len` page-aligned. Returns the start VA. `None` when no
     /// free range fits, or when `MAX_RANGES - 2` ranges are live already.
     pub fn alloc(&mut self, len: u64) -> Option<u64> {
-        if len == 0 || !len.is_multiple_of(PAGE_SIZE) || self.live >= LIVE_CAP {
+        self.alloc_placed(len, PAGE_SIZE, 0)
+    }
+
+    /// First-fit of `len` bytes at `start ≡ offset (mod align)`.
+    pub fn alloc_placed(&mut self, len: u64, align: u64, offset: u64) -> Option<u64> {
+        if len == 0
+            || !len.is_multiple_of(PAGE_SIZE)
+            || align == 0
+            || !align.is_multiple_of(PAGE_SIZE)
+            || offset >= align
+            || !offset.is_multiple_of(PAGE_SIZE)
+            || self.live >= LIVE_CAP
+        {
             return None;
         }
         let mut prev: Option<u16> = None;
         let mut cur = self.head;
         while let Some(i) = cur {
             let r = self.nodes[i as usize];
-            if r.len >= len {
-                let start = r.start;
-                if r.len == len {
+            if let Some(start) = first_aligned(r.start, align, offset)
+                && start
+                    .checked_add(len)
+                    .is_some_and(|end| end <= r.start + r.len)
+                && start >= r.start
+            {
+                let prefix = start - r.start;
+                let suffix_start = start + len;
+                let suffix = (r.start + r.len) - suffix_start;
+                if prefix > 0 && suffix > 0 {
+                    if self.nslots == 0 {
+                        return None;
+                    }
+                    self.nodes[i as usize] = Range {
+                        start: r.start,
+                        len: prefix,
+                    };
+                    let j = self.alloc_slot()?;
+                    self.nodes[j as usize] = Range {
+                        start: suffix_start,
+                        len: suffix,
+                    };
+                    self.next[j as usize] = self.next[i as usize];
+                    self.next[i as usize] = Some(j);
+                    if self.tail == Some(i) {
+                        self.tail = Some(j);
+                    }
+                } else if prefix > 0 {
+                    self.nodes[i as usize] = Range {
+                        start: r.start,
+                        len: prefix,
+                    };
+                } else if suffix > 0 {
+                    self.nodes[i as usize] = Range {
+                        start: suffix_start,
+                        len: suffix,
+                    };
+                } else {
                     self.unlink(prev, i);
                     self.free_slot(i);
-                } else {
-                    self.nodes[i as usize] = Range {
-                        start: r.start + len,
-                        len: r.len - len,
-                    };
                 }
                 self.used += len;
                 self.live += 1;
@@ -223,15 +279,21 @@ impl Kva {
         None
     }
 
-    /// Reserve `pages + 1` pages. First page is the guard (returned as
-    /// `guard`); mapped region starts at `guard + PAGE_SIZE` and is
-    /// `pages` pages long.
+    /// Reserve `2S` VA for a power-of-two stack of `pages` pages (`S`).
+    /// Returns the guard start: `S` unmapped bytes, then the stack at a
+    /// `2S`-aligned address (DESIGN §4.5).
     pub fn alloc_guarded(&mut self, pages: usize) -> Option<u64> {
-        if pages == 0 {
+        if pages == 0 || !pages.is_power_of_two() {
             return None;
         }
-        let len = (pages as u64 + 1) * PAGE_SIZE;
-        self.alloc(len)
+        let s = (pages as u64).checked_mul(PAGE_SIZE)?;
+        let total = s.checked_mul(2)?;
+        self.alloc_placed(total, total, s)
+    }
+
+    /// VA bytes a guarded stack of `pages` mapped pages occupies.
+    pub const fn guarded_va_len(pages: usize) -> u64 {
+        (pages as u64).saturating_mul(PAGE_SIZE).saturating_mul(2)
     }
 
     /// Append `[start, start+len)`, a range `alloc` handed out, to the
@@ -395,13 +457,36 @@ mod tests {
     }
 
     #[test]
-    fn guarded_reserves_pages_plus_one() {
+    fn guarded_reserves_2s_aligned() {
         let mut k = fresh();
         let guard = k.alloc_guarded(4).unwrap();
-        assert_eq!(guard, KVA_START);
-        assert_eq!(k.stats().used, 5 * PAGE_SIZE);
-        k.free(guard, 5 * PAGE_SIZE);
+        let s = 4 * PAGE_SIZE;
+        let stack = guard + s;
+        assert_eq!(stack % (2 * s), 0);
+        assert_eq!(guard + s, stack);
+        assert_eq!(k.stats().used, 8 * PAGE_SIZE);
+        let bit = s.trailing_zeros();
+        assert_eq!(stack & (1 << bit), 0);
+        assert_ne!(guard & (1 << bit), 0);
+        k.free(guard, Kva::guarded_va_len(4));
         assert_eq!(k.stats().used, 0);
+        assert!(k.alloc_guarded(3).is_none());
+        assert!(k.alloc_guarded(0).is_none());
+    }
+
+    #[test]
+    fn guarded_each_power_of_two_size() {
+        for pages in [1usize, 2, 4, 8] {
+            let mut k = window(64);
+            let guard = k.alloc_guarded(pages).unwrap();
+            let s = pages as u64 * PAGE_SIZE;
+            let stack = guard + s;
+            assert_eq!(stack % (2 * s), 0, "pages={pages}");
+            let bit = s.trailing_zeros();
+            assert_eq!(stack & (1 << bit), 0);
+            assert_ne!(guard & (1 << bit), 0);
+            k.free(guard, Kva::guarded_va_len(pages));
+        }
     }
 
     #[test]

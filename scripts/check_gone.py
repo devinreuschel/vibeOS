@@ -316,6 +316,11 @@ GONE: list[tuple[str, str]] = [
     ("control_regs", "DESIGN §2.5's rule that nothing is silently swallowed"),
     ("drain_deferred", "every switch tail empties the"),
     ("ready_head", "dead scheduler and bring-up state deleted"),
+    ("PHYSMAP_CAP", "one physmap policy on both architectures"),
+    ("physmap_extent", "one physmap policy on both architectures"),
+    ("patch_physmap_uc", "one physmap policy on both architectures"),
+    ("ensure_physmap_wb", "one physmap policy on both architectures"),
+    ("src/acpi/acpi_init.rs: fn map_gap", "one physmap policy on both architectures"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

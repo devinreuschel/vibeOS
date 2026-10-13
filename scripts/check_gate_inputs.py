@@ -5,9 +5,12 @@ that judge it.
 `tests/gates/inputs.toml` lists every file a gate reads to reach its verdict and
 holds the `vibeos-core` coverage floor. Modes:
 
-- bare: the static rules, then the diff rules from the merge base of
-  `origin/main` and `HEAD` to `HEAD` when `origin/main` exists (otherwise the
-  static rules only, saying so). `make check` runs it this way.
+- bare: the static rules, then the diff rules from `gatelib.pr_diff_base`
+  to `HEAD`. That is `BASE_SHA` when set, otherwise `origin/$GITHUB_BASE_REF`
+  when that names a branch other than `main` and the ref exists, otherwise
+  `origin/main` when it exists (otherwise the static rules only, saying so).
+  `make check` runs it this way, so a pull request into `phase-11` is not
+  judged against `main`.
 - `--base REV [--head REV]`: the static rules and the diff rules against REV's
   merge base with the head (default `HEAD`). The `check` job runs it on every
   pull request.
@@ -933,11 +936,6 @@ class _EmptyTree:
 # --- main ------------------------------------------------------------------
 
 
-def _ref_exists(root: Path, ref: str) -> bool:
-    return bool(gatelib.git(root, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}",
-                            check=False).strip())
-
-
 def run_diff(root: Path, base: str, head: str) -> tuple[list[str], list[str]]:
     """Errors and warnings of the diff rules from `base`'s merge base with `head`."""
     mb = gatelib.git(root, "merge-base", base, head).strip()
@@ -1026,9 +1024,8 @@ def main(argv: list[str] | None = None) -> int:
     base = args.base
     note = ""
     if base is None:
-        if _ref_exists(root, "origin/main"):
-            base = "origin/main"
-        else:
+        base = gatelib.pr_diff_base(root)
+        if base is None:
             note = " (static rules only: no origin/main)"
     if base is not None and not errors:
         try:

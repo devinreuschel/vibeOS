@@ -7,27 +7,31 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use vibeos::elf::ElfError;
 use vibeos::fs::{FsError, O_CREAT, O_TRUNC, O_WRONLY};
+#[cfg(target_arch = "x86_64")]
 use vibeos::kbd::DecodedKey;
 use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::{SIGILL, SIGSEGV, wait_exited, wait_signaled, wexitstatus, wifexited};
+#[cfg(target_arch = "x86_64")]
 use vibeos::syscall::SYS_GETPID;
 use vibeos::vectors;
 
 use super::hooks as exec_testing;
 use crate::addr_space_init::testing as as_testing;
 use crate::apic_init;
+#[cfg(target_arch = "x86_64")]
 use crate::console_init;
-use crate::ktest::user::{self, DEFAULT, Image, Layout, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, Layout, x86_user_code};
 use crate::ktest::{Outcome, fid, sleep_until};
 use crate::pmm_init;
 use crate::proc_init;
+#[cfg(target_arch = "x86_64")]
 use crate::syscall_init::testing as sc_testing;
 use crate::thread_init;
 use crate::time_init;
 use crate::user_init::LoadError;
 
 // exit(7) when getppid() is 0 (the kernel spawned it), else exit(1).
-user_code!(
+x86_user_code!(
     EXIT7_IF_KERNEL_CHILD,
     "
     mov eax, 110
@@ -76,7 +80,7 @@ pub(crate) fn test_user_image_elf() -> Outcome {
 // page, store to offsets 0x800 and 0x1008, and exit with the sum of the
 // two values read back (0x11 + 0x22 = 51). A wrong page exits 1; a
 // missing page or write bit is SIGSEGV.
-user_code!(
+x86_user_code!(
     LAYOUT_WRITES,
     "
     lea rax, [rip]
@@ -120,7 +124,7 @@ pub(crate) fn test_user_code_layout() -> Outcome {
 // exit status can stand for that, since any low byte is some pid's once the
 // pid allocator passes 255. The orphaned child spins on getppid() + sched_yield() (at most
 // 100,000 times) until it reads 0, then exits 0 (1 on timeout).
-user_code!(
+x86_user_code!(
     ORPHAN_FORK,
     "
     mov eax, 57
@@ -232,7 +236,8 @@ pub(crate) fn test_orphan_freed_no_init() -> Outcome {
 
 // read(0, rsp, 1), then exit with the byte read; exit(2) if read does not
 // return 1.
-user_code!(
+#[cfg(target_arch = "x86_64")]
+x86_user_code!(
     READ_ONE_KEY,
     "
     sub rsp, 16
@@ -258,6 +263,18 @@ user_code!(
 /// until a key is queued, then returns through the syscall exit, whose
 /// debug-build check faults if `wait_key` left IF set.
 pub(crate) fn test_console_read_exit() -> Outcome {
+    #[cfg(target_arch = "aarch64")]
+    {
+        Outcome::Skip("x86 PS/2 console")
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        test_console_read_exit_x86()
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn test_console_read_exit_x86() -> Outcome {
     console_init::testing::reset_halts();
     let pid = match user::spawn(&Image::Code(READ_ONE_KEY, DEFAULT), &["read_one_key"]) {
         Ok(pid) => pid,
@@ -277,7 +294,7 @@ pub(crate) fn test_console_read_exit() -> Outcome {
 
 // 1,000 times: fork; the child exits 0 and the parent waits for it. Exit
 // 0, or 2 on a negative return.
-user_code!(
+x86_user_code!(
     FORK_1000,
     "
     mov r12d, 1000
@@ -382,7 +399,7 @@ pub(crate) fn test_user_entry_irq() -> Outcome {
 
 // getpid, then a jmp to a `syscall` in the page's last two bytes, whose
 // return RIP is the first byte past the page.
-user_code!(
+x86_user_code!(
     SYSCALL_AT_PAGE_END,
     "
     mov eax, 39
@@ -417,7 +434,8 @@ pub(crate) fn test_exec_top_page_enoexec() -> Outcome {
 }
 
 // getpid, then exit(0).
-user_code!(
+#[cfg(target_arch = "x86_64")]
+x86_user_code!(
     GETPID_EXIT0,
     "
     mov eax, 39
@@ -430,7 +448,8 @@ user_code!(
 );
 
 // exit(0).
-user_code!(
+#[cfg(target_arch = "x86_64")]
+x86_user_code!(
     EXIT0,
     "
     xor edi, edi
@@ -444,6 +463,7 @@ user_code!(
 /// with `SIGSEGV` on the exit's own path, before `swapgs`; a process whose
 /// first entry `iretq`s to a non-canonical RIP gets `SIGSEGV` too (on KVM
 /// from the labeled `iretq`'s `#GP`, on TCG from the fetch).
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_noncanonical_rip_sigsegv() -> Outcome {
     let kills = sc_testing::bad_rip_kills();
     sc_testing::arm_noncanonical_rip(SYS_GETPID);
@@ -500,7 +520,7 @@ pub(super) fn unlink_quiet(path: &str) -> Result<(), FsError> {
 }
 
 // exit(99): what a huge image runs if its load succeeds.
-user_code!(
+x86_user_code!(
     EXIT99,
     "
     mov edi, 99
@@ -514,7 +534,7 @@ user_code!(
 // 0; each must return -ENOMEM (exit 1, 2, 3). Then fork (exit 4 on
 // failure; the child exits 0), wait4 with a status word on the stack
 // (exit 5 on a wrong pid, 6 on a non-zero status), and exit 0.
-user_code!(
+x86_user_code!(
     EXEC_HUGE,
     "
     mov r12, [rsp + 16]
@@ -643,7 +663,7 @@ pub(crate) fn test_exec_huge_memsz() -> Outcome {
 
 // Exit 0 when the data segment at 0x4010_0000 holds byte i % 251 at 70000
 // (222) and at 99999 (101), else exit 1.
-user_code!(
+x86_user_code!(
     CHECK_BIG_DATA,
     "
     mov rax, 0x40100000
@@ -661,7 +681,7 @@ user_code!(
 );
 
 // execve("/xbig", {"/xbig", NULL}, NULL); on return exit(100 - rax).
-user_code!(
+x86_user_code!(
     EXEC_XBIG,
     "
     lea rdi, [rip + 2f]
@@ -682,7 +702,7 @@ user_code!(
 );
 
 // execve("/xcut", {"/xcut", NULL}, NULL); on return exit(100 - rax).
-user_code!(
+x86_user_code!(
     EXEC_XCUT,
     "
     lea rdi, [rip + 2f]
@@ -703,7 +723,7 @@ user_code!(
 );
 
 // execve("/tmp/xtmp", {"/tmp/xtmp", NULL}, NULL); on return exit(100 - rax).
-user_code!(
+x86_user_code!(
     EXEC_XTMP,
     "
     lea rdi, [rip + 2f]
@@ -862,7 +882,7 @@ pub(crate) fn test_exec_large_elf_from_file() -> Outcome {
 // into the stack (7), return b+0x1000. fork (8): the child exits 10 unless
 // its brk(0) is b+0x1000 and 11 unless it reads b's marker; the parent
 // exits 12 on a wrong wait4 pid and 13 on a non-zero status.
-user_code!(
+x86_user_code!(
     BRK_RW,
     "
     xor edi, edi
@@ -961,7 +981,7 @@ user_code!(
 
 // Grow the heap to b+0x3000, shrink it to b+0x1000, load b+0x2000: SIGSEGV.
 // Exit 1 or 2 on a wrong brk return, 3 if the load did not fault.
-user_code!(
+x86_user_code!(
     BRK_SHRUNK_TOUCH,
     "
     xor edi, edi
@@ -996,7 +1016,7 @@ user_code!(
 // A second call lands below a (5). MAP_FIXED at a free address returns it
 // (6). MAP_FIXED_NOREPLACE at a returns -17 (7). munmap(a, 0x4000) returns
 // 0 (8).
-user_code!(
+x86_user_code!(
     MMAP_RW,
     "
     xor edi, edi
@@ -1077,7 +1097,7 @@ user_code!(
 
 // Store into a PROT_READ page: SIGSEGV. Exit 1 if mmap failed, 2 if the
 // store did not fault.
-user_code!(
+x86_user_code!(
     MMAP_RO_WRITE,
     "
     xor edi, edi
@@ -1103,7 +1123,7 @@ user_code!(
 // Map and mark 3 pages (1), unmap the middle one (2), fork (3). The child
 // exits 10 or 11 unless pages 1 and 3 hold their marks; the parent exits
 // 4 on a wrong wait4 pid and 5 on a non-zero status.
-user_code!(
+x86_user_code!(
     MUNMAP_SPLIT_FORK,
     "
     xor edi, edi
@@ -1168,7 +1188,7 @@ user_code!(
 
 // Map (1), store, unmap (2), load: SIGSEGV. Exit 3 if the load did not
 // fault.
-user_code!(
+x86_user_code!(
     MUNMAP_TOUCH,
     "
     xor edi, edi
@@ -1202,7 +1222,7 @@ user_code!(
 
 // mmap with PROT_NONE (1), then load the address: SIGSEGV. Exit 2 if the
 // load did not fault.
-user_code!(
+x86_user_code!(
     PROT_NONE_TOUCH,
     "
     xor edi, edi
@@ -1233,7 +1253,7 @@ user_code!(
 // MAP_FIXED at 0 returns -1 (11); munmap returns -22 for an unaligned addr
 // (12), a len of 0 (13), and a range past USER_MAP_END (14), and 0 for a
 // free range (15).
-user_code!(
+x86_user_code!(
     MMAP_ERRORS,
     "
     mov rdi, [rsp + 16]

@@ -192,7 +192,7 @@ def init_no_sh_case(env: EnvConfig) -> RunResult:
 def no_sh_main() -> int:
     """`run_pid1.py init_no_sh`: run the case and record `init_no_sh`."""
     env = env_config(default_iso=default_iso(NO_SH_VARIANT), default_timeout=BOOT_ALLOWANCE_S)
-    res = results.Results(env.tier)
+    res = results.Results(env.tier, env.arch)
     cfg = env.qemu(expect="panic")
     try:
         result = init_no_sh_case(env)
@@ -220,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     name = args[0]
     env = env_config(default_iso=default_iso(CASES[name].variant), default_timeout=BOOT_ALLOWANCE_S)
-    res = results.Results(env.tier)
+    res = results.Results(env.tier, env.arch)
     cfg = env.qemu(expect="panic")
     try:
         result = run_case(name, env)

@@ -1,6 +1,7 @@
 //! The bootstrap thread: boot's own context made thread 0 and moved off
 //! Limine's stack onto a guarded KVA stack (ROADMAP §10.6, MEMORY.md §4.5).
 
+#[cfg(any(target_arch = "x86_64", feature = "kernel_tests"))]
 use core::ops::Range;
 use core::sync::atomic::AtomicU32;
 
@@ -8,18 +9,20 @@ use vibeos::arch::ContextSwitch;
 use vibeos::desc::UserSegs;
 use vibeos::kalloc::TryBox;
 use vibeos::proc::INIT_PID;
-use vibeos::thread::{
-    CpuAffinity, CpuContext, Fxsave, OnCpu, Tcb, ThreadId, ThreadState, WaitOutcome,
-};
+use vibeos::thread::{CpuAffinity, CpuContext, OnCpu, Tcb, ThreadId, ThreadState, WaitOutcome};
 
-use super::{SCHED, tid_of_slot, with_sched};
+#[cfg(any(target_arch = "x86_64", feature = "kernel_tests"))]
+use super::with_sched;
+use super::{SCHED, tid_of_slot};
 use crate::arch::current::Arch;
 use crate::kva_init;
 use crate::per_cpu_init;
 
-/// The bootstrap thread's stack: 64 KiB, the registry thread's size
-/// (ROADMAP §10.2). Direct calls alone reach about 32 KB from `_start`,
-/// which the 16 KiB default would overflow (MEMORY.md §4.5).
+/// The bootstrap thread's stack. x86_64: 64 KiB (ROADMAP §10.2). aarch64:
+/// 16 KiB, the one size every kernel stack uses (ROADMAP §11.3).
+#[cfg(target_arch = "aarch64")]
+pub(crate) const BOOT_STACK_PAGES: usize = 4;
+#[cfg(not(target_arch = "aarch64"))]
 pub(crate) const BOOT_STACK_PAGES: usize = 16;
 
 /// Make boot thread 0 and move it off Limine's stack: allocate its guarded
@@ -52,9 +55,10 @@ pub unsafe fn init_bootstrap(rest: extern "C" fn() -> !) -> ! {
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
         as_cr3: 0,
-        fpu: Fxsave::INITIAL,
+        fpu: super::initial_fxsave(),
         fp_cpu: None,
         user_segs: UserSegs::NULL,
+        tls_base: 0,
         syscall_count: vibeos::atomic::AtomicU64::new(0),
         pid: 0,
         no_reclaim: AtomicU32::new(0),
@@ -110,13 +114,14 @@ fn bootstrap_entry() {
 /// The bootstrap thread's stack range, its saved RSP, and whether it is on
 /// a CPU now (its saved RSP is stale while it runs). `None` before
 /// [`init_bootstrap`].
+#[cfg(any(target_arch = "x86_64", feature = "kernel_tests"))]
 pub(crate) fn bootstrap_stack() -> Option<(Range<u64>, u64, bool)> {
     with_sched(|s| {
         let t = s.get(ThreadId::BOOTSTRAP)?;
         let st = t.stack.as_ref()?;
         Some((
             st.base().as_u64()..st.top().as_u64(),
-            t.context.rsp,
+            t.context.stack_ptr(),
             !t.on_cpu.is_clear(),
         ))
     })

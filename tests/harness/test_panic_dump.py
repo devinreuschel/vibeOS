@@ -148,6 +148,25 @@ class TestCheckStop(unittest.TestCase):
         with self.assertRaisesRegex(HarnessError, "owner nmi returned"):
             panic_dump.check_stop(STOP_BOOT + dump)
 
+    def test_aarch64_good_dump_passes(self) -> None:
+        boot = k(
+            "vibeOS: serial online",
+            "vibeOS: el: 1",
+            "vibeOS: gic: v3",
+            "vibeOS: boot: panic-stop armed",
+            "vibeOS: panic_stop: line 0",
+            "vibeOS: panic_stop: line 1",
+            "vibeOS: panic_stop: line 2",
+        )
+        cpus = {
+            1: "stopped (panic)",
+            2: "stopped (poll)",
+            3: "stopped (poll)",
+            4: "not stopped",
+        }
+        dump = [ln for ln in stop_dump(0, cpus) if "owner nmi" not in ln]
+        panic_dump.check_stop(boot + dump)
+
     def test_owner_not_zero_or_one_fails(self) -> None:
         dump = [ln.replace("thread cpu=0", "thread cpu=2") for ln in stop_dump(0)]
         with self.assertRaisesRegex(HarnessError, "owner"):

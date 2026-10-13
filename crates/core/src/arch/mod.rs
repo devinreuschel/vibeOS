@@ -7,15 +7,21 @@
 //! traits on one zero-sized type: the kernel's `arch::x86_64::Arch`, and the
 //! stub port `stub::Arch` that host builds test against.
 
+pub mod aarch64;
 pub mod x86_64;
 
 /// The reference port's pure-half items that portable code and the kernel
-/// name directly, until a second port's kernel builds (ROADMAP Phase 11): the
-/// x86_64 descriptor, vector, 8259, APIC and UART encodings, its user frame,
-/// and its syscall numbers (`docs/ARCH.md`).
-pub use x86_64::syscall::nr as syscall_nr;
-pub use x86_64::trap::UserFrame;
+/// name directly (`docs/ARCH.md`): the x86_64 descriptor, vector, 8259, APIC
+/// and UART encodings. Each port's user frame and `SYS_*` numbers live in
+/// that port's module; the kernel picks them in `arch::current`.
 pub use x86_64::{apic, desc, pic, uart, vectors};
+
+/// Host tests and the x86_64 kernel use the reference port's numbers.
+pub use x86_64::syscall::nr as syscall_nr;
+
+/// Host tests use the x86_64 user frame. The kernel's `arch::current`
+/// aliases the running port's frame.
+pub use x86_64::trap::UserFrame;
 
 use crate::thread::Tcb;
 
@@ -50,19 +56,14 @@ impl MmioWidth for u16 {}
 impl MmioWidth for u32 {}
 impl MmioWidth for u64 {}
 
-/// The machine state the boot handshake hands over, normalized.
+/// The machine state the boot handshake hands over, normalized. Every port
+/// requests one Limine base revision (`boot::LIMINE_BASE_REVISION`), so the
+/// record differs by platform (a DTB against an RSDP), never by revision.
 pub trait BootHandover {
     type Info: 'static;
-    /// The boot protocol revision the port asks its loader for (Limine's
-    /// base revision).
-    const BASE_REVISION: u64;
     /// The handover record. Valid only after entry has captured it, which
     /// every caller outside the entry path is.
     fn info() -> &'static Self::Info;
-    /// The physical address of a firmware table the loader handed over as
-    /// `raw`: a physical address, or an address in the loader's direct map
-    /// at `hhdm_offset`, as the port's revision gives it.
-    fn table_phys(raw: u64, hhdm_offset: u64) -> u64;
 }
 
 /// This CPU's interrupt mask.

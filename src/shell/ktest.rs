@@ -15,7 +15,7 @@ pub(crate) fn command_count() -> usize {
 
 /// `name` is a registered command.
 pub(crate) fn has_command(name: &str) -> bool {
-    shell_init::with_reg(|r| r.lookup(name).is_some())
+    shell_init::has_command(name)
 }
 
 /// The builtins `shell_init::init` registers.

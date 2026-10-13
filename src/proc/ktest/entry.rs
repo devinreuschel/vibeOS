@@ -3,7 +3,9 @@
 
 use core::mem::ManuallyDrop;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+#[cfg(target_arch = "x86_64")]
+use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use vibeos::addr_space::{UserMemError, UserPerms};
 use vibeos::arch::PageTable;
@@ -19,16 +21,22 @@ use crate::apic_init;
 use crate::arch;
 use crate::arch::current::Arch;
 use crate::arch::idt::testing as idt_testing;
-use crate::ktest::user::{self, DEFAULT, Image, Layout, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, Layout, x86_user_code};
 use crate::ktest::{Outcome, quiescent_free_frames, spawn_thread};
 use crate::per_cpu_init;
 use crate::proc_init::{self, testing as proc_testing};
 use crate::sync::blocking_init::Semaphore;
+#[cfg(target_arch = "x86_64")]
 use crate::syscall_init::testing as entry_testing;
 use crate::thread_init;
 use crate::time_init;
 #[cfg(target_arch = "x86_64")]
 use crate::x86;
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn test_addrspace_map_unmap_teardown() -> Outcome {
+    Outcome::Skip("x86 invlpg")
+}
 
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn test_addrspace_map_unmap_teardown() -> Outcome {
@@ -148,16 +156,17 @@ pub(crate) fn test_cr3_switch_skip() -> Outcome {
 /// kernel root after.
 fn cr3_switch_steps(a: &Space, b: &Space) -> Result<(), &'static str> {
     super::load_cr3(a);
-    let cr3_a = <Arch as PageTable>::root().as_u64();
+    // TTBR0 on aarch64. `root` is TTBR1, which every user space shares.
+    let cr3_a = <Arch as PageTable>::user_root().as_u64();
     if !super::cr3_was_skipped(a) {
         return Err("a not recorded");
     }
     super::load_cr3(a);
-    if (<Arch as PageTable>::root().as_u64()) != cr3_a {
+    if (<Arch as PageTable>::user_root().as_u64()) != cr3_a {
         return Err("skip mutated cr3");
     }
     super::load_cr3(b);
-    let cr3_b = <Arch as PageTable>::root().as_u64();
+    let cr3_b = <Arch as PageTable>::user_root().as_u64();
     if cr3_b == cr3_a {
         return Err("b shares a cr3");
     }
@@ -165,7 +174,7 @@ fn cr3_switch_steps(a: &Space, b: &Space) -> Result<(), &'static str> {
 }
 
 // syscall 0xC0FFEE, then `ud2` if rax is -ENOSYS, else exit(1).
-user_code!(
+x86_user_code!(
     ENOSYS_PROBE,
     "
     mov eax, 0xC0FFEE
@@ -255,7 +264,7 @@ pub(crate) fn test_syscall_dispatch() -> Outcome {
 // write(1, "hi\n" in its page, 3) must return 3; then NULL/8, a kernel
 // pointer/8, the unmapped page after its own/8, and -1/2 must each return
 // -EFAULT. Exits 11 to 15 at the first mismatch, else 0.
-user_code!(
+x86_user_code!(
     PTR_VALIDATE,
     "
     lea rbx, [rip]
@@ -465,7 +474,7 @@ const RCX_CANARY: u64 = 0x0C0F_FEE0_DEAD_BEEF;
 
 // getpid with rdi = proc_init::testing::HOOK_MAGIC; exit(0) when RCX holds
 // RCX_CANARY after the call, else exit(1).
-user_code!(
+x86_user_code!(
     RCX_CANARY_PROG,
     "
     movabs rdi, 0x5EEDCA1100005A21
@@ -500,7 +509,7 @@ pub(crate) fn test_syscall_rcx_canary() -> Outcome {
 // fork with 12 syscall-preserved GPRs holding canaries. The child exits 0
 // iff all 12 survived its first return, else 1; the parent exits 2 if its
 // own 12 changed, else waits for the child and exits with its code.
-user_code!(
+x86_user_code!(
     FORK_GPRS,
     "
     movabs rbx, 0xC0DE0100F00DF001
@@ -646,7 +655,7 @@ pub(crate) fn test_fork_child_gprs() -> Outcome {
 // 15 GPR canaries (arch::idt::testing::GPR_CANARIES), then a spin at
 // +0x100; the hook sends the frame's RIP to +0x200, which exits 0 iff
 // every GPR still holds its canary, else 1.
-user_code!(
+x86_user_code!(
     GPR_CANARY_SPIN,
     "
     movabs r15, 0xC0DE000000000101
@@ -831,6 +840,7 @@ fn sleep_until(pred: impl Fn() -> bool, ms: u64) -> bool {
     true
 }
 
+#[cfg(target_arch = "x86_64")]
 const _: () = {
     // The program's literals are the hook's canaries.
     assert!(idt_testing::GPR_CANARIES[0] == 0xC0DE_0000_0000_0101);
@@ -838,7 +848,7 @@ const _: () = {
 };
 
 // Set RFLAGS.TF with popf: the single-step trap follows the nop.
-user_code!(
+x86_user_code!(
     SINGLE_STEP,
     "
     pushfq
@@ -854,7 +864,7 @@ user_code!(
 );
 
 // int1 (ICEBP).
-user_code!(
+x86_user_code!(
     INT1,
     "
     .byte 0xf1
@@ -902,7 +912,7 @@ pub(crate) fn test_user_int1() -> Outcome {
 // Set TF; the #DB after the nop re-pins the thread and clears TF. Then 100
 // getpid calls with rdi = HOOK_MAGIC, and exit(0). The instruction after
 // the popf is a nop, never a syscall.
-user_code!(
+x86_user_code!(
     TF_REPIN,
     "
     pushfq
@@ -992,7 +1002,8 @@ pub(crate) fn test_user_tf_repin() -> Outcome {
 // two sched_yield each until fork fails, then wait4(-1, NULL) until
 // -ECHILD. Exits 0; a failed check exits 10 + its step. Raise the round
 // count only locally, for soak runs.
-user_code!(
+#[cfg(target_arch = "x86_64")]
+x86_user_code!(
     FORK_WAIT,
     "
     .set FORK_WAIT_ROUNDS, 4
@@ -1162,24 +1173,30 @@ user_code!(
 );
 
 /// How long the registry waits for one run of [`FORK_WAIT`].
+#[cfg(target_arch = "x86_64")]
 const RUN_MS: u64 = 4_000;
 
 /// First ring-3 entries each run holds in the entry window: the
 /// program's own and its first forked children's.
+#[cfg(target_arch = "x86_64")]
 const HELD_ENTRIES: u32 = 4;
 
 /// [`RUN_ST`] before the run's thread has published.
+#[cfg(target_arch = "x86_64")]
 const PENDING: u32 = u32::MAX;
 
 /// [`RUN_ST`] when the spawn failed.
+#[cfg(target_arch = "x86_64")]
 const SPAWN_FAILED: u32 = u32::MAX - 1;
 
 /// The status word of the current run, published by its thread.
+#[cfg(target_arch = "x86_64")]
 static RUN_ST: AtomicU32 = AtomicU32::new(PENDING);
 
 /// The body of the thread pinned to the CPU under test: spawn the
 /// program there (`spawn_user` pins a process to its spawner's CPU),
 /// wait for it, and publish the status as its last access.
+#[cfg(target_arch = "x86_64")]
 fn fork_wait_runner() {
     let st = match user::spawn(&Image::Code(FORK_WAIT, DEFAULT), &["fork_wait"]) {
         Ok(pid) => user::wait(pid),
@@ -1190,8 +1207,10 @@ fn fork_wait_runner() {
 
 /// The processes of a [`FORK_WAIT`] run that are not Dead, with their
 /// state and CPU.
+#[cfg(target_arch = "x86_64")]
 struct Stuck;
 
+#[cfg(target_arch = "x86_64")]
 impl core::fmt::Display for Stuck {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut r = Ok(());
@@ -1215,6 +1234,7 @@ impl core::fmt::Display for Stuck {
 /// Run [`FORK_WAIT`] from a thread pinned to `cpu`, with its first
 /// [`HELD_ENTRIES`] ring-3 entries held in the window, waiting at most
 /// [`RUN_MS`].
+#[cfg(target_arch = "x86_64")]
 fn run_on(cpu: u32) -> Outcome {
     RUN_ST.store(PENDING, Ordering::Relaxed);
     entry_testing::arm_fork_wait_stall(HELD_ENTRIES);
@@ -1223,6 +1243,7 @@ fn run_on(cpu: u32) -> Outcome {
     out
 }
 
+#[cfg(target_arch = "x86_64")]
 fn wait_run(cpu: u32) -> Outcome {
     crate::ktest::spawn_thread_on("fork_wait_run", fork_wait_runner, cpu);
     let t0 = time_init::uptime_ms();
@@ -1247,6 +1268,18 @@ fn wait_run(cpu: u32) -> Outcome {
 /// holds each run's first ring-3 entries in the window after GS is
 /// loaded for ring 3 (ROADMAP §10.2, F021).
 pub(crate) fn user_fork_wait_stall() -> Outcome {
+    #[cfg(target_arch = "aarch64")]
+    {
+        Outcome::Skip("x86 syscall entry")
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        user_fork_wait_stall_x86()
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn user_fork_wait_stall_x86() -> Outcome {
     // The registry is pinned, so the hint is its CPU.
     let here = thread_init::current_cpu();
     let out = run_on(here);
@@ -1263,7 +1296,7 @@ pub(crate) fn user_fork_wait_stall() -> Outcome {
 // c2 took c1's pid, 3 unless kill(c1, SIGCONT) is -ESRCH, 4 unless
 // wait4(c1) is -ECHILD, 5 unless wait4(c2) returns c2, 6 if a fork or the
 // first wait4 failed; else 0.
-user_code!(
+x86_user_code!(
     PID_REUSE_PROG,
     "
     mov eax, 57

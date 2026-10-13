@@ -20,9 +20,9 @@ use vibeos::per_cpu::{PerCpu, PerCpuRemote};
 use vibeos::sched::ReadyQueue;
 use vibeos::thread::{MAX_THREADS, Tcb};
 
-use crate::acpi_init;
 use crate::arch::current::{InterruptGuard, interrupts_enabled, percpu, set_per_cpu_hooks};
 use crate::cell::BootCell;
+use crate::machine_init;
 
 #[allow(
     clippy::disallowed_types,
@@ -49,8 +49,11 @@ fn apic_id() -> u32 {
     percpu::hw_cpu_id()
 }
 
-fn madt_cpu_count() -> usize {
-    acpi_init::info().map(|i| i.cpu_count()).unwrap_or(0).max(1)
+fn firmware_cpu_count() -> usize {
+    machine_init::info()
+        .map(|d| d.cpu_count())
+        .unwrap_or(0)
+        .max(1)
 }
 
 /// Allocate the heap array, install the BSP at slot 0.
@@ -65,7 +68,7 @@ fn madt_cpu_count() -> usize {
     reason = "boot: DESIGN §3.3 step 11 per-CPU areas, before irq: enabled; sized once from the MADT, never grown"
 )]
 pub unsafe fn init_bsp() {
-    let n = madt_cpu_count();
+    let n = firmware_cpu_count();
     let mut r = Vec::with_capacity(n);
     let mut i = 0;
     while i < n {
@@ -97,7 +100,9 @@ pub unsafe fn init_bsp() {
         boxed[i].cpu_id = i as u32;
         i += 1;
     }
+    // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
     remote[0].apic_id.store(apic_id(), Ordering::Relaxed);
+    // Release: pairs with the Acquire load in `wait_ready`.
     remote[0].ready.store(true, Ordering::Release);
     // SAFETY: slot 0 is the BSP's `PerCpu`, and the heap keeps the boxed
     // slice in place for good once `CPUS` holds it; the GDT load already
@@ -108,7 +113,9 @@ pub unsafe fn init_bsp() {
     // set contract); established here: `init_bsp` runs once on the BSP.
     unsafe { CPUS.set(boxed) };
     set_per_cpu_hooks(irq_nest_enter, irq_nest_leave, cpu_index_hook);
+    crate::serial::raw::set_cpu_index_hook(crate::arch::cpu::cpu_index);
     percpu::mark_live();
+    // Release: pairs with the Acquire load in `online_mask`.
     ONLINE.store(1, Ordering::Release);
 }
 
@@ -268,12 +275,14 @@ unsafe fn with_ptr<R>(p: *mut PerCpu, f: impl FnOnce(&mut PerCpu) -> R) -> R {
     // SAFETY: `p` is a live slot of `CPUS` by this fn's `# Safety`
     // contract, established here; `cpu_id` is written once in `init_bsp`.
     let id = unsafe { (*p).cpu_id as usize }.min(63);
+    // Acquire: pairs with the Release store in `Unlock::drop`.
     if WITH_BUSY[id].swap(true, Ordering::Acquire) {
         panic!("per_cpu: with_current re-entry");
     }
     struct Unlock<'a>(&'a AtomicBool);
     impl Drop for Unlock<'_> {
         fn drop(&mut self) {
+            // Release: pairs with the next holder's Acquire swap above.
             self.0.store(false, Ordering::Release);
         }
     }
@@ -303,12 +312,14 @@ pub unsafe fn install_gs(cpu: &PerCpu) {
 /// CPU's `PerCpu`.
 pub fn irq_nest_enter() {
     if let Some(c) = try_current() {
+        // Relaxed: only this CPU stores its `irq_nest`; pairs with nothing.
         c.irq_nest.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 pub fn irq_nest_leave() {
     if let Some(c) = try_current() {
+        // Relaxed: only this CPU stores its `irq_nest`; pairs with nothing.
         let old = c.irq_nest.fetch_sub(1, Ordering::Relaxed);
         assert!(old > 0, "irq nest underflow");
     }
@@ -326,6 +337,7 @@ pub fn irq_nest() -> u32 {
     if interrupts_enabled() {
         return 0;
     }
+    // Relaxed: only this CPU stores its `irq_nest`; pairs with nothing.
     try_current()
         .map(|c| c.irq_nest.load(Ordering::Relaxed))
         .unwrap_or(0)
@@ -335,6 +347,21 @@ pub use crate::arch::current::percpu::gs_self;
 
 pub fn set_current_thread(cpu: &mut PerCpu, tcb: *mut Tcb) {
     cpu.current = tcb;
+    #[cfg(target_arch = "aarch64")]
+    {
+        let here = crate::arch::current::percpu::gs_self();
+        if !here.is_null() && core::ptr::eq(here, core::ptr::from_mut(cpu)) {
+            // SAFETY: `cpu` is this CPU's `PerCpu` and `tcb` is its
+            // incoming thread, or null at early boot; `SP_EL0` is
+            // `current` at EL1 (ROADMAP §11.6). established by
+            // `thread_init::switch_now`, `thread_init::init_bootstrap`,
+            // and `smp_init::ap_entry_aarch64`. A publish of another
+            // CPU's slot writes only `PerCpu.current`.
+            unsafe {
+                crate::arch::aarch64::percpu::write_sp_el0(tcb as u64);
+            }
+        }
+    }
 }
 
 /// The running thread's TCB: [`crate::arch::current_tcb`], one load that
@@ -343,6 +370,10 @@ pub fn current_thread() -> *mut Tcb {
     crate::arch::current_tcb()
 }
 
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(dead_code, reason = "x86-only on the boot-CPU slice")
+)]
 pub fn set_timer_mode(mode: vibeos::apic::TimerMode) {
     if try_current().is_some() {
         with_current(|c| c.timer_mode = mode);
@@ -353,10 +384,21 @@ pub fn mark_online(cpu_id: u32) {
     if cpu_id >= 64 {
         return;
     }
+    // Release: pairs with the Acquire load in `online_mask`.
     ONLINE.fetch_or(1u64 << cpu_id, Ordering::Release);
 }
 
+/// Clear CPU `cpu_id` from the online mask (F032 timeout).
+pub fn mark_offline(cpu_id: u32) {
+    if cpu_id >= 64 {
+        return;
+    }
+    // Release: pairs with the Acquire load in `online_mask`.
+    ONLINE.fetch_and(!(1u64 << cpu_id), Ordering::Release);
+}
+
 pub fn online_mask() -> u64 {
+    // Acquire: pairs with the Release stores in `init_bsp` and `mark_online`.
     ONLINE.load(Ordering::Acquire)
 }
 

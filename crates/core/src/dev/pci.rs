@@ -29,6 +29,37 @@ pub const fn ecam_off(bus_rel: u8, dev: u8, func: u8, offset: u16) -> u64 {
         | (offset as u64 & 0xFFF)
 }
 
+/// Buses the scan walks: `first` through `min(last, first + (size >> 20) - 1)`.
+/// `None` when that range is empty or `size` holds no full bus.
+pub const fn scan_range(first: u8, last: u8, size: u64) -> Option<(u8, u8)> {
+    if last < first {
+        return None;
+    }
+    let buses = size >> 20;
+    if buses == 0 {
+        return None;
+    }
+    // Buses from `first` through 255. A wider `reg` does not pass bus 255,
+    // and `room` is at most 256 so the casts below do not truncate.
+    let room = 256u64.saturating_sub(first as u64);
+    let buses = if buses > room { room } else { buses };
+    let covered = (first as u16)
+        .saturating_add(buses as u16)
+        .saturating_sub(1);
+    let last_u = last as u16;
+    let end = if last_u < covered { last_u } else { covered };
+    Some((first, end as u8))
+}
+
+/// Bytes of ECAM for buses `first` through `last`. MCFG has no size field.
+pub const fn ecam_bytes(first: u8, last: u8) -> u64 {
+    if last < first {
+        return 0;
+    }
+    let n = (last as u64).saturating_sub(first as u64).saturating_add(1);
+    n.saturating_mul(1 << 20)
+}
+
 /// Physical ECAM address, or `None` if `bus` is outside the window.
 pub const fn ecam_phys(
     base: u64,
@@ -242,6 +273,31 @@ impl Bar {
 /// exhaust the ioremap window.
 pub const fn bar_map_allowed(size: u64) -> bool {
     size > 0 && size <= MAX_BAR_MAP
+}
+
+/// Next address in a PCI MMIO window. `cursor` is the first free byte,
+/// `align` is a power of two (the reservation: one page, or the BAR size
+/// rounded up), and `limit` is the first byte past the window. Returns
+/// `(addr, next)` with `addr` aligned and `next == addr + align`, or
+/// `None` when that reservation would pass `limit` or `align` is not a
+/// power of two. `next == limit` fits.
+pub const fn next_bar_addr(cursor: u64, align: u64, limit: u64) -> Option<(u64, u64)> {
+    if !align.is_power_of_two() {
+        return None;
+    }
+    let mask = align.wrapping_sub(1);
+    let Some(sum) = cursor.checked_add(mask) else {
+        return None;
+    };
+    let addr = sum & !mask;
+    let Some(next) = addr.checked_add(align) else {
+        return None;
+    };
+    if next > limit {
+        None
+    } else {
+        Some((addr, next))
+    }
 }
 
 fn size_from_mask(mask: u64, flag_bits: u64, wide: bool) -> u64 {
@@ -518,9 +574,21 @@ fn bus_bit(seen: &mut [u64; 4], bus: u8) -> bool {
 /// Recursive scan from `start_bus`. Bridges with a non-zero secondary
 /// bus are followed. Does not assign bus numbers.
 pub fn enumerate<C: CfgIo>(cfg: &mut C, start_bus: u8, out: &mut [FuncInfo]) -> usize {
+    enumerate_buses(cfg, &[start_bus], out)
+}
+
+/// As [`enumerate`], from each bus in `starts`. A bus is walked once, so
+/// a bridge into the next host's root is not recorded twice.
+pub fn enumerate_buses<C: CfgIo>(cfg: &mut C, starts: &[u8], out: &mut [FuncInfo]) -> usize {
     let mut n = 0usize;
     let mut seen = [0u64; 4];
-    scan_bus(cfg, start_bus, out, &mut n, &mut seen);
+    let mut i = 0usize;
+    while i < starts.len() {
+        if let Some(&bus) = starts.get(i) {
+            scan_bus(cfg, bus, out, &mut n, &mut seen);
+        }
+        i = i.saturating_add(1);
+    }
     n
 }
 
@@ -710,11 +778,13 @@ pub fn friendly_name(vendor: u16, device: u16) -> Option<&'static str> {
         (0x1234, 0x11e8) => Some("edu"),
         (0x1af4, 0x1000) => Some("virtio-net"),
         (0x1af4, 0x1001) => Some("virtio-blk"),
-        (0x1af4, 0x1004) => Some("virtio-rng"),
+        (0x1af4, 0x1004) => Some("virtio-scsi"),
+        (0x1af4, 0x1005) => Some("virtio-rng"),
         (0x1af4, 0x1041) => Some("virtio-net"),
         (0x1af4, 0x1042) => Some("virtio-blk"),
         (0x1af4, 0x1044) => Some("virtio-rng"),
         (0x1af4, 0x1050) => Some("virtio-gpu"),
+        (0x1af4, 0x1052) => Some("virtio-input"),
         (0x1b36, 0x11e8) => Some("edu"),
         _ => None,
     }
@@ -914,6 +984,12 @@ mod tests {
         assert_eq!(
             ecam_phys(0xB000_0000, 1, 3, 2, 0, 1, 4),
             Some(0xB000_0000 + ecam_off(1, 0, 1, 4))
+        );
+        const R: u64 = 0x4000_0000;
+        assert_eq!(ecam_phys(R, 0x10, 0x1f, 0x10, 0, 0, 0), Some(R));
+        assert_eq!(
+            ecam_phys(R, 0x10, 0x1f, 0x1f, 0, 0, 0),
+            Some(R + (0xf << 20))
         );
     }
 
@@ -1133,6 +1209,52 @@ mod tests {
         assert_eq!(MsiCap::parse(0x50, 0).data_off, 0x58);
     }
 
+    /// `ecam-bus-range.dtb`: `bus-range = <0x10 0x1f>`, `reg` size 16 MiB.
+    /// The scan starts at the first bus. A wider `bus-range` is clamped
+    /// to the buses the `reg` can hold, and a device on bus 0 is not
+    /// what that start finds.
+    #[test]
+    fn ecam_bus_range_scan_starts_at_first_bus() {
+        let d =
+            crate::machine::fdt::parse(include_bytes!("../machine/testdata/ecam-bus-range.dtb"))
+                .unwrap();
+        let h = &d.pci_hosts()[0];
+        assert_eq!(h.first_bus, 0x10);
+        assert_eq!(h.last_bus, 0x1f);
+        assert_eq!(h.ecam_size, 0x0100_0000);
+        let range = scan_range(h.first_bus, h.last_bus, h.ecam_size);
+        assert_eq!(range, Some((0x10, 0x1f)));
+        // Same window, a bus-range that runs past the reg.
+        assert_eq!(
+            scan_range(h.first_bus, 0xff, h.ecam_size),
+            Some((0x10, 0x1f))
+        );
+        assert_eq!(scan_range(0x10, 0x1f, 1 << 20), Some((0x10, 0x10)));
+        assert_eq!(scan_range(0, 0xff, 0), None);
+        assert_eq!(scan_range(0x20, 0x10, 1 << 20), None);
+        assert_eq!(scan_range(0xf0, 0xff, 32 << 20), Some((0xf0, 0xff)));
+        assert_eq!(ecam_bytes(0, 0xff), 0x1000_0000);
+        assert_eq!(
+            scan_range(0x10, 0x1f, ecam_bytes(0x10, 0x1f)),
+            Some((0x10, 0x1f))
+        );
+
+        let (start, _) = range.unwrap();
+        let mut f = Fake::new();
+        f.device(Bdf::new(0, 0, 0), 0x8086, 0x1237, 0x06, 0x00);
+        f.device(Bdf::new(0x10, 0, 0), 0x1af4, 0x1042, 0x01, 0x00);
+        let mut out = [FuncInfo::empty(); 4];
+        let n = enumerate(&mut f, start, &mut out);
+        assert_eq!(n, 1);
+        assert_eq!(out[0].bdf.bus, 0x10);
+        assert_eq!(out[0].device, 0x1042);
+
+        let n = enumerate_buses(&mut f, &[start, 0], &mut out);
+        assert_eq!(n, 2);
+        assert_eq!(out[0].bdf.bus, 0x10);
+        assert_eq!(out[1].bdf.bus, 0);
+    }
+
     #[test]
     fn enumerate_follows_bridge() {
         let mut f = Fake::new();
@@ -1205,9 +1327,11 @@ mod tests {
         assert_eq!(friendly_name(0x8086, 0x1237), Some("440FX"));
         assert_eq!(friendly_name(0x1234, 0x1111), Some("bochs"));
         assert_eq!(friendly_name(0x1af4, 0x1044), Some("virtio-rng"));
-        assert_eq!(friendly_name(0x1af4, 0x1004), Some("virtio-rng"));
+        assert_eq!(friendly_name(0x1af4, 0x1005), Some("virtio-rng"));
+        assert_eq!(friendly_name(0x1af4, 0x1004), Some("virtio-scsi"));
         assert_eq!(friendly_name(0x1af4, 0x1042), Some("virtio-blk"));
         assert_eq!(friendly_name(0x1af4, 0x1001), Some("virtio-blk"));
+        assert_eq!(friendly_name(0x1af4, 0x1052), Some("virtio-input"));
         assert_eq!(friendly_name(0x1b36, 0x11e8), Some("edu"));
         assert_eq!(friendly_name(0x1234, 0x11e8), Some("edu"));
         assert_eq!(friendly_name(0x0000, 0x0000), None);
@@ -1273,5 +1397,24 @@ mod tests {
         assert_eq!((c.msi, c.msix), (Some(0x40), Some(0x50)));
         let msi = read_msi_cap(&mut f, l, 0xFF);
         assert_eq!(msi.addr_off, 0xFF + 4);
+    }
+
+    #[test]
+    fn next_bar_addr_aligns_inside_the_window() {
+        assert_eq!(
+            next_bar_addr(0x101c_d000, 0x1000, 0x4000_0000),
+            Some((0x101c_d000, 0x101c_e000))
+        );
+        assert_eq!(
+            next_bar_addr(0x101c_c100, 0x1000, 0x4000_0000),
+            Some((0x101c_d000, 0x101c_e000))
+        );
+        assert_eq!(
+            next_bar_addr(0x3fff_f000, 0x1000, 0x4000_0000),
+            Some((0x3fff_f000, 0x4000_0000))
+        );
+        assert_eq!(next_bar_addr(0x3fff_f001, 0x1000, 0x4000_0000), None);
+        assert_eq!(next_bar_addr(0, 0, 0x1000), None);
+        assert_eq!(next_bar_addr(0, 3, 0x1000), None);
     }
 }

@@ -118,7 +118,7 @@ pub fn find_bdf(bdf: Bdf) -> Option<DevRef> {
 
 /// The first device with `vendor:device`.
 #[cfg_attr(
-    not(feature = "kernel_tests"),
+    all(not(feature = "kernel_tests"), target_arch = "x86_64"),
     expect(
         dead_code,
         reason = "only the in-guest tests look a device up by id yet"
@@ -154,6 +154,10 @@ pub fn state(dev: &DevRef) -> Option<DevState> {
         dead_code,
         reason = "only the in-guest tests read a parent until DESIGN §12.2's parent-first order (ROADMAP §20.x)"
     )
+)]
+#[cfg_attr(
+    all(target_arch = "aarch64", feature = "kernel_tests"),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
 )]
 pub fn parent(dev: &DevRef) -> Option<DevRef> {
     REG.lock().parent(dev)
@@ -274,6 +278,7 @@ pub fn is_claimed(dev: &DevRef, bar: u8) -> bool {
 /// the driver's `remove`, its BARs unmapped and released, then `Present`.
 /// `false` when `dev` was not bound.
 #[cfg(feature = "kernel_tests")]
+#[cfg(target_arch = "x86_64")]
 pub fn unbind(dev: &DevRef) -> bool {
     let Some(lock) = dev_lock(dev) else {
         return false;
@@ -292,6 +297,7 @@ pub fn unbind(dev: &DevRef) -> bool {
 /// Register `d`, a record no driver matches (vendor `0xFFFE`, class
 /// `0xFF`), for a claim test; its id, or `None` when the table is full.
 #[cfg(feature = "kernel_tests")]
+#[cfg(target_arch = "x86_64")]
 pub fn push_test_device(mut d: Device) -> Option<u64> {
     d.vendor = 0xFFFE;
     d.class = 0xFF;

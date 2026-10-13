@@ -14,3 +14,4 @@
 )]
 pub mod ktest;
 pub(crate) mod virtio_blk_init;
+pub(crate) mod virtio_input_init;

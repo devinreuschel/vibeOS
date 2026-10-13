@@ -50,6 +50,17 @@ pub mod variant {
         /// `kalloc::CoreArc::pin` raises `users` with a blind `fetch_add`,
         /// not get-unless-zero.
         UsersBlindPin = 10,
+        /// ASID fast path stores `active_asid` instead of compare-exchange.
+        AsidFastStore = 11,
+        /// ASID rollover skips reserving the ASIDs it exchanged out.
+        AsidSkipReserve = 12,
+        /// Call-function publishes the even round with a Relaxed store.
+        CallPublishRelaxed = 13,
+        /// Call-function acks with a Relaxed `fetch_or`.
+        CallAckRelaxed = 14,
+        /// Call-function publishes by resetting `acked`, the order a reused
+        /// slot gets wrong.
+        CallPublishOnAcked = 15,
     }
 
     /// `kernel` at `site`, or `weak` while a loom model has weakened it.
@@ -197,10 +208,12 @@ impl SpinLock {
     }
 
     pub fn is_locked(&self) -> bool {
+        // Relaxed: a snapshot; pairs with nothing.
         self.locked.load(Ordering::Relaxed)
     }
 
     pub fn owner(&self) -> usize {
+        // Relaxed: a snapshot for diagnostics; pairs with nothing.
         self.owner.load(Ordering::Relaxed)
     }
 
@@ -217,15 +230,19 @@ impl SpinLock {
     /// One CAS. `false` if held by someone else. Panics on recurse.
     pub fn try_acquire(&self, owner: usize) -> bool {
         assert!(owner != UNLOCKED, "spin: owner 0 is reserved");
+        // Acquire: pairs with the Release store in `release`.
+        // Relaxed on failure: pairs with nothing.
         match self
             .locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         {
             Ok(_) => {
+                // Relaxed: written under the lock; pairs with nothing.
                 self.owner.store(owner, Ordering::Relaxed);
                 true
             }
             Err(_) => {
+                // Relaxed: a match is only this owner's own store; pairs with nothing.
                 let held = self.owner.load(Ordering::Relaxed);
                 assert!(held != owner, "spin: recursive lock");
                 false
@@ -235,13 +252,17 @@ impl SpinLock {
 
     /// Release. Panics if free or `owner` does not hold it.
     pub fn release(&self, owner: usize) {
+        // Relaxed: the holder reads its own store; pairs with nothing.
         assert!(
             self.locked.load(Ordering::Relaxed),
             "spin: unlock of free lock"
         );
+        // Relaxed: as `locked` above; pairs with nothing.
         let held = self.owner.load(Ordering::Relaxed);
         assert!(held == owner, "spin: unlock by non-owner");
+        // Relaxed: the Release store below publishes it; pairs with nothing.
         self.owner.store(UNLOCKED, Ordering::Relaxed);
+        // Release: pairs with the Acquire compare-exchange in `try_acquire`.
         self.locked.store(false, Ordering::Release);
     }
 }
@@ -314,9 +335,11 @@ impl OpGate {
     /// takes it (`variant::Site::OpGateCountFirst`).
     fn enter_as<const COUNT_FIRST: bool>(&self) -> Result<OpGuard<'_>, Dead> {
         if !COUNT_FIRST {
+            // Acquire: pairs with the AcqRel `fetch_or` in `kill_and_wake`.
             if self.state.load(Ordering::Acquire) & DEAD != 0 {
                 return Err(Dead);
             }
+            // Acquire: pairs with each Release `fetch_sub` in `OpGuard::drop`.
             self.state.fetch_add(1, Ordering::Acquire);
             return Ok(OpGuard::new(self));
         }
@@ -325,6 +348,7 @@ impl OpGate {
         // sees this operation inside and waits for it, or this sees the
         // mark. Acquire, as a lock's acquire: the operation's accesses to
         // the object stay after its count-in.
+        // Acquire: pairs with `kill_and_wake`'s `fetch_or` and each Release `fetch_sub`.
         let old = self.state.fetch_add(1, Ordering::Acquire);
         let g = OpGuard::new(self);
         if old & DEAD != 0 {
@@ -345,9 +369,9 @@ impl OpGate {
     /// [`set_gate_wait`] installs. It may sleep, so only where DESIGN §2.9
     /// allows a sleep.
     pub fn kill_and_wake(&self, wake: impl FnOnce()) {
-        // AcqRel: Release, so an operation that finds the mark sees what
-        // came before the kill; Acquire, so this reads every count-in
-        // ordered before it.
+        // AcqRel: pairs with the count-in in `enter_as`. Release, so an
+        // operation that finds the mark sees what came before the kill;
+        // Acquire, so this reads every count-in ordered before it.
         self.state.fetch_or(DEAD, Ordering::AcqRel);
         wake();
         while self.inside() != 0 {
@@ -357,6 +381,7 @@ impl OpGate {
 
     /// Whether [`kill`](OpGate::kill) has marked the gate dead.
     pub fn is_dead(&self) -> bool {
+        // Acquire: pairs with the AcqRel `fetch_or` in `kill_and_wake`.
         self.state.load(Ordering::Acquire) & DEAD != 0
     }
 
@@ -402,6 +427,7 @@ impl<'a> OpGuard<'a> {
 impl Drop for OpGuard<'_> {
     fn drop(&mut self) {
         let g = self.gate.as_ptr();
+        // Release: pairs with the Acquire load in `OpGate::inside`.
         // SAFETY: the guard borrows the gate for `'a`, so it is live here;
         // established by `sync::OpGuard::new`. Only the atomic is reached,
         // through a shared reference that ends with this call.
@@ -431,6 +457,7 @@ const _: () = assert!(core::mem::size_of::<fn()>() == core::mem::size_of::<*mut 
 pub fn set_gate_wait(sleep: fn(&OpGate), wake: fn()) {
     // Release: pairs with the Acquire loads in `gate_sleep` and `gate_wake`.
     GATE_WAKE.store(wake as *mut (), statics::Ordering::Release);
+    // Release: pairs with the Acquire load in `gate_sleep`.
     GATE_SLEEP.store(sleep as *mut (), statics::Ordering::Release);
 }
 

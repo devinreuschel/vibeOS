@@ -14,20 +14,24 @@ x86_64 code behind `#[cfg(target_arch = "x86_64")]`. Rules:
   `crates/core/src/arch/mod.rs` has no `cfg`.
 - `dyn`: no `dyn Port` or `dyn` of a seam trait in `src/` or `crates/`.
 - `paths`: every backticked path in ARCH.md exists, and every file under
-  either `arch/x86_64/` appears in it.
+    either port's `arch/` directory in either crate appears in it.
 - `audit`: the grep of ROADMAP §10.3's audit box (`asm!`, `x86`, and CR and
   MSR names) over `src/` and `crates/core/src/`, outside both `arch/`
   directories, with comments and string contents stripped: every hit is in
   `src/` and fenced, and its file is listed under ARCH.md's Fenced sites; a
   listed file with no hit left is stale.
+- `skips`: each aarch64 row of `tests/harness/skips.toml` names an aarch64
+  `counterpart` or a `no_counterpart` reason (ROADMAP §11.1, §11.6).
 
-A fence is `#[cfg(target_arch = "x86_64")]` on an item, statement, array
+A fence is `#[cfg(target_arch = "x86_64")]` or
+`#[cfg(target_arch = "aarch64")]` on an item, statement, array
 element, `use` or `mod` declaration: after the attribute (and any further
 attributes) the unit runs to the first `;` or `,` at its depth, or, when a
 `{` opens at that depth first, to the matching `}` and a trailing `;` or
 `,`. A fenced `mod x;` fences `x.rs` or `x/mod.rs` and every file below it,
-and `#![cfg(target_arch = "x86_64")]` fences its whole file the same way.
-`not`, `any` and `all` forms are not fences.
+and `#![cfg(target_arch = "x86_64")]` or `#![cfg(target_arch = "aarch64")]`
+fences its whole file the same way. `not`, `any` and `all` forms are not
+fences.
 
 `--list` prints each audit hit with its fence status and exits 0.
 """
@@ -36,6 +40,7 @@ from __future__ import annotations
 
 import re
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,10 +51,16 @@ PORTABILITY = "docs/PORTABILITY.md"
 CORE_ARCH = "crates/core/src/arch/mod.rs"
 CURRENT = "src/arch/current.rs"
 STUB = "crates/core/src/arch/stub.rs"
+SKIPS = "tests/harness/skips.toml"
 PURE = tuple(
     f"crates/core/src/arch/x86_64/{n}.rs" for n in ("desc", "vectors", "pic", "apic", "paging")
 )
-PORT_DIRS = ("src/arch/x86_64", "crates/core/src/arch/x86_64")
+PORT_DIRS = (
+    "src/arch/x86_64",
+    "crates/core/src/arch/x86_64",
+    "src/arch/aarch64",
+    "crates/core/src/arch/aarch64",
+)
 AUDIT_ROOTS = ("src", "crates/core/src")
 ARCH_DIRS = ("src/arch/", "crates/core/src/arch/")
 DYN_ROOTS = ("src", "crates")
@@ -61,8 +72,8 @@ AUDIT = re.compile(
     r"|IA32_[A-Za-z0-9_]*|EFER|STAR|LSTAR|FMASK|FS_BASE|GS_BASE|KERNEL_GS_BASE)"
     r"(?![A-Za-z0-9_])"
 )
-FENCE = re.compile(r'#\s*\[\s*cfg\s*\(\s*target_arch\s*=\s*"x86_64"\s*\)\s*\]')
-INNER_FENCE = re.compile(r'#!\s*\[\s*cfg\s*\(\s*target_arch\s*=\s*"x86_64"\s*\)\s*\]')
+FENCE = re.compile(r'#\s*\[\s*cfg\s*\(\s*target_arch\s*=\s*"(?:x86_64|aarch64)"\s*\)\s*\]')
+INNER_FENCE = re.compile(r'#!\s*\[\s*cfg\s*\(\s*target_arch\s*=\s*"(?:x86_64|aarch64)"\s*\)\s*\]')
 MOD_DECL = re.compile(r"\A\s*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
 PATH_ATTR = re.compile(r'#\s*\[\s*path\s*=\s*"([^"]+)"\s*\]')
 LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
@@ -567,6 +578,48 @@ def _rule_audit(root: Path, fenced: list[list[str]]) -> list[str]:
     return errs
 
 
+def _arches_of(raw: object) -> list[str]:
+    """The `arch` field of a skip row, as a list of names."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, list):
+        return [a for a in raw if isinstance(a, str)]
+    return []
+
+
+def _rule_skips(root: Path) -> list[str]:
+    """An aarch64 skip row must name a counterpart or a reason."""
+    path = root / SKIPS
+    if not path.is_file():
+        return []
+    try:
+        data = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        return [f"{SKIPS}:0: skips: {e}"]
+    rows = data.get("skip", [])
+    if not isinstance(rows, list):
+        return [f"{SKIPS}:0: skips: `skip` is not an array"]
+    errs = []
+    for i, raw in enumerate(rows, start=1):
+        if not isinstance(raw, dict):
+            continue
+        if "aarch64" not in _arches_of(raw.get("arch")):
+            continue
+        name = raw.get("name")
+        where = f"{SKIPS}:0: skips: aarch64 row {i}"
+        if isinstance(name, str) and name:
+            where = f"{SKIPS}:0: skips: aarch64 row {name!r}"
+        counterpart = raw.get("counterpart")
+        reason = raw.get("no_counterpart")
+        if (not isinstance(counterpart, str) or not counterpart) and (
+            not isinstance(reason, str) or not reason
+        ):
+            errs.append(f"{where} names neither counterpart nor no_counterpart")
+    return errs
+
+
 def check(root: Path = ROOT) -> list[str]:
     """Every rule's failures, as `path:line: rule: message`."""
     port = _read(root, PORTABILITY)
@@ -583,6 +636,7 @@ def check(root: Path = ROOT) -> list[str]:
     errs += _rule_dyn(root, seam_traits(seam))
     errs += _rule_paths(root, arch_text)
     errs += _rule_audit(root, tables["Fenced sites"])
+    errs += _rule_skips(root)
     return errs
 
 

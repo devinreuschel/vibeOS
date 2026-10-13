@@ -28,6 +28,9 @@ which `make check` runs, fails when:
   contains that path;
 - a job entry names a workflow that has a `self-hosted` label.
 
+From Phase 11, `tests/gates/common.toml` holds named entries (not gate-line
+keys). This script checks that each names a `make` target that exists.
+
 It reads text only: no entry runs, and no `gh` or `ci-history` is needed.
 `scripts/gate.py` runs the entries and imports `validate`, `load_map`,
 `gate_lines`, `strip_code_spans`, and `lands_in_sections` from here, and so
@@ -52,6 +55,9 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 
 MAP_FILE = re.compile(r"^phase-(\d+)\.toml$")
 FIRST_MAPPED_PHASE = 10
+COMMON = "common.toml"
+MAKE_GOAL = re.compile(r"\bmake\b(?:\s+[A-Za-z_][A-Za-z0-9_]*=\S+)*\s+([A-Za-z0-9_.+/-]+)")
+MAKE_TARGET = re.compile(r"^([A-Za-z0-9_.+/-]+):(?!=)", re.M)
 PHASE = re.compile(r"^## Phase (\d+):")
 EXIT_GATE = "**Exit gate**"
 BOX = re.compile(r"^- \[( |x)\] ")
@@ -283,6 +289,68 @@ def read_workflow_file(root: Path) -> Callable[[str], str | None]:
     return read
 
 
+def makefile_targets(text: str) -> set[str]:
+    """Recipe names in a Makefile, continuation lines joined."""
+    return set(MAKE_TARGET.findall(text.replace("\\\n", " ")))
+
+
+def make_goal(cmd: str) -> str | None:
+    """The last `make` goal in `cmd`, skipping `VAR=val` words."""
+    found = None
+    for m in MAKE_GOAL.finditer(cmd):
+        goal = m.group(1)
+        if "=" not in goal:
+            found = goal
+    return found
+
+
+@dataclass(frozen=True)
+class CommonEntry:
+    name: str
+    cmd: str
+
+
+def load_common(text: str, name: str = "<common>") -> list[CommonEntry]:
+    """Named `[[entry]]` rows of `common.toml`."""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise MapError(f"{name}: {e}") from e
+    extra = sorted(set(data) - {"entry"})
+    if extra:
+        raise MapError(f"{name}: unknown table {', '.join(extra)}")
+    raw = data.get("entry", [])
+    if not isinstance(raw, list):
+        raise MapError(f"{name}: `entry` is not an array of tables")
+    out: list[CommonEntry] = []
+    seen: dict[str, int] = {}
+    for i, row in enumerate(raw, start=1):
+        where = f"{name}: [[entry]] {i}"
+        if not isinstance(row, dict):
+            raise MapError(f"{where} is not a table")
+        extra = sorted(set(row) - {"name", "cmd"})
+        if extra:
+            raise MapError(f"{where}: unknown field {', '.join(extra)}")
+        key = _str_field(row.get("name"), f"{where}: name")
+        if key in seen:
+            raise MapError(f"{where}: duplicate name (as [[entry]] {seen[key]})")
+        seen[key] = i
+        out.append(CommonEntry(key, _str_field(row.get("cmd"), f"{where}: cmd")))
+    return out
+
+
+def validate_common(entries: list[CommonEntry], targets: set[str], name: str) -> list[str]:
+    """Each common entry names a Makefile target that exists."""
+    problems: list[str] = []
+    for e in entries:
+        goal = make_goal(e.cmd)
+        if goal is None:
+            problems.append(f"{name}: {e.name}: cmd names no make target: {e.cmd}")
+        elif goal not in targets:
+            problems.append(f"{name}: {e.name}: make target {goal!r} does not exist")
+    return problems
+
+
 def map_files(gates_dir: Path) -> list[tuple[int, Path]]:
     """(N, path) of every `phase-<N>.toml`, by N; never a `-needs` file."""
     out = []
@@ -308,6 +376,20 @@ def main(argv: list[str] | None = None, root: Path = ROOT) -> int:
         found = validate(phase, lines, gate_lines(roadmap, phase), read_workflow_file(root))
         problems += [f"{rel}: {p}" for p in found]
         counts.append(f"phase {phase}: {len(lines)} lines")
+    common = root / "tests" / "gates" / COMMON
+    if common.is_file():
+        rel = common.relative_to(root)
+        makefile = ""
+        mk = root / "Makefile"
+        if mk.is_file():
+            makefile = mk.read_text(encoding="utf-8")
+        try:
+            entries = load_common(common.read_text(encoding="utf-8"), str(rel))
+        except MapError as e:
+            problems.append(str(e))
+        else:
+            problems += validate_common(entries, makefile_targets(makefile), str(rel))
+            counts.append(f"common: {len(entries)} entries")
     for p in problems:
         print(f"check_gates: {p}", file=sys.stderr)
     if problems:

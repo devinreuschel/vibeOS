@@ -7,6 +7,7 @@ use vibeos::fs::{
     FileId, FsError, InodeKind, O_APPEND, O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC,
     O_WRONLY, OpenFlags, SEEK_CUR, SEEK_END, SEEK_SET, Stat,
 };
+use vibeos::kalloc::TryVec;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::proc::wait_exited;
 
@@ -56,7 +57,7 @@ pub(crate) use walk::test_walk_path_resolution;
 use crate::fat_init;
 use crate::file_init;
 use crate::fs_init;
-use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, x86_user_code};
 use crate::ktest::{Outcome, Test, fid, test};
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
@@ -693,6 +694,28 @@ pub(crate) fn test_inode_size_shared_across_opens() -> Outcome {
     Outcome::Ok
 }
 
+/// `n` bytes on the heap, byte `i` set by `byte`. The registry stack on
+/// aarch64 is 16 KiB, and DESIGN §4.5 keeps 4 KiB of it for a hard-IRQ
+/// top half, so a multi-KiB buffer in a test that calls into FAT does not
+/// fit the rest.
+fn filled_buf(n: usize, byte: impl Fn(usize) -> u8) -> Result<TryVec<u8>, FsError> {
+    let mut v = TryVec::try_with_capacity(n).map_err(|_| FsError::NoMem)?;
+    let mut chunk = [0u8; 256];
+    let mut filled = 0usize;
+    while filled < n {
+        let take = (n - filled).min(chunk.len());
+        let mut i = 0usize;
+        while i < take {
+            chunk[i] = byte(filled + i);
+            i += 1;
+        }
+        v.try_extend_from_slice(&chunk[..take])
+            .map_err(|_| FsError::NoMem)?;
+        filled += take;
+    }
+    Ok(v)
+}
+
 /// Free bytes on the FAT initrd.
 fn fat_free() -> Result<u64, FsError> {
     with_root_fat(fat_init::df).map(|(_, _, free, _)| free)
@@ -746,12 +769,14 @@ pub(crate) fn test_fat_unlinked_open_frees_at_close() -> Outcome {
 }
 
 fn unlinked_open(path: &str, a: FileId, before: u64) -> Outcome {
-    let mut data = [0u8; 1500];
-    let mut i = 0usize;
-    while i < data.len() {
-        data[i] = (i % 251) as u8;
-        i += 1;
-    }
+    let data = match filled_buf(1500, |i| (i % 251) as u8) {
+        Ok(d) => d,
+        Err(e) => return crate::fail_fmt!("buffer: {}", e.as_str()),
+    };
+    let mut back = match filled_buf(1500, |_| 0) {
+        Ok(d) => d,
+        Err(e) => return crate::fail_fmt!("buffer: {}", e.as_str()),
+    };
     if fid::write(a, &data) != Ok(data.len()) {
         return Outcome::Fail("write");
     }
@@ -768,11 +793,10 @@ fn unlinked_open(path: &str, a: FileId, before: u64) -> Outcome {
         Ok(f) if f == held => {}
         r => return crate::fail_fmt!("free {r:?} after unlink, want {held}"),
     }
-    let mut back = [0u8; 1500];
     if fid::seek(a, 0, SEEK_SET) != Ok(0) || fid::read(a, &mut back) != Ok(1500) {
         return Outcome::Fail("read back after unlink");
     }
-    if back != data {
+    if *back != *data {
         return Outcome::Fail("data changed after unlink");
     }
     // A new file of the same name is another inode.
@@ -806,7 +830,7 @@ fn unlinked_open(path: &str, a: FileId, before: u64) -> Outcome {
 // it (exit 2 if not), write 1 byte there returns -EFBIG (3), lseek to
 // 2^44 returns -EINVAL (4), and SEEK_END returns 0 (5). Exit 1 if the
 // open fails, 0 when every step passes.
-user_code!(
+x86_user_code!(
     VIBEFS_EFBIG,
     "
     lea rdi, [rip + 90f]
@@ -883,7 +907,7 @@ pub(crate) fn test_vibefs_efbig() -> Outcome {
 // SEEK_END returns 5 GiB + 1 (exit 3 if not), and the byte read back at
 // 5 GiB is "x" (4). Exit 1 if the open fails, 2 if the lseek or write
 // fails, 0 when every step passes.
-user_code!(
+x86_user_code!(
     VIBEFS_BIG5,
     "
     lea rdi, [rip + 90f]
@@ -1087,7 +1111,7 @@ pub(crate) fn test_vfs_fat_unlinked_open_inode() -> Outcome {
 fn fat_unlinked_open_inode() -> Step<()> {
     mkdir_s11()?;
     let base = initrd_free()?;
-    let old = [0x5Au8; 1500];
+    let old = filled_buf(1500, |_| 0x5A).map_err(|e| ("buffer", e))?;
     let f = vfs("open", fid::open("/s11/u", O_RDWR | O_CREAT, 0o644))?;
     let r = unlinked_open_body(f, &old);
     let c = vfs("close", fid::close(f));
@@ -1101,7 +1125,7 @@ fn fat_unlinked_open_inode() -> Step<()> {
     Ok(())
 }
 
-fn unlinked_open_body(f: FileId, old: &[u8; 1500]) -> Step<()> {
+fn unlinked_open_body(f: FileId, old: &[u8]) -> Step<()> {
     if vfs("write", fid::write(f, old))? != old.len() {
         return Err(("short write", FsError::Io));
     }
@@ -1111,8 +1135,8 @@ fn unlinked_open_body(f: FileId, old: &[u8; 1500]) -> Step<()> {
         return Err(("new file not empty", FsError::Io));
     }
     vfs("seek", fid::seek(f, 0, SEEK_SET))?;
-    let mut back = [0u8; 1500];
-    if vfs("read old", fid::read(f, &mut back))? != old.len() || &back != old {
+    let mut back = filled_buf(old.len(), |_| 0).map_err(|e| ("buffer", e))?;
+    if vfs("read old", fid::read(f, &mut back))? != old.len() || *back != *old {
         return Err(("old bytes", FsError::Io));
     }
     Ok(())
@@ -1128,7 +1152,7 @@ pub(crate) fn test_vfs_fat_file_api_one_inode() -> Outcome {
 fn fat_file_api_one_inode() -> Step<()> {
     mkdir_s11()?;
     let f = fid::open("/s11/g", O_RDWR | O_CREAT, 0o644).map_err(|e| ("file api open", e))?;
-    let data = [0xC3u8; 5000];
+    let data = filled_buf(5000, |_| 0xC3).map_err(|e| ("buffer", e))?;
     let wrote = fid::write(f, &data).map_err(|e| ("file api write", e));
     let vs = vstat("/s11/g").map_err(|e| ("vfs stat", e));
     let closed = fid::close(f).map_err(|e| ("file api close", e));

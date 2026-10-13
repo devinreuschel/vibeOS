@@ -45,7 +45,8 @@ KEYS = frozenset(
 
 PLACEHOLDER = re.compile(r"<[a-z_]+>")
 SECTION = re.compile(r"§(\d+)\.(\d+)")
-ORDER_STEP = 10
+# aarch64-only rows sit between the existing x86 tens (ROADMAP §11.7).
+ORDER_STEP = 5
 
 # The regex metacharacters `_escape` escapes: every other character stands
 # for itself, so a built pattern reads as its text does.
@@ -225,7 +226,9 @@ def load_rows(path: Path | str = REGISTRY_PATH) -> tuple[Row, ...]:
 class BootConfig:
     """What a boot's contract depends on: `smp` CPUs, HPET or the PIT, the
     LAPIC timer mode the kernel prints (`<mode>`), the clocksource it names
-    (`<clocksource>`), and the test builds."""
+    (`<clocksource>`), and the test builds. On aarch64, `el` and `arm_timer`
+    bind `<el>` and `<timer>` when the machine asks for EL2; empty leaves
+    those placeholders open."""
 
     hpet: bool
     smp: int
@@ -237,6 +240,8 @@ class BootConfig:
     panic_stop_test: bool = False
     hang_test: bool = False
     arch: str = "x86_64"
+    el: str = ""
+    arm_timer: str = ""
 
 
 def _term(term: str, cfg: BootConfig) -> bool:
@@ -264,8 +269,13 @@ def contract(rows: Iterable[Row], cfg: BootConfig) -> list[tuple[Row, dict[str, 
     """`cfg`'s contract, in order: each contract row that holds, with its
     bindings. A run of consecutive per-AP rows is emitted once for each AP,
     `i` in `1..smp`, binding `<n>` to `i` and `<ap>` to `i - 1`; `<mode>` is
-    `cfg.lapic_mode` and `<clocksource>` is `cfg.clocksource` everywhere."""
+    `cfg.lapic_mode` and `<clocksource>` is `cfg.clocksource` everywhere.
+    `<el>` and `<timer>` bind only when `cfg` sets them."""
     base = {"mode": cfg.lapic_mode, "clocksource": cfg.clocksource}
+    if cfg.el:
+        base["el"] = cfg.el
+    if cfg.arm_timer:
+        base["timer"] = cfg.arm_timer
     live = sorted(
         (r for r in rows if r.kind == "contract" and holds(r, cfg)),
         key=lambda r: r.order or 0,

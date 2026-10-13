@@ -24,7 +24,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from tests.harness.harness import QemuConfig, effective_accel_name
+from tests.harness.harness import QemuConfig, effective_accel_name, guest_cpu
 
 SCHEMA = 1
 REPO = Path(__file__).resolve().parents[2]
@@ -112,7 +112,7 @@ class Results:
                 "argv": list(argv),
                 "smp": cfg.smp,
                 "accel": effective_accel_name(cfg),
-                "cpu": cfg.cpu,
+                "cpu": guest_cpu(cfg),
                 "mem": cfg.mem,
                 "exit": exit_code,
             }

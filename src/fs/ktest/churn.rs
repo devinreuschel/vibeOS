@@ -8,7 +8,7 @@ use vibeos::proc::wait_exited;
 
 use super::{hooks, read_all, unlink_quiet};
 use crate::file_init;
-use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, x86_user_code};
 use crate::ktest::{Outcome, fid};
 use crate::time_init;
 
@@ -25,7 +25,7 @@ fn holders() -> Option<TryVec<(bool, u16, u16)>> {
 // Exit codes: 1 open, 2 fork, 3 parent write, 4 wait4, 6 child signaled,
 // 50 + n child exit n; the child's own: 21 dup, 22 close dup, 23 open,
 // 24 write, 25 close.
-user_code!(
+x86_user_code!(
     F55_CHURN,
     "
     lea rdi, [rip + 90f]
