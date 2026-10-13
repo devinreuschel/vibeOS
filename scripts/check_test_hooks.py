@@ -23,11 +23,14 @@ The source rules (ROADMAP §10.2's Q2 box) read every `.rs` file under
 `PENDING` lists files whose blanket allow the sweep that owns them has not
 removed; they are skipped, and an entry that now passes is an error.
 
-    check_test_hooks.py [--elf PATH] [--nm PATH] [--root DIR]
+    check_test_hooks.py [--target TRIPLE] [--elf PATH] [--nm PATH] [--root DIR]
 
-`--elf` defaults to `${CARGO_TARGET_DIR:-target}/x86_64-unknown-none/
-hookcheck/vibeos`, which `make check` links with the production features
-before it runs the check scripts. `--root` checks the sources under DIR.
+`--elf` defaults to `${CARGO_TARGET_DIR:-target}/<target>/hookcheck/vibeos`,
+which `make check` links with the production features before it runs the
+check scripts. `--target` defaults to the triple of `$VIBEOS_ARCH`, which
+the Makefile exports (`x86_64`, or `aarch64`; unset means x86_64), so
+`make ARCH=aarch64 check` inspects the aarch64 ELF. `--root` checks the
+sources under DIR.
 Exit 0 when clean, 1 on a match or a source-rule failure (each on stderr),
 2 when the ELF or `nm` is missing.
 """
@@ -54,7 +57,17 @@ PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
      "the ramdisk's fault injection compiles only with `kernel_tests` (ROADMAP §10.2, F146)"),
     (re.compile(r"(?:^|::)(?:inject_\w*|push_for_test|exercise_fail\w*)$"),
      "a mutation hook compiles only with `kernel_tests` (Q2)"),
+    (re.compile(r"(?:^|::)ktest\w*(?:::|$)"),
+     "a `ktest` module or fn compiles only with `kernel_tests` (ROADMAP §10.2)"),
+    (re.compile(r"::testing::"),
+     "a `testing` module compiles only with `kernel_tests` (ROADMAP §10.2)"),
+    (re.compile(r"^(?:VIBEOS_ERET_BP_ARMED|vibeos_fault_on_bad_stack)$"),
+     "the EL0 eret breakpoint and bad-stack probe compile only with `kernel_tests` (§11.7)"),
+    (re.compile(r"^vibeos_user_code_"),
+     "an in-guest test program compiles only with `kernel_tests` (ROADMAP §10.2)"),
 )
+
+TARGETS = {"x86_64": "x86_64-unknown-none", "aarch64": "aarch64-unknown-none-softfloat"}
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE_DIRS = ("src", "crates")
@@ -72,10 +85,15 @@ HASH = re.compile(r"::h[0-9a-f]{16}$")
 LLVM_SUFFIX = re.compile(r"\.llvm\.\d+$")
 
 
-def default_elf() -> str:
-    """The production-feature ELF `make check` links."""
+def default_target() -> str:
+    """The kernel triple of `$VIBEOS_ARCH`; x86_64 when unset."""
+    return TARGETS[os.environ.get("VIBEOS_ARCH") or "x86_64"]
+
+
+def default_elf(target: str | None = None) -> str:
+    """The production-feature ELF `make check` links for `target`."""
     base = os.environ.get("CARGO_TARGET_DIR") or "target"
-    return str(Path(base) / "x86_64-unknown-none" / "hookcheck" / "vibeos")
+    return str(Path(base) / (target or default_target()) / "hookcheck" / "vibeos")
 
 
 def default_nm() -> str:
@@ -206,6 +224,7 @@ def source_errors(root: Path = ROOT, pending: Iterable[str] = PENDING) -> list[s
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="check_test_hooks.py")
+    ap.add_argument("--target", default=None, choices=sorted(TARGETS.values()))
     ap.add_argument("--elf", default=None)
     ap.add_argument("--nm", default=None)
     ap.add_argument("--root", default=None)
@@ -217,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         print("check_test_hooks: blanket allow(dead_code) in a production module (Q2)",
               file=sys.stderr)
         return 1
-    elf = args.elf or default_elf()
+    elf = args.elf or default_elf(args.target)
     if not Path(elf).is_file():
         print(f"check_test_hooks: {elf}: no such ELF; `make check` links it", file=sys.stderr)
         return 2

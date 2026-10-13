@@ -230,7 +230,7 @@ build/kernels/vibeos-ktest-irqoff.elf: export VIBEOS_USER_BINS := $(VIBEOS_USER_
 build/kernels/vibeos-ktest-irqoff.elf: export VIBEOS_USER_DIR := $(USER_OUT)
 endif
 
-.PHONY: help check check-python check-msrv all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
+.PHONY: help check check-python check-msrv check-hooks all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-vibefs-crash-1 test-vibefs-crash-2 test-vibefs-crash-plants test-e2e-uefi test-qmp test-forensics test-irqoff \
@@ -241,6 +241,7 @@ help:
 	  'vibeOS make targets:' \
 	  '  check                 fast local gate (clippy/unit/harness/python)' \
 	  '  check-python          ruff and mypy (VIBEOS_ALLOW_MISSING_TOOLS=1 skips a missing one)' \
+	  '  check-hooks           production-feature kernel link for ARCH, no test hook in its symbols' \
 	  '  check-msrv            vibeos-core with its MSRV toolchain (rust-version), host and kernel target' \
 	  '  fuzz-check            tests/fuzz: fmt, clippy, build every target, replay every committed input' \
 	  '  fuzz                  every cargo-fuzz target for FUZZ_TIME s (FUZZ_TARGETS=, FUZZ_SANITIZER=none|address)' \
@@ -354,7 +355,7 @@ check:
 	$(MAKE) test-harness
 	$(MAKE) fuzz-check
 	$(MAKE) check-python
-	$(CARGO) build --bin vibeos --profile hookcheck --config 'profile.hookcheck.inherits="dev"'
+	$(MAKE) check-hooks
 	python3 scripts/gen_syscalls.py --check
 	# The default kernel ELF, whose .stack_sizes check_stack_sizes.py reads.
 	$(MAKE) kernel
@@ -373,6 +374,12 @@ check:
 	    $(call missing_tool,cargo-deny,cargo deny check licenses bans sources,cargo install cargo-deny --locked --version $(CARGO_DENY_PIN)); \
 	fi
 	@echo "check: ok"
+
+# The production-feature link for $(TARGET), then the nm check on it; the CI
+# aarch64 leg runs this alone, since it does not run the whole `check`.
+check-hooks:
+	$(CARGO) build --bin vibeos --target $(TARGET) --profile hookcheck --config 'profile.hookcheck.inherits="dev"'
+	python3 scripts/check_test_hooks.py
 
 # ruff and mypy over tests/ and scripts/ (DX1, F147).
 check-python:

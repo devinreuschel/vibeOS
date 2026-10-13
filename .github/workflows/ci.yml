@@ -265,9 +265,9 @@ jobs:
       - name: cargo clippy -D warnings (kernel, aarch64)
         if: matrix.arch == 'aarch64'
         run: |
-          # `make ARCH=aarch64 check`: its MSRV step, then its default-feature
-          # kernel clippy. setup.sh installed the MSRV target. The other
-          # feature sets have no make target.
+          # `make ARCH=aarch64 check`: its MSRV step, its default-feature
+          # kernel clippy, then its test-hook check. setup.sh installed the
+          # MSRV target. The other feature sets have no make target.
           make ARCH=aarch64 check-msrv
           line=$(make -n ARCH=aarch64 check | grep -E '^cargo clippy --bin vibeos ' || true)
           case "$line" in
@@ -276,6 +276,8 @@ jobs:
                exit 1 ;;
           esac
           $line
+          # no test hook in the production aarch64 ELF (AGENTS.md rule 9)
+          make ARCH=aarch64 check-hooks
           cargo clippy --bin vibeos --target aarch64-unknown-none-softfloat --features kernel_tests -- -D warnings
           cargo clippy --bin vibeos --target aarch64-unknown-none-softfloat --features kernel_shell -- -D warnings
 
