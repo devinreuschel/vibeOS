@@ -253,9 +253,9 @@ pub fn map_va(
             let Some(next) = alloc_zeroed_page() else {
                 return false;
             };
-            if *n < tables.len() {
-                tables[*n] = next;
-                *n += 1;
+            // an untracked table is never cleaned to PoC, so don't link it
+            if !paging::track_table(tables, n, next) {
+                return false;
             }
             // SAFETY: slot in a table we own. established here.
             unsafe { slot.write(make_table(PhysAddr(next))) };
@@ -288,20 +288,23 @@ pub fn map_identity(l0_pa: u64, pa: u64, tables: &mut [u64], n: &mut usize) -> b
     )
 }
 
+/// Table pages [`build_identity_into`] can track: the roots, the stub's
+/// tables, and up to three more for each CPU's param page (`map_identity`).
+pub(crate) const IDENTITY_TABLES: usize = 16 + 3 * vibeos::acpi::MAX_CPUS;
+
 /// Build a TTBR0 identity root covering `pas` into `tables` (no heap).
 ///
 /// Returns `(l0, empty, count)`. `empty` is a zero root. `tables[..count]`
-/// holds `l0` and the tables under it. Paging install calls this before
-/// the heap exists.
+/// holds `l0`, `empty` and the tables under `l0`, which the caller cleans
+/// to PoC before a secondary loads them. None when `tables` is too small.
+/// Paging install calls this before the heap exists.
 pub(crate) fn build_identity_into(pas: &[u64], tables: &mut [u64]) -> Option<(u64, u64, usize)> {
-    if tables.is_empty() {
-        return None;
-    }
     let l0 = alloc_zeroed_page()?;
     let empty = alloc_zeroed_page()?;
     let mut n = 0usize;
-    tables[n] = l0;
-    n += 1;
+    if !paging::track_table(tables, &mut n, l0) || !paging::track_table(tables, &mut n, empty) {
+        return None;
+    }
     for &pa in pas {
         let page = pa & !0xFFFu64;
         if !map_identity(l0, page, tables, &mut n) {
@@ -320,8 +323,8 @@ pub(crate) fn build_identity_into(pas: &[u64], tables: &mut [u64]) -> Option<(u6
 }
 
 /// Build a TTBR0 identity root covering `pas`, plus `empty` TTBR0.
-pub fn build_identity(pas: &[u64]) -> Option<(u64, u64, TryBox<[u64; 8]>)> {
-    let mut tables = TryBox::try_new([0u64; 8]).ok()?;
+pub fn build_identity(pas: &[u64]) -> Option<(u64, u64, TryBox<[u64; IDENTITY_TABLES]>)> {
+    let mut tables = TryBox::try_new([0u64; IDENTITY_TABLES]).ok()?;
     let (l0, empty, _) = build_identity_into(pas, &mut *tables)?;
     Some((l0, empty, tables))
 }

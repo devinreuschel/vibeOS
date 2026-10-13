@@ -171,7 +171,7 @@ unsafe fn takeover_ttbr1(new_root: u64) {
         Some(p) => p,
         None => crate::boot::halt_with("vibeOS: paging: takeover trampoline"),
     };
-    let mut tables = [0u64; 8];
+    let mut tables = [0u64; super::secondary::IDENTITY_TABLES];
     let Some((id, empty, _)) =
         super::secondary::build_identity_into(&pages[..n_pages], &mut tables)
     else {

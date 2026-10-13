@@ -1021,13 +1021,17 @@ fn init_aarch64() {
     let Some((stub_va, stub_len)) = arch::aarch64::secondary::stub_range() else {
         return;
     };
+    let Some(stub_pa) = arch::aarch64::secondary::va_to_pa(stub_va).map(|pa| pa & !0xFFF) else {
+        crate::klog!(vibeos::log::Level::Error, "vibeOS: smp: stub pa");
+        return;
+    };
     let mut pas = TryVec::new();
-    let stub_pa = arch::aarch64::secondary::va_to_pa(stub_va).unwrap_or(stub_va) & !0xFFF;
     let stub_end = stub_pa.saturating_add(stub_len as u64);
     let mut p = stub_pa;
     while p < stub_end {
         if pas.try_push(p).is_err() {
-            break;
+            crate::klog!(vibeos::log::Level::Error, "vibeOS: smp: identity map");
+            return;
         }
         p = p.saturating_add(4096);
     }
@@ -1055,6 +1059,7 @@ fn init_aarch64() {
         })
         .unwrap_or(0);
     let mut logical = 1u32;
+    let mut offline = 0u32;
     let mut i = 0usize;
     while i < desc.cpu_count() {
         let Some(cpu) = desc.cpus().get(i) else {
@@ -1087,9 +1092,15 @@ fn init_aarch64() {
             &mut n_id,
         ) {
             StartAp::Online => {}
-            StartAp::Failed => {}
+            StartAp::Failed => offline += 1,
         }
         logical += 1;
+    }
+    if offline != 0 {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "smp: {offline} cpus stayed offline"
+        );
     }
 }
 
@@ -1111,7 +1122,7 @@ fn clean_identity(tables: &TryBoxWrap, n: usize) {
 }
 
 #[cfg(target_arch = "aarch64")]
-type TryBoxWrap = vibeos::kalloc::TryBox<[u64; 8]>;
+type TryBoxWrap = vibeos::kalloc::TryBox<[u64; arch::aarch64::secondary::IDENTITY_TABLES]>;
 
 #[cfg(target_arch = "aarch64")]
 fn start_one_aarch64(
@@ -1330,9 +1341,10 @@ fn finish_aarch64_failure(
         note_aff_off_free();
     } else {
         note_stalled_leak();
-        // F032: AFFINITY_INFO is not OFF; a late core may still start.
-        // CpuWorkers is ThreadId-only and has no Drop.
-        let _ = (idle_id, workers, published);
+        // F032: AFFINITY_INFO is not OFF; a late core may still start, so
+        // the idle thread, its stack and the tables stay. The workers were
+        // never made ready and the core never touches them.
+        work_init::abandon_cpu_workers(workers);
     }
 }
 
