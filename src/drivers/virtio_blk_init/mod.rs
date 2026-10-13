@@ -532,7 +532,13 @@ fn fail_mmio(
     vqs: &mut [Option<Vq>; MAX_VQ],
     cur: Option<DmaBuffer>,
 ) {
-    crate::virtio_mmio_init::reset(base);
+    // No bus master bit on mmio: a reset that times out leaves the device
+    // free to DMA, so its memory is kept (DESIGN §12.3).
+    let stopped = if crate::virtio_mmio_init::reset(base) {
+        virtio_init::Stopped::Reset
+    } else {
+        virtio_init::Stopped::Stuck
+    };
     for &v in vecs.iter().take(nvec) {
         #[expect(
             clippy::let_underscore_must_use,
@@ -540,12 +546,19 @@ fn fail_mmio(
         )]
         let _ = irq_init::free_vector(v);
     }
+    let mut kept = 0usize;
     for b in slots
         .into_iter()
         .chain(vqs.iter_mut().filter_map(|v| v.take().map(|v| v.qdma)))
         .chain(cur)
     {
-        virtio_init::release(virtio_init::Stopped::Reset, b);
+        kept = kept.saturating_add(virtio_init::release(stopped, b));
+    }
+    if stopped == virtio_init::Stopped::Stuck {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "vibeOS: virtio: mmio {base:#x} reset timeout, {kept} frames kept"
+        );
     }
 }
 

@@ -209,7 +209,8 @@ pub(crate) enum Stopped {
     /// device can no longer reach memory.
     MasterOff,
     /// Bus mastering still reads back on: the device may still write the
-    /// memory it was given.
+    /// memory it was given. A virtio-mmio device has no such bit: its reset
+    /// timing out is `Stuck`.
     Stuck,
 }
 
