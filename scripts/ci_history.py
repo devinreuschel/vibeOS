@@ -13,7 +13,9 @@ Modes (one `if` branch each in `main`):
   a gate entry needs as proof of the gated commit.
 - `--event PATH`: the `workflow_run` writer. It reads only the run id from the
   event file, checks the workflow's name, path and repository against
-  `WORKFLOWS`, and builds the record from the Actions API.
+  `WORKFLOWS`, and builds the record from the Actions API. For a scheduled
+  workflow it writes nothing and exits 1 while the API reports any of the run's
+  jobs not completed; re-running the `record` job once they are writes it.
 - `--backfill [--limit N]`: records, or tombstones, for listed `ci` runs on
   `main` that neither the branch nor an archive holds, newest first.
 - `--series WORKFLOW [--job NAME] [--step NAME]`: one line per record (finished
@@ -98,6 +100,10 @@ EXTRAHEADER_PLACEHOLDER = "AUTHORIZATION: basic ci-history-token-placeholder"
 class WorkflowSpec:
     path: str
     commit_input: bool  # the workflow takes a commit as input (C-HISTORY `commit`)
+    # `--budget` reads its records, so `build_record` writes one only once the
+    # API reports every job completed. The record job has no checkout to ask
+    # the workflow files, and a test holds this to `scheduled_lanes`.
+    scheduled: bool
 
 
 # The allowlist. A record's directory name is its key, never event text; a
@@ -105,11 +111,11 @@ class WorkflowSpec:
 # `workflow_run.workflows`. Every scheduled workflow but ci-history.yml itself
 # is one, so `--budget` measures each of their lanes (`scheduled_lanes`).
 WORKFLOWS: dict[str, WorkflowSpec] = {
-    "ci": WorkflowSpec(".github/workflows/ci.yml", False),
-    "release": WorkflowSpec(".github/workflows/release.yml", True),
-    "nightly": WorkflowSpec(".github/workflows/nightly.yml", False),
-    "smp-stress": WorkflowSpec(".github/workflows/smp-stress.yml", False),
-    "macos": WorkflowSpec(".github/workflows/macos.yml", False),
+    "ci": WorkflowSpec(".github/workflows/ci.yml", False, False),
+    "release": WorkflowSpec(".github/workflows/release.yml", True, False),
+    "nightly": WorkflowSpec(".github/workflows/nightly.yml", False, True),
+    "smp-stress": WorkflowSpec(".github/workflows/smp-stress.yml", False, True),
+    "macos": WorkflowSpec(".github/workflows/macos.yml", False, True),
 }
 
 ARCH_TOKENS = ("x86_64", "aarch64")
@@ -130,6 +136,12 @@ class HistoryError(Exception):
 
 class NotRecorded(Exception):
     """The event names a run this tool does not record (a notice, exit 0)."""
+
+
+class JobsUnfinished(HistoryError):
+    """A scheduled workflow's run has a job the jobs API does not yet report
+    completed: its record would hold no `completed` time, which `--budget`
+    refuses, and nothing rewrites a record once it is written."""
 
 
 class ApiError(HistoryError):
@@ -316,7 +328,10 @@ def build_record(
     api: Api, repo: str, workflow: str, run_id: int, warnings: list[str] | None = None
 ) -> dict[str, Any]:
     """The record of run `run_id`, from the run, its latest jobs and its
-    artifacts. Artifact problems are appended to `warnings`."""
+    artifacts. Artifact problems are appended to `warnings`. Raises
+    `JobsUnfinished` for a scheduled workflow's run while any job's status is
+    not `completed`; a `ci` run keeps such a job, since GitHub leaves some jobs
+    of a cancelled pull request run queued for good."""
     spec = WORKFLOWS[workflow]
     base = f"/repos/{repo}/actions/runs/{run_id}"
     run = api.json(base)
@@ -325,7 +340,16 @@ def build_record(
     if str(run.get("path", "")).split("@")[0] != spec.path:
         raise HistoryError(f"run {run_id} is not a run of {spec.path}")
     rec = run_fields(run, workflow)
-    jobs = [job_entry(j) for j in paged(api, f"{base}/jobs", "jobs", {"filter": "latest"})]
+    listed = list(paged(api, f"{base}/jobs", "jobs", {"filter": "latest"}))
+    open_jobs = [j for j in listed if j.get("status") != "completed"]
+    if spec.scheduled and open_jobs:
+        names = ", ".join(repr(str(j.get("name"))) for j in open_jobs[:3])
+        more = ", ..." if len(open_jobs) > 3 else ""
+        raise JobsUnfinished(
+            f"run {run_id}: {len(open_jobs)} of {len(listed)} jobs not completed "
+            f"({names}{more}); nothing recorded, re-run this job once the API reports them done"
+        )
+    jobs = [job_entry(j) for j in listed]
     rec["jobs"] = jobs
     done = [t for t in (parse_time(j["completed"]) for j in jobs) if t is not None]
     if done:
