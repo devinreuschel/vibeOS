@@ -4,7 +4,7 @@
  "conclusion": "success",
  "created": "2026-10-19T11:45:06Z",
  "event": "schedule",
- "finished": "2026-10-19T15:34:23Z",
+ "finished": "2026-10-19T15:36:13Z",
  "head_sha": "47a78cda3e0ab8bce9b1cb07a790c2bcbd1dc87f",
  "jobs": [
   {
@@ -1034,15 +1034,76 @@
    ]
   },
   {
-   "completed": null,
-   "conclusion": null,
+   "completed": "2026-10-19T15:36:13Z",
+   "conclusion": "failure",
    "created": "2026-10-19T11:45:07Z",
    "name": "latest nightly canary",
    "results": [],
    "runner": null,
-   "seconds": null,
-   "started": "2026-10-19T11:45:07Z",
-   "steps": []
+   "seconds": 108,
+   "started": "2026-10-19T15:34:25Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "install host tools",
+     "seconds": 15
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 14
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 2
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "setup",
+     "seconds": 26
+    },
+    {
+     "name": "iso + host units on latest nightly",
+     "seconds": 20
+    },
+    {
+     "name": "runner record",
+     "seconds": 0
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 0
+    },
+    {
+     "name": "upload runner record",
+     "seconds": 1
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": null
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
   },
   {
    "completed": "2026-10-19T15:34:23Z",
@@ -1857,11 +1918,11 @@
     },
     {
      "name": "make test-kernel-smp4 (each run 20 times)",
-     "seconds": null
+     "seconds": 1925
     },
     {
      "name": "harness results summary",
-     "seconds": null
+     "seconds": 0
     },
     {
      "name": "upload failed-run cores",
@@ -1869,27 +1930,31 @@
     },
     {
      "name": "runner record",
-     "seconds": null
+     "seconds": 0
     },
     {
      "name": "upload harness results",
-     "seconds": null
+     "seconds": 1
     },
     {
      "name": "upload runner record",
-     "seconds": null
+     "seconds": 1
     },
     {
      "name": "Post cache limine binaries",
-     "seconds": null
+     "seconds": 0
     },
     {
      "name": "Post cache cargo registry",
-     "seconds": null
+     "seconds": 1
     },
     {
      "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-     "seconds": null
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
     }
    ]
   },
