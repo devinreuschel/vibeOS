@@ -138,6 +138,7 @@ def plus(ts: str, secs: int) -> str:
 def job_obj(name: str, created: str, started: str, completed: str) -> dict[str, Any]:
     return {
         "name": name,
+        "status": "completed",
         "conclusion": "success",
         "created_at": created,
         "started_at": started,
@@ -150,6 +151,20 @@ def job_obj(name: str, created: str, started: str, completed: str) -> dict[str, 
             {"name": "make", "conclusion": "success",
              "started_at": plus(started, 7), "completed_at": completed},
         ],
+    }
+
+
+def queued_job(name: str, created: str) -> dict[str, Any]:
+    """A job as the jobs API reports one that has not finished: no conclusion
+    or completion time, and `started_at` equal to `created_at`."""
+    return {
+        "name": name,
+        "status": "queued",
+        "conclusion": None,
+        "created_at": created,
+        "started_at": created,
+        "completed_at": None,
+        "steps": [],
     }
 
 
@@ -302,6 +317,43 @@ class TestRecord(unittest.TestCase):
         with self.assertRaises(HistoryError):
             ci_history.build_record(StubApi(run_routes(run, two_jobs())), REPO, "ci", 101)
 
+    def unfinished(self, run_id: int = 301) -> dict[str, Any]:
+        """smp-stress run 39246896118's shape: the canary queued behind a lane
+        while the run's other jobs finished, and the API still said so when
+        the run completed."""
+        jobs = [*two_jobs(), queued_job("latest nightly canary", "2026-03-02T10:00:07Z")]
+        return run_routes(run_obj(run_id, workflow="smp-stress", event="schedule"), jobs)
+
+    def test_scheduled_run_with_an_unfinished_job_is_not_recorded(self) -> None:
+        api = StubApi(self.unfinished())
+        with self.assertRaises(ci_history.JobsUnfinished) as ctx:
+            ci_history.build_record(api, REPO, "smp-stress", 301)
+        self.assertIsInstance(ctx.exception, HistoryError)
+        self.assertIn("run 301", str(ctx.exception))
+        self.assertIn("1 of 3 jobs", str(ctx.exception))
+        self.assertIn("latest nightly canary", str(ctx.exception))
+        # nothing past the jobs is read for a record that is not written
+        self.assertEqual([p for p, _ in api.calls if p.endswith("/artifacts")], [])
+
+    def test_scheduled_record_has_every_time_once_the_jobs_complete(self) -> None:
+        # a re-run of the record job after the API settled
+        jobs = [*two_jobs(), job_obj("latest nightly canary", "2026-03-02T10:00:07Z",
+                                     "2026-03-02T10:05:00Z", "2026-03-02T10:07:00Z")]
+        routes = run_routes(run_obj(301, workflow="smp-stress", event="schedule"), jobs)
+        rec = ci_history.build_record(StubApi(routes), REPO, "smp-stress", 301)
+        self.assertEqual(len(rec["jobs"]), 3)
+        for job in rec["jobs"]:
+            ci_history._job_times(rec, job)  # what --budget requires of each job
+
+    def test_ci_record_keeps_an_unfinished_job(self) -> None:
+        # GitHub leaves some jobs of a cancelled pull request run queued for
+        # good, so a `ci` record is written with the times the API has.
+        routes = run_routes(run_obj(302), [*two_jobs(), queued_job("tier", "2026-03-02T10:00:07Z")])
+        rec = ci_history.build_record(StubApi(routes), REPO, "ci", 302)
+        queued = rec["jobs"][-1]
+        self.assertIsNone(queued["conclusion"])
+        self.assertIsNone(queued["completed"])
+
     def test_tombstone_fields(self) -> None:
         t = ci_history.tombstone(run_obj(), "ci", "jobs API returned 410")
         self.assertEqual(t["jobs"], [])
@@ -371,6 +423,19 @@ class TestEvent(unittest.TestCase):
         for bad in ("555", 5.5, None, True, -1, 0, "555; rm -rf /"):
             with self.assertRaises(HistoryError, msg=repr(bad)):
                 ci_history.load_event(self.event(id=bad), REPO)
+
+    def test_main_writes_nothing_while_a_job_is_unfinished(self) -> None:
+        path = self.event(id=777, name="smp-stress", path=".github/workflows/smp-stress.yml")
+        jobs = [*two_jobs(), queued_job("latest nightly canary", "2026-03-02T10:00:07Z")]
+        api = StubApi(run_routes(run_obj(777, workflow="smp-stress", event="schedule"), jobs))
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": REPO}), \
+                mock.patch.object(ci_history, "GhApi", return_value=api), \
+                mock.patch.object(ci_history, "HistoryRepo") as history, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(ci_history.main(["--event", str(path)]), 1)
+        history.assert_not_called()
+        self.assertIn("not completed", err.getvalue())
 
     def test_main_notice_for_unlisted_run(self) -> None:
         path = self.event(name="other", path=".github/workflows/other.yml")
@@ -1479,6 +1544,13 @@ class BudgetCli(unittest.TestCase):
         self.assertEqual(lanes.reserved["sched-lane-0"], "nightly")
         self.assertEqual(lanes.lane_of("macos", "check"), "sched-lane-9")
         self.assertEqual(lanes.lane_of("macos", "test"), "sched-lane-9")
+
+    def test_scheduled_flag_matches_the_workflow_files(self) -> None:
+        # build_record waits on every job of exactly the workflows --budget
+        # reads, and the record job has no checkout to ask the tree.
+        _, keys = ci_history.scheduled_lanes()
+        flagged = sorted(k for k, spec in ci_history.WORKFLOWS.items() if spec.scheduled)
+        self.assertEqual(flagged, sorted(keys))
 
     def test_unrecorded_scheduled_workflow_fails(self) -> None:
         # A scheduled workflow the recorder does not list never gets a

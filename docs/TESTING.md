@@ -1123,7 +1123,11 @@ results files of its `results-<arch>-<job>` artifact and the runner data of its 
 artifact, `<job>` naming the job by the slug of its display name, past a `<workflow>-` prefix
 (`macos`'s `results-x86_64-macos-check`); and, for a workflow that takes a
 commit as input, that commit (`release`'s `commit-input` artifact). A re-run replaces the run's
-record with its latest attempt, which `attempt` names. No record carries an actor, author or
+record with its latest attempt, which `attempt` names. A scheduled workflow's `record` job writes
+nothing and fails while the jobs API reports any job of the run not completed, since `--budget`
+refuses a job without its `completed` time and nothing rewrites a record; re-running the job once
+the API reports them done writes it. A `ci` run is recorded as the API has it, because GitHub
+leaves some jobs of a cancelled pull request run queued for good. No record carries an actor, author or
 e-mail: the branch is public data (DESIGN §1.5). The job holds `contents: write` and
 `actions: read` only, checks out nothing but a clone of `ci-history` alone, and runs
 `scripts/ci_history.py` and `scripts/gatelib.py` as fetched from the default branch at
