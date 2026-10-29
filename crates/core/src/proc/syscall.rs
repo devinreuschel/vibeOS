@@ -139,7 +139,10 @@ mod tests {
                     aarch64::dispatch::<Recorder>,
                 ),
             ];
-            for (nr, dispatch) in arches {
+            for (is_a64, nr, dispatch) in [
+                (false, arches[0].0, arches[0].1),
+                (true, arches[1].0, arches[1].1),
+            ] {
                 let Some(nr) = nr else { continue };
                 for high in [true, false] {
                     let base = if high {
@@ -153,7 +156,13 @@ mod tests {
                     assert_eq!(rec.sys, Some(row.sys), "{}", row.name);
                     for (i, a) in row.args.iter().enumerate() {
                         let got = rec.args[i];
-                        let w = want(a.ty, high, i as u64);
+                        // aarch64 `clone` swaps `tls` and `child_tid`.
+                        let reg = if is_a64 && row.sys == Sys::Clone {
+                            [0u64, 1, 2, 4, 3][i]
+                        } else {
+                            i as u64
+                        };
+                        let w = want(a.ty, high, reg);
                         assert_eq!(got, Some(w), "{}.{} high={high}", row.name, a.name);
                     }
                     for slot in &rec.args[row.arity()..] {

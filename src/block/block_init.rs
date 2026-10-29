@@ -174,29 +174,35 @@ pub mod testing {
     /// Take one armed stall, if any is left, and spin until a submitter
     /// returns or the bound passes. IF is left as found.
     pub(super) fn finish_stall() {
+        // Acquire: pairs with the Release stores of the arm and disarm in `block::ktest`.
         let mut left = STALLS_LEFT.load(Ordering::Acquire);
         loop {
             let Some(next) = left.checked_sub(1) else {
                 return;
             };
+            // AcqRel, Acquire on failure: pairs with the Release stores of the arm and disarm.
             match STALLS_LEFT.compare_exchange_weak(left, next, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => break,
                 Err(now) => left = now,
             }
         }
+        // AcqRel: pairs with the Acquire load in `block::ktest::finish_stalls_run`.
         STALLS_RUN.fetch_add(1, Ordering::AcqRel);
         let k = time_init::tsc_per_ms();
         if k == 0 {
             return;
         }
+        // Relaxed: the Acquire of `STALLS_LEFT` above orders it after the arm; pairs with nothing.
         let max = k.saturating_mul(u64::from(STALL_MAX_US.load(Ordering::Relaxed))) / 1000;
         // With IF=0 (a completion in an IRQ) the stall is a deliberate
         // IF-off stretch; with IF=1 it holds none and takes no guard.
         let _hold = (!crate::arch::current::interrupts_enabled())
             .then(|| crate::sched::irqoff::deliberate("iowaiter finish stall"));
+        // Acquire: pairs with the Release add in `block::ktest::note_return`.
         let r0 = RETURNS.load(Ordering::Acquire);
         let t0 = time_init::read_tsc();
+        // Acquire: pairs with the Release add in `block::ktest::note_return`.
         while RETURNS.load(Ordering::Acquire) == r0 && time_init::read_tsc().wrapping_sub(t0) < max
         {
             core::hint::spin_loop();
@@ -224,7 +230,9 @@ pub fn complete_waiters(req: &Request, res: Result<(), BlockError>) {
 }
 
 fn execute(req: &Request) -> Result<(), BlockError> {
+    // Relaxed: a count; pairs with nothing.
     IO_REQS.fetch_add(1, Ordering::Relaxed);
+    // Acquire: pairs with the Release stores in `fail_rest`, `reset` and `init`.
     if DeviceState::from_u8(STATE.load(Ordering::Acquire)) == DeviceState::Failed {
         return Err(BlockError::Failed);
     }
@@ -276,6 +284,7 @@ fn drain_failed(q_prep: fn(&mut Queue)) {
 }
 
 fn fail_rest() {
+    // Release: pairs with the Acquire loads in `execute`, `build` and `state`.
     STATE.store(DeviceState::Failed.as_u8(), Ordering::Release);
     drain_failed(Queue::fail);
 }
@@ -332,6 +341,7 @@ fn pump() {
             }
         };
         if req.bio.op == Op::Flush {
+            // Relaxed: a count; pairs with nothing.
             FLUSHES.fetch_add(1, Ordering::Relaxed);
         }
         let res = execute(&req);
@@ -366,9 +376,11 @@ fn build(
     len: usize,
     w: &IoWaiter,
 ) -> Result<Request, BlockError> {
+    // Acquire: pairs with the Release store in `init`.
     if !LIVE.load(Ordering::Acquire) {
         return Err(BlockError::Failed);
     }
+    // Acquire: pairs with the Release stores in `fail_rest`, `reset` and `init`.
     if DeviceState::from_u8(STATE.load(Ordering::Acquire)) == DeviceState::Failed {
         return Err(BlockError::Failed);
     }
@@ -465,10 +477,12 @@ pub fn discard(lba: u64, nsectors: u64) -> Result<(), BlockError> {
 
 #[cfg(feature = "kernel_tests")]
 pub fn live() -> bool {
+    // Acquire: pairs with the Release store in `init`.
     LIVE.load(Ordering::Acquire)
 }
 
 pub fn state() -> DeviceState {
+    // Acquire: pairs with the Release stores in `fail_rest`, `reset` and `init`.
     DeviceState::from_u8(STATE.load(Ordering::Acquire))
 }
 
@@ -481,6 +495,7 @@ pub fn capacity_sectors() -> u64 {
 }
 
 pub fn io_reqs() -> u64 {
+    // Relaxed: a count; pairs with nothing.
     IO_REQS.load(Ordering::Relaxed)
 }
 
@@ -493,6 +508,7 @@ pub fn inject_io_fails(n: u32) {
 pub fn reset() {
     #[cfg(feature = "kernel_tests")]
     FAIL_NEXT.store(0, Ordering::SeqCst);
+    // Release: pairs with the Acquire loads in `execute`, `build` and `state`.
     STATE.store(DeviceState::Ready.as_u8(), Ordering::Release);
     drain_failed(|q| {
         q.failed = false;
@@ -548,7 +564,9 @@ pub fn init() {
         let mut d = DATA.lock();
         d.fill(0);
     }
+    // Release: pairs with the Acquire loads in `execute`, `build` and `state`.
     STATE.store(DeviceState::Ready.as_u8(), Ordering::Release);
+    // Release: pairs with the Acquire loads in `build` and `live`.
     LIVE.store(true, Ordering::Release);
     if let Err(e) = register() {
         crate::klog!(

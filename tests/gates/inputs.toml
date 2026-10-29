@@ -1,8 +1,10 @@
 # Gate inputs (ROADMAP §10.9, the gate-inputs box; docs/TESTING.md §8.6).
 #
 # Every file a gate reads to reach its verdict, and the vibeos-core line-coverage
-# floor. scripts/check_gate_inputs.py reads this file: `make check` runs it against
-# origin/main and the `check` job against each pull request's merge base.
+# floor. scripts/check_gate_inputs.py reads this file. `make check` runs it
+# against `BASE_SHA`, or `origin/$GITHUB_BASE_REF` when that is not `main`,
+# or `origin/main`. The `check` job also runs it against the pull request's
+# merge base.
 #
 # Schema. `[coverage]` holds `crate` and `floor`, the `--fail-under-lines` value
 # the `check` job's llvm-cov step reads through `check_gate_inputs.py --floor`.

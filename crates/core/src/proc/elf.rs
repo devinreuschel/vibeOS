@@ -6,6 +6,7 @@ use crate::limits::EXEC_IMAGE_MAX;
 use crate::paging::{NULL_GUARD_LEN, PAGE_SIZE_4K, USER_MAP_END, is_canonical};
 
 mod stack;
+mod tls;
 
 pub use stack::{
     AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_EXECFN, AT_FLAGS, AT_GID, AT_NULL,
@@ -23,6 +24,8 @@ pub const ELFDATA2LSB: u8 = 1;
 pub const EV_CURRENT: u8 = 1;
 pub const ET_EXEC: u16 = 2;
 pub const EM_X86_64: u16 = 62;
+/// `EM_AARCH64` from ELF's `e_machine` (`elf.h`).
+pub const EM_AARCH64: u16 = 183;
 
 pub const PT_LOAD: u32 = 1;
 pub const PT_INTERP: u32 = 3;
@@ -138,7 +141,7 @@ pub struct TlsSeg {
 impl TlsSeg {
     /// `memsz` rounded up to `align`: the TLS block's size. `None` when
     /// that overflows.
-    fn block_len(&self) -> Option<u64> {
+    pub(super) fn block_len(&self) -> Option<u64> {
         if self.align <= 1 {
             return Some(self.memsz);
         }
@@ -148,7 +151,7 @@ impl TlsSeg {
 
     /// Bytes the loader maps for the TLS block: `memsz` rounded up to
     /// `align`, plus the 8-byte thread pointer slot, page-rounded and at
-    /// least one page. `None` when that overflows.
+    /// least one page. `None` when that overflows. Variant II (x86-64).
     pub fn map_len(&self) -> Option<u64> {
         let need = self.block_len()?.checked_add(8)?.max(PAGE_SIZE_4K);
         Some(need.checked_add(PAGE_SIZE_4K - 1)? & !(PAGE_SIZE_4K - 1))
@@ -251,6 +254,7 @@ pub struct Ehdr {
     pub entry: u64,
     pub phoff: u64,
     pub phnum: u16,
+    pub machine: u16,
 }
 
 impl Ehdr {
@@ -287,7 +291,7 @@ pub fn parse_ehdr(b: &[u8], file_len: u64) -> Result<Ehdr, ElfError> {
         return Err(ElfError::BadType);
     }
     let machine = le16(b, 18)?;
-    if machine != EM_X86_64 {
+    if machine != EM_X86_64 && machine != EM_AARCH64 {
         return Err(ElfError::BadMachine);
     }
     let version = le32(b, 20)?;
@@ -312,6 +316,7 @@ pub fn parse_ehdr(b: &[u8], file_len: u64) -> Result<Ehdr, ElfError> {
         entry,
         phoff,
         phnum,
+        machine,
     };
     if eh.ph_end().ok_or(ElfError::Truncated)? > file_len {
         return Err(ElfError::Truncated);
@@ -464,7 +469,11 @@ impl Builder {
         if nload == 0 {
             return Err(ElfError::NoLoad);
         }
-        image_bytes(loads.get(..nload).ok_or(ElfError::TooManyLoads)?, tls)?;
+        image_bytes(
+            loads.get(..nload).ok_or(ElfError::TooManyLoads)?,
+            tls,
+            eh.machine == EM_AARCH64,
+        )?;
         if !saw_gnu_stack {
             stack_exec = false;
         }
@@ -519,9 +528,10 @@ pub fn parse(data: &[u8]) -> Result<Image, ElfError> {
 }
 
 /// The bytes the loader maps for `loads` and `tls`: each `PT_LOAD`'s
-/// page-rounded span plus [`TlsSeg::map_len`]. Above [`EXEC_IMAGE_MAX`], or
-/// on overflow, the image is refused before anything is mapped (F009).
-fn image_bytes(loads: &[LoadSeg], tls: Option<TlsSeg>) -> Result<u64, ElfError> {
+/// page-rounded span plus the TLS mapping (`TlsSeg::map_len` or
+/// variant I). Above [`EXEC_IMAGE_MAX`], or on overflow, the image is
+/// refused before anything is mapped (F009).
+fn image_bytes(loads: &[LoadSeg], tls: Option<TlsSeg>, variant_i: bool) -> Result<u64, ElfError> {
     let mut total = 0u64;
     for s in loads {
         if s.memsz == 0 {
@@ -538,7 +548,12 @@ fn image_bytes(loads: &[LoadSeg], tls: Option<TlsSeg>) -> Result<u64, ElfError> 
         total = total.checked_add(span).ok_or(ElfError::ImageTooBig)?;
     }
     if let Some(t) = tls {
-        let len = t.map_len().ok_or(ElfError::ImageTooBig)?;
+        let len = if variant_i {
+            t.map_len_variant_i()
+        } else {
+            t.map_len()
+        }
+        .ok_or(ElfError::ImageTooBig)?;
         total = total.checked_add(len).ok_or(ElfError::ImageTooBig)?;
     }
     if total > EXEC_IMAGE_MAX {

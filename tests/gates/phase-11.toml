@@ -1,0 +1,120 @@
+# Phase 11's gate map (ROADMAP §10.9, C-GATEMAP). One [[line]] per exit-gate
+# line but the tag. HVF records live in common.toml, not here.
+
+[[line]]
+key = """
+`make ARCH=aarch64` produces a bootable image; `make ARCH=aarch64 run` boots under DESIGN §8.4's
+aarch64 command line (`qemu-system-aarch64 -machine virt,acpi=off,gic-version=3`; §11.5, §11.7), with
+`-accel hvf` on the macOS dev host (GitHub's arm64 runners have no `/dev/kvm`, so the project has no
+arm64 KVM host)"""
+[[line.entry]]
+cmd = "python3 scripts/check_workflows.py"
+[[line.entry]]
+job = { workflow = "ci.yml", job = "build" }
+[[line.entry]]
+job = { workflow = "ci.yml", job = "tier" }
+
+[[line]]
+key = """
+every marker in the shared and aarch64 lists of the [DESIGN §8.3](TESTING.md#83-end-to-end) contract, from `serial online`
+through `shell ready`, appears in order on aarch64, from one harness with an `ARCH` parameter"""
+[[line.entry]]
+job = { workflow = "ci.yml", job = "tier" }
+
+[[line]]
+key = """
+`make test-kernel ARCH=aarch64` runs the portable in-guest groups (log, mm, acpi, proc, sync, boot,
+time, smp, sched, irq, dev, block, drivers, and fs) and the aarch64 arch group, on `gic-version=3`
+and `gic-version=2`; the x86_64 arch, console, and shell groups stay off aarch64; each row that
+needs x86 user text, an x86 ELF, x86 syscall-number or entry rules, ACPI tables, an AP trampoline,
+a PS/2 console, MSI-X affinity, an I/O APIC, LAPIC page flags, NX or a stack-guard `#PF`, a PIT, or
+a software timer interrupt is `ktest_skip`ped with a reason naming that x86 feature, and the harness
+fails if the skipped set differs from the aarch64 rows of `tests/harness/skips.toml` (§10.2), which
+`docs/ARCH.md` links; each skip row names an aarch64 counterpart or `no_counterpart`, and
+`scripts/check_arch.py` fails a row that does neither; Phase 6 MSI-X through the ITS and GICv2m
+stays the open §11.3 MSI box, and `its_doorbell` only checks that the ITS doorbell write lands;
+pass is PSCI `SYSTEM_OFF` (QEMU exit 0) and fail is `pvpanic-pci`'s QMP `GUEST_PANICKED`, under TCG
+and HVF. The in-guest test `el1_x16_survives_irq` fails before the fix."""
+[[line.entry]]
+cmd = "python3 scripts/check_arch.py"
+[[line.entry]]
+job = { workflow = "ci.yml", job = "tier" }
+
+[[line]]
+key = """
+`/bin/tests` from the Phase 10 user crate passes on aarch64 at EL0, against the arm64 syscall
+numbers"""
+[[line.entry]]
+job = { workflow = "ci.yml", job = "tier" }
+
+[[line]]
+key = """
+the harness types `echo serial-ok` into the shell on aarch64 through the PL011 and a second command
+through the QEMU monitor's `sendkey` and virtio-keyboard, and reads both echoes on serial, as the
+x86 e2e boot does through COM1 and PS/2"""
+[[line.entry]]
+job = { workflow = "ci.yml", job = "tier" }
+
+[[line]]
+key = """
+`-smp 4` under `virt` brings up every core through PSCI, and the TLB shootdown test passes"""
+[[line.entry]]
+job = { workflow = "ci.yml", job = "tier" }
+
+[[line]]
+key = """
+the nightly job, on QEMU 9.0 or later (the first whose `virt` wires the EL2 virtual timer's
+interrupt), boots aarch64 under TCG with `-machine virt,acpi=off,gic-version=3,virtualization=on
+-cpu neoverse-v1 -smp 4` to `shell ready` with every core online; the exception-level marker reports EL2
+with VHE on every core, and the §11.3 timer marker names the EL2 virtual timer. The same boot with
+machine type `virt-8.2`, whose timer node has no `hyp-virt` interrupt, names the EL2 physical
+timer"""
+[[line.entry]]
+job = { workflow = "nightly.yml", job = "el2" }
+
+[[line]]
+key = """
+CI runs the aarch64 build and tier jobs on every push beside the x86_64 ones (§10.1 budget), on the
+hosted arm64 runner under TCG (§11.7), since GitHub's arm64 runners have no `/dev/kvm`"""
+[[line.entry]]
+cmd = "python3 scripts/check_workflows.py"
+[[line.entry]]
+job = { workflow = "ci.yml", job = "build" }
+[[line.entry]]
+job = { workflow = "ci.yml", job = "tier" }
+
+[[line]]
+key = """
+`docs/ARCH.md` maps each row of DESIGN §11.1's seam table to its modules in each port, both halves,
+and lists every other architecture-specific module; `scripts/check_arch.py` in `make check` fails
+when a table row has no `docs/ARCH.md` row, when a file under either port's `arch/` directory in
+either crate is missing from it, or when a module it names does not exist, or when an aarch64 row
+of `tests/harness/skips.toml` names neither an aarch64 counterpart nor a reason"""
+[[line.entry]]
+cmd = "python3 scripts/check_arch.py"
+
+[[line]]
+key = """
+README has an x86_64 quickstart and an aarch64 quickstart, and the aarch64 one runs
+`make ARCH=aarch64 run` under `-accel hvf` on an Apple Silicon Mac; `scripts/check_readme.py` in
+`make check`, added in the same commit, fails when either section is missing or a `make` command in
+them names a target the Makefile does not define"""
+[[line.entry]]
+cmd = "python3 scripts/check_readme.py"
+
+[[line]]
+key = """
+no x86 regression: the full x86 ladder is green on every commit this phase pushes to `main`, as
+§10.9's CI history records"""
+[[line.entry]]
+job = { workflow = "ci.yml", job = "tier" }
+
+[[line]]
+key = """
+`make litmus` passes: every `tests/litmus/` test holds under `aarch64.cat` and its x86_64 version
+under `x86tso.cat`, and each barrier-removed twin allows its bad outcome; host tests show the
+page-table code refusing every change §11.2's break-before-make rule forbids"""
+[[line.entry]]
+cmd = "python3 scripts/check_litmus.py"
+[[line.entry]]
+job = { workflow = "nightly.yml", job = "models" }

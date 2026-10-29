@@ -60,22 +60,33 @@ its low page after enabling paging. Rule: the trampoline page is the identity wi
 executable leaf, a 4 KiB page, read-only, with its GDT's accessed bits preset so the AP never writes
 it; everything else stays NX, and after `smp: done` the rest of the window is gone.
 
+**aarch64 boots in QEMU, then a TLB conflict abort on hardware at MMU-on or the TTBR1 switch.**
+A secondary's TLB is not architecturally clean after reset or after `CPU_OFF`/`CPU_ON`, and the boot
+CPU still has Limine's global entries cached when it installs its own TTBR1. QEMU does not keep
+those entries. Rule: the stub runs `tlbi vmalle1` and `dsb nsh` after the `HCR_EL2` E2H/TGE write
+and again after the TTBR writes, before the `isb` that publishes `SCTLR.M`. The TTBR1 install goes
+through a reserved empty root with that same local invalidate between the two writes, from a TTBR0
+identity map of the sequence (§7.3, §4.3).
+
 **Building page tables at boot never finishes.**
 `map_end` was computed from raw memory map entries, and firmware described an MMIO BAR as a
-multi-terabyte region. Rule: derive the physmap extent from usable RAM, kernel image end, and
-framebuffer extent, and cap it (8 GiB). PCI BAR size probes that return > 32 MiB are recorded
-and not page-walked into the ioremap window or physmap. Planned (ROADMAP §11.2): the physmap maps
-only RAM-typed ranges, so a huge MMIO descriptor is never walked and the cap goes (§4.1).
+multi-terabyte region. Rule: the physmap maps only RAM-typed ranges of the boot memory map, inside
+its DESIGN §4.1 slot, so a huge MMIO descriptor is never walked (§4.1). PCI BAR size probes that
+return > 32 MiB are recorded and not page-walked into the ioremap window.
+
+**Boot halts with `physmap map failed` when ACPI entries meet mid-page.**
+Limine guarantees 4 KiB alignment and no overlap only for usable and bootloader-reclaimable
+entries. ACPI reclaimable, ACPI NVS, and executable-and-modules entries may start mid-page or
+overlap, and mapping each from its raw base returns `Misaligned` or `AlreadyMapped`. Rule: sort
+and coalesce the RAM-typed ranges, then round each span inward to 4 KiB before mapping (§4.1). A
+partial page is not a physmap leaf; `physmap_covers` misses it and the read uses `memremap`.
 
 **Device reads return stale values on real hardware but work in QEMU.**
 MMIO reached through a write-back physmap mapping. QEMU does not enforce cache attributes; hardware
-does. Rule: LAPIC, I/O APIC, HPET, and every device MMIO page gets PCD + PWT, patched immediately after
-CR3 install and before first access. Patch every physmap leaf the range touches, and split a 2 MiB leaf
-to 4 KiB first when it also holds usable RAM, so no RAM frame gets a UC alias (§2.7, I17). Not yet
-enforced: `Mapper::patch_physmap_uc` marks whole 2 MiB leaves UC and can skip a trailing leaf (ROADMAP
-§11.2, F104). Planned (ROADMAP §11.2): device MMIO leaves the physmap for `ioremap`, so no physmap leaf
-is ever patched (§4.1).
-Do not UC-patch the console framebuffer when it aliases VGA BAR0; leave that physmap WB.
+does. Rule: LAPIC, I/O APIC, HPET, and every device MMIO page is reached only through `ioremap`
+(PCD + PWT on x86_64, Device-nGnRE on aarch64), so no physmap leaf maps device memory and no RAM
+frame gets a UC alias (§2.7, I17, F104). A framebuffer that aliases VGA BAR0 stays write-back
+through `memremap` or its RAM physmap alias; do not make it UC.
 
 **Config space beyond bus 0 is all `0xFFFF` on a machine without MCFG.**
 The kernel sends only bus 0 through `0xCF8`/`0xCFC`: for any other bus ECAM does not cover, `HwCfg::read32`
@@ -162,8 +173,9 @@ Notify used the wrong BAR offset or ignored `notify_off_multiplier`. Rule: doorb
 a failed kick, not a store into some other register. The 2-byte store needs
 `queue_notify_off * multiplier + 2 <= length`: `virtio::notify_addr` accepts an offset of
 `length - 1` and skips the bound when `length` is 0 (ROADMAP §18.1, F048). The value written is the
-virtqueue index (without `VIRTIO_F_NOTIFICATION_DATA`); `virtio_blk_init::kick` writes 0 for every
-queue, which QEMU ignores and a device that shares one doorbell does not (ROADMAP §11.5, F047).
+virtqueue index (without `VIRTIO_F_NOTIFICATION_DATA`); `kick` writes that
+index. QEMU's virtio-pci ignores the value and takes the queue from the
+address; virtio-mmio reads the written index (ROADMAP §11.5, F047).
 
 **Device sees a virtqueue index and stale descriptors.**
 `avail.idx` was published with a compiler fence. Rule: descriptor stores, then `dma_wmb` /
@@ -193,6 +205,14 @@ user load a kernel-half base, saves `GS_BASE` and loads the per-CPU base uncondi
 `KERNEL_GS_BASE` while the thread is in the kernel, so a switch from the moved body saves it as the
 thread's GS base, and the thread resumes on another CPU with a kernel address as its GS base, or
 with two CPUs sharing one `PerCpu`.
+
+**aarch64 kernel `#DABT` after an IRQ, FAR in the heap/KVA hole.**
+The EL1 stub used `x16` as the stack-bit temporary before saving GPRs, so
+`eret` restored `SP-FRAME` into `x16`. LLVM keeps scan offsets in `x16`; an
+IRQ during `cmdline::Words::next` made the next `ldrb` use `ptr+(SP-FRAME)`
+(CI 37286340200, `esr=0x96000004`). Rule: the stack-bit test exchanges SP
+and `x0` by add/sub and touches no other register (DESIGN §11.5 rule 6);
+`el1_x16_survives_irq` holds `x16` live until a timer IRQ.
 
 **A user program halts every CPU.**
 Ring-3 activity reached `exception_halt` on three paths. `debug_ex` had no ring-3 branch and
@@ -353,11 +373,20 @@ The trampoline entered long mode without setting `EFER.NXE`, so NX bits in kerne
 reserved-bit violations. Rule: the trampoline sets NXE along with LME.
 
 **An AP that missed its bring-up timeout runs on freed memory.**
-The timeout path frees the AP's kernel, RSP0, and IST stacks and its GDT/TSS and marks its idle TCB Dead, but an AP that accepted a SIPI and then
-stalled past 3 s can keep running on them, or read the next AP's parameter block. Rule: the timeout path
-sends INIT, clears the AP's online bit, and leaks what it gave the AP; a failed AP costs its stack and
-tables, not a second CPU on the same memory ([section 7.4](SMP.md#74-ap-bring-up-sequence)).
-`smp_init::start_one` frees without INIT (ROADMAP §11.4, F032).
+An AP that accepted a SIPI and then stalled past 3 s can keep running on its stack and tables, or
+read the next AP's parameter block. Rule: the timeout path sends INIT, clears the AP's online bit,
+and leaks what it gave the AP; a failed AP costs its stack and tables, not a second CPU on the same
+memory ([section 7.4](SMP.md#74-ap-bring-up-sequence)). `smp_init::start_one` does this; a
+pre-SIPI failure still frees. On aarch64, `AFFINITY_INFO` `OFF` is the only free after `CPU_ON`
+(ROADMAP §11.4, F032).
+
+**A CPU that arrives after the bring-up timeout marks itself online.**
+The timeout cleared the online bit and leaked the core, and the late core then ran `mark_online`
+itself. On aarch64 it sat in the online mask with no workers, so deferred work queued to it never
+ran. On x86, INIT could land while it still held a lock. Rule: one handshake word. The AP claims
+`ARRIVED` before `mark_online`; the boot CPU claims `ABANDONED` on timeout. The AP that loses parks.
+The boot CPU that loses does not send INIT
+([section 7.4](SMP.md#74-ap-bring-up-sequence)).
 
 **A null dereference in an ISR shortly after an AP comes up.**
 `sti` happened before `GS_BASE` was set, and a timer interrupt landed in code that reads per-CPU state.

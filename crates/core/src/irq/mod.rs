@@ -1,11 +1,24 @@
-//! Device IRQ vector pool and MSI/MSI-X message encoding. DESIGN §5.3–5.4.
+//! Device IRQ vector pool, `IrqId` / `IrqChip`, and MSI encoding.
+//! DESIGN §5.3–5.4.
 //!
-//! Drivers ask [`VectorPool::allocate`] (kernel: `irq::allocate_vector`).
-//! They never pick IDT slots. CPU binding is recorded so MSI-X dest and
-//! Phase 19 affinity rebalance share one table.
+//! Drivers name an [`IrqId`] (kernel: `irq::map_wired`, `irq::alloc_msi`).
+//! They never pick IDT slots. The x86 chip allocates from [`VectorPool`].
 
+pub mod chip;
+pub mod gic;
 pub mod ipi;
+pub mod its;
 pub mod stop;
+
+pub use chip::{
+    AffinityPlan, FreedIrq, IRQ_SET_MAX, IrqChip, IrqError, IrqId, IrqSet, IrqSpecifier, IrqTable,
+    LapicLvt, MAX_IRQS, MsiMessage, PlannedMsi, PlannedWired,
+};
+pub use its::{
+    ITS_CMD_DISCARD, ITS_CMD_MAPC, ITS_CMD_MAPD, ITS_CMD_MAPTI, ITS_CMD_MOVI, ITS_CMD_SYNC,
+    ITS_MAPD_SIZE, ItsCommand, encode_device_unmap, encode_free_sequence, encode_lpi_free,
+    its_event_limit,
+};
 
 use crate::vectors;
 
@@ -16,42 +29,6 @@ pub const POOL_LEN: usize = (POOL_END - POOL_START) as usize + 1;
 
 /// Fee00000h + (APIC id << 12). Physical dest, no RH.
 pub const MSI_ADDR_BASE: u32 = 0xFEE0_0000;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[must_use]
-pub enum IrqError {
-    Exhausted,
-    InIrq,
-    BadVector,
-    BadCpu,
-    Busy,
-    NoRoute,
-}
-
-/// An IRQ request's errno: no vector left is `ENOSPC`, as Linux's vector matrix returns.
-impl From<IrqError> for crate::kerror::KError {
-    fn from(e: IrqError) -> Self {
-        match e {
-            IrqError::Exhausted => Self::NoSpc,
-            IrqError::InIrq | IrqError::BadVector | IrqError::BadCpu => Self::Inval,
-            IrqError::Busy => Self::Busy,
-            IrqError::NoRoute => Self::NoDev,
-        }
-    }
-}
-
-impl IrqError {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            IrqError::Exhausted => "exhausted",
-            IrqError::InIrq => "in hard irq",
-            IrqError::BadVector => "bad vector",
-            IrqError::BadCpu => "bad cpu",
-            IrqError::Busy => "busy",
-            IrqError::NoRoute => "no route",
-        }
-    }
-}
 
 pub const fn in_pool(vec: u8) -> bool {
     vec >= POOL_START && vec <= POOL_END

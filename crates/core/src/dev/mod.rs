@@ -303,6 +303,8 @@ pub struct Device {
     pub resources: [Resource; MAX_BARS],
     pub irq: IrqBind,
     pub caps: CapSet,
+    /// Platform GIC INTID for a virtio-mmio transport; 0 if none.
+    pub intid: u32,
 }
 
 impl Device {
@@ -318,6 +320,7 @@ impl Device {
             resources: [Resource::EMPTY; MAX_BARS],
             irq: IrqBind { pin: 0, line: 0 },
             caps: CapSet::empty(),
+            intid: 0,
         }
     }
 
@@ -342,6 +345,7 @@ impl Device {
                 line: info.irq_line,
             },
             caps: info.caps,
+            intid: 0,
         }
     }
 

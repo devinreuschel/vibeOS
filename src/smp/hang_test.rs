@@ -67,7 +67,7 @@ pub(crate) fn arm() {
 /// Spin with `HANG` held and interrupts off, forever.
 #[inline(never)]
 fn hold() {
-    // Relaxed: nothing is published through `RELEASE`, which no code sets.
+    // Relaxed: nothing is published through `RELEASE`, which no code sets; pairs with nothing.
     while !RELEASE.load(Ordering::Relaxed) {
         core::hint::spin_loop();
     }

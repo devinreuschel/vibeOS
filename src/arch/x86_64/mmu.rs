@@ -11,6 +11,8 @@ impl PageTable for Arch {
     const LEVELS: u8 = paging::LEVELS;
     const ENTRIES: usize = paging::PTES_PER_TABLE;
     const KERNEL_ROOT_FIRST: usize = paging::KERNEL_PML4_FIRST;
+    const KERNEL_VA_START: u64 = 0xFFFF_8000_0000_0000;
+    const KERNEL_UXN: u64 = 0;
 
     #[inline]
     fn index(va: VirtAddr, level: u8) -> usize {
@@ -18,8 +20,26 @@ impl PageTable for Arch {
     }
 
     #[inline]
-    fn make_entry(pa: PhysAddr, flags: PageFlags) -> u64 {
+    fn make_entry(_va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> u64 {
         paging::make_pte(pa, flags)
+    }
+
+    #[inline]
+    fn make_table(pa: PhysAddr) -> u64 {
+        paging::make_pte(
+            pa,
+            PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER),
+        )
+    }
+
+    #[inline]
+    fn va_ok(va: u64) -> bool {
+        vibeos::paging::is_canonical(va)
+    }
+
+    #[inline]
+    fn is_kernel_va(va: VirtAddr) -> bool {
+        va.as_u64() >= Self::KERNEL_VA_START
     }
 
     #[inline]
@@ -36,6 +56,12 @@ impl PageTable for Arch {
     #[inline]
     fn root() -> PhysAddr {
         PhysAddr(cpu::read_cr3() & paging::PTE_ADDR_MASK)
+    }
+
+    /// User and kernel share CR3.
+    #[inline]
+    fn user_root() -> PhysAddr {
+        Self::root()
     }
 
     #[inline]
@@ -72,22 +98,5 @@ pub fn enable_nx() {
         // table live now (Limine's) and the new ones treat NX as intended,
         // established here.
         unsafe { cpu::wrmsr(cpu::IA32_EFER, efer | cpu::EFER_NXE) };
-    }
-}
-
-/// Drop every TLB entry on this CPU, global ones included: toggle
-/// `CR4.PGE` when it is set, else reload CR3 (Intel SDM Vol. 3A §4.10.4.1).
-pub fn flush_local_global() {
-    let cr4 = cpu::read_cr4();
-    if cr4 & cpu::CR4_PGE != 0 {
-        // SAFETY: clearing and restoring `CR4.PGE` changes nothing but
-        // which TLB entries survive; every other CR4 bit is written back as
-        // read; established here.
-        unsafe {
-            cpu::write_cr4(cr4 & !cpu::CR4_PGE);
-            cpu::write_cr4(cr4);
-        }
-    } else {
-        <Arch as PageTable>::flush_local_all();
     }
 }

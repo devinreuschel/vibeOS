@@ -21,7 +21,7 @@ pub(crate) fn test_initrd_module_sized() -> Outcome {
         return Outcome::Fail("module in usable ram");
     }
     for pa in [r.start, r.end - 1] {
-        let va = vibeos::paging::VirtAddr(crate::paging_init::HHDM_BASE + pa);
+        let va = vibeos::paging::VirtAddr(crate::paging_init::hhdm_offset() + pa);
         match crate::paging_init::translate(va) {
             Some((got, _, _)) if got.as_u64() == pa => {}
             _ => return crate::fail_fmt!("module byte {:#x} not in the physmap", pa),

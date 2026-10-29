@@ -579,6 +579,79 @@ def rule_qemu_pin(tree: Tree) -> list[Problem]:
     return out
 
 
+_LIMINE_PIN_RE = re.compile(
+    r'^(LIMINE_TAG|LIMINE_COMMIT)="\$\{\1:-([^}]*)\}"\s*$', re.M
+)
+
+
+def _limine_pins(root: Path) -> tuple[str, str] | None:
+    """setup.sh's `LIMINE_TAG` and `LIMINE_COMMIT` defaults, not the environment."""
+    setup = root / "setup.sh"
+    if not setup.is_file():
+        return None
+    pins = dict(_LIMINE_PIN_RE.findall(setup.read_text(encoding="utf-8")))
+    tag, commit = pins.get("LIMINE_TAG"), pins.get("LIMINE_COMMIT")
+    if not tag or not commit:
+        return None
+    return tag, commit
+
+
+def _names_pin(value: str, pin: str) -> bool:
+    """`pin` occurs as its own token, so v12.9.1 does not match v12.9.10."""
+    return re.search(rf"(?<![0-9A-Za-z]){re.escape(pin)}(?![0-9A-Za-z])", value) is not None
+
+
+def _path_is_limine(path: Node | None) -> bool:
+    if path is None:
+        return False
+    for raw in path.scalars():
+        for line in raw.splitlines():
+            for part in line.split(","):
+                name = part.strip().rstrip("/")
+                if name in ("limine", "./limine"):
+                    return True
+    return False
+
+
+def rule_limine_cache(tree: Tree) -> list[Problem]:
+    """A Limine cache key names setup.sh's LIMINE_TAG and LIMINE_COMMIT.
+
+    An older key restores a clone setup.sh rejects.
+    """
+    pins = _limine_pins(tree.root)
+    if pins is None:
+        return [
+            Problem("setup.sh", 1, "limine_cache", "no LIMINE_TAG or LIMINE_COMMIT default")
+        ]
+    tag, commit = pins
+    out: list[Problem] = []
+    for path, wf in tree.workflows.items():
+        for job in _jobs(wf):
+            for step in _steps(job):
+                with_node = step.get("with")
+                if with_node is None or with_node.kind != "map":
+                    continue
+                key = with_node.get("key")
+                value = key.value if key is not None else None
+                path_limine = _path_is_limine(with_node.get("path"))
+                key_limine = value is not None and value.startswith("limine-")
+                if not path_limine and not key_limine:
+                    continue
+                where = key if key is not None else with_node
+                if value is None or not _names_pin(value, tag) or not _names_pin(value, commit):
+                    shown = value if value is not None else ""
+                    out.append(
+                        Problem(
+                            path,
+                            where.line,
+                            "limine_cache",
+                            f"Limine cache key {shown!r} does not name "
+                            f"setup.sh's {tag} and {commit}",
+                        )
+                    )
+    return out
+
+
 FILTERS = ("tags", "tags-ignore", "branches-ignore", "paths", "paths-ignore")
 
 
@@ -762,16 +835,22 @@ def rule_tiers(tree: Tree) -> list[Problem]:
             if v is None or not v.value:
                 out.append(Problem(CI, item.line, "tiers", f"tier entry without `{k}`"))
     covered = _check_submakes(tree.makefile)
-    want = [t for t in _make_prereqs(tree.makefile, "test") if t not in covered]
-    if not want:
-        out.append(Problem("Makefile", 1, "tiers", "no `test:` prerequisites found"))
     entries = _tier_entries(tier)
     for arch in sorted({e.arch for e in entries}):
+        union = (
+            "test-aarch64"
+            if arch == "aarch64" and _is_rule(tree.makefile, "test-aarch64")
+            else "test"
+        )
+        want = [t for t in _make_prereqs(tree.makefile, union) if t not in covered]
+        if not want:
+            out.append(Problem("Makefile", 1, "tiers", f"no `{union}:` prerequisites found"))
         seen: dict[str, str] = {}
         for e in [x for x in entries if x.arch == arch]:
             for t in e.targets:
                 if t not in want:
-                    what = "is not a `make test` tier" if _is_rule(tree.makefile, t) else "unknown"
+                    known = _is_rule(tree.makefile, t)
+                    what = f"is not a `make {union}` tier" if known else "unknown"
                     out.append(Problem(CI, e.line, "tiers", f"tier {e.tier}: target {t} {what}"))
                 elif t in seen:
                     out.append(
@@ -781,7 +860,7 @@ def rule_tiers(tree: Tree) -> list[Problem]:
                     seen[t] = e.tier
         for t in want:
             if t not in seen:
-                msg = f"{arch}: `make test` runs {t}, no tier does"
+                msg = f"{arch}: `make {union}` runs {t}, no tier does"
                 out.append(Problem(CI, tier.line, "tiers", msg))
     return out
 
@@ -1432,12 +1511,347 @@ def rule_no_core_upload_with_secrets(tree: Tree) -> list[Problem]:
     return out
 
 
+ARM64_LABELS = ("ubuntu-26.04-arm",)
+BOOT_CMD = re.compile(
+    r"\bmake\b.*\b(test-\S+|run)\b|\brun_(?:ktest|e2e|forensics|interactive|power)\.py\b"
+)
+
+
+def _job_run_text(job: Node) -> str:
+    steps = job.get("steps")
+    parts: list[str] = []
+    for st in steps.items if steps is not None else []:
+        run = st.get("run")
+        if run is not None and run.value:
+            parts.append(run.value)
+        env = st.get("env")
+        if env is not None:
+            for child in env.children:
+                if child.value:
+                    parts.append(f"{child.key}={child.value}")
+    env = job.get("env")
+    if env is not None:
+        for child in env.children:
+            if child.value:
+                parts.append(f"{child.key}={child.value}")
+    return "\n".join(parts)
+
+
+def _is_arm64_label(label: str) -> bool:
+    return label in ARM64_LABELS or label.startswith("macos-")
+
+
+def _entry_runner(job: Node, entry: Node) -> list[str]:
+    """`runs-on` labels for one matrix include row."""
+    runs_on = job.get("runs-on")
+    if runs_on is None:
+        return []
+    out: list[str] = []
+    for label in runs_on.scalars():
+        m = MATRIX_REF_RE.fullmatch(label.strip())
+        if m is None:
+            out.append(label)
+            continue
+        axis = m.group(1)
+        v = entry.get(axis)
+        if v is not None and v.value:
+            out.append(v.value)
+        else:
+            out += _matrix_values(job, axis)
+    return out
+
+
+def rule_aarch64_arm(tree: Tree) -> list[Problem]:
+    """ROADMAP §11.7: a job that boots an aarch64 guest runs on arm64."""
+    out = []
+    for path, wf in tree.workflows.items():
+        for job in _jobs(wf):
+            strategy = job.get("strategy")
+            matrix = strategy.get("matrix") if strategy is not None else None
+            include = matrix.get("include") if matrix is not None else None
+            run_text = _job_run_text(job)
+            boots = BOOT_CMD.search(run_text) is not None
+            if include is not None and include.items:
+                for entry in include.items:
+                    arch = entry.get("arch")
+                    if arch is None or arch.value != "aarch64":
+                        continue
+                    targets = entry.get("targets")
+                    words = (targets.value or "").split() if targets is not None else []
+                    entry_boots = boots or any(
+                        t.startswith("test-") or t == "run" for t in words
+                    )
+                    if not entry_boots:
+                        continue
+                    labels = _entry_runner(job, entry)
+                    if not labels or not all(_is_arm64_label(lb) for lb in labels):
+                        out.append(
+                            Problem(
+                                path,
+                                entry.line,
+                                "aarch64_arm",
+                                f"job `{job.key}` boots aarch64 but "
+                                f"runs-on is {labels or 'unset'}; use an arm64 image",
+                            )
+                        )
+                continue
+            if "aarch64" not in run_text and "ARCH=aarch64" not in run_text:
+                continue
+            if not boots:
+                continue
+            runs_on = job.get("runs-on")
+            labels = runs_on.scalars() if runs_on is not None else []
+            resolved: list[str] = []
+            for label in labels:
+                m = MATRIX_REF_RE.fullmatch(label.strip())
+                if m is None:
+                    resolved.append(label)
+                else:
+                    resolved += _matrix_values(job, m.group(1))
+            if not resolved or not all(_is_arm64_label(lb) for lb in resolved):
+                out.append(
+                    Problem(
+                        path,
+                        job.line,
+                        "aarch64_arm",
+                        f"job `{job.key}` boots aarch64 but runs-on is {resolved or 'unset'}; "
+                        "use an arm64 image",
+                    )
+                )
+    return out
+
+
+# upload-artifact v4's default when `name` is omitted.
+_DEFAULT_ARTIFACT = "artifact"
+_STATUS_FN = re.compile(r"!?\b(?:always|success|failure|cancelled)\(\)")
+_MATRIX_REF = re.compile(
+    r"""matrix(?:\.(?P<dot>[A-Za-z0-9_-]+)|\[\s*['"](?P<idx>[A-Za-z0-9_-]+)['"]\s*\])"""
+)
+_MATRIX_EQ = re.compile(
+    r"""(?x)
+    matrix(?:\.(?P<dot>[A-Za-z0-9_-]+)|\[\s*['"](?P<idx>[A-Za-z0-9_-]+)['"]\s*\])
+    \s*(?P<op>==|!=)\s*
+    (?:'(?P<sq>[^']*)'|"(?P<dq>[^"]*)"|(?P<bare>[A-Za-z0-9_./-]+))
+    """
+)
+
+
+def _row_scalars(seq: Node) -> list[dict[str, str]] | None:
+    """Mapping items of a matrix `include` or `exclude`, or None if one is not literal."""
+    rows: list[dict[str, str]] = []
+    for item in seq.items:
+        if item.kind != "map":
+            return None
+        row: dict[str, str] = {}
+        for child in item.children:
+            if (
+                child.key is None
+                or child.kind != "scalar"
+                or child.value is None
+                or "${{" in child.value
+            ):
+                return None
+            row[child.key] = child.value
+        rows.append(row)
+    return rows
+
+
+def _expand_matrix(matrix: Node) -> list[dict[str, str]] | None:
+    """The matrix's legs, or None when a value is an expression or an object.
+
+    Axis lists are the cartesian product. `exclude` drops a partial match from
+    that product. Each `include` then merges into every leg whose original axis
+    values it does not overwrite, or becomes a new leg when it matches none
+    (GitHub's matrix rules). An include-only matrix is just its include rows.
+    """
+    if matrix.kind != "map":
+        return None
+    axes: list[tuple[str, list[str]]] = []
+    includes: list[dict[str, str]] = []
+    excludes: list[dict[str, str]] = []
+    for child in matrix.children:
+        if child.key in ("include", "exclude"):
+            if child.kind != "seq":
+                return None
+            rows = _row_scalars(child)
+            if rows is None:
+                return None
+            (includes if child.key == "include" else excludes).extend(rows)
+            continue
+        if child.kind != "seq":
+            return None
+        vals: list[str] = []
+        for item in child.items:
+            if item.kind != "scalar" or item.value is None or "${{" in item.value:
+                return None
+            vals.append(item.value)
+        if child.key is None or not vals:
+            return None
+        axes.append((child.key, vals))
+    # No axis lists: the base product is empty, so each include is its own leg.
+    # exclude runs before include and therefore drops nothing here.
+    if not axes:
+        return [dict(row) for row in includes]
+    axis_keys = {key for key, _ in axes}
+    combos: list[dict[str, str]] = [{}]
+    for key, vals in axes:
+        combos = [{**combo, key: val} for combo in combos for val in vals]
+
+    def matches(combo: dict[str, str], spec: dict[str, str]) -> bool:
+        return all(combo.get(key) == val for key, val in spec.items())
+
+    combos = [c for c in combos if not any(matches(c, spec) for spec in excludes)]
+    for inc in includes:
+        matched = False
+        for combo in combos:
+            if any(key in axis_keys and combo.get(key) != val for key, val in inc.items()):
+                continue
+            for key, val in inc.items():
+                if key not in axis_keys:
+                    combo[key] = val
+            matched = True
+        if not matched:
+            combos.append(dict(inc))
+    return combos
+
+
+def _bind_matrix(template: str, combo: dict[str, str]) -> str:
+    """Substitute `matrix.<key>` and `matrix['key']` from `combo`."""
+
+    def repl(m: re.Match[str]) -> str:
+        key = m.group("dot") or m.group("idx")
+        if key is None:
+            return m.group(0)
+        return combo.get(key, m.group(0))
+
+    return _MATRIX_REF.sub(repl, template)
+
+
+def _if_allows(raw: str | None, combo: dict[str, str]) -> bool:
+    """Whether `combo` may run a step with this `if`.
+
+    A clause that does not mention `matrix` is the same for every leg, so it
+    does not split them. A matrix comparison we can read drops the legs it
+    excludes. Anything else (a call, `||`, `!`) might still run the leg.
+    """
+    if raw is None:
+        return True
+    expr = " ".join(raw.split())
+    if expr.startswith("${{") and expr.endswith("}}"):
+        expr = expr[3:-2].strip()
+    if "matrix." not in expr and "matrix[" not in expr:
+        return True
+    expr = _STATUS_FN.sub("true", expr)
+    if any(tok in expr for tok in ("||", "!", "(")):
+        return True
+    for part in (p.strip() for p in expr.split("&&")):
+        if not part or part == "true":
+            continue
+        m = _MATRIX_EQ.fullmatch(part)
+        if m is None:
+            if "matrix." in part or "matrix[" in part:
+                return True
+            continue
+        key = m.group("dot") or m.group("idx")
+        if key is None or key not in combo:
+            return True
+        val = m.group("sq")
+        if val is None:
+            val = m.group("dq")
+        if val is None:
+            val = m.group("bare")
+        got = combo[key]
+        op = m.group("op")
+        if op == "==" and got != val:
+            return False
+        if op == "!=" and got == val:
+            return False
+    return True
+
+
+def _if_text(node: Node) -> str | None:
+    iff = node.get("if")
+    if iff is None or iff.value is None:
+        return None
+    return iff.value
+
+
+def _artifact_name(step: Node) -> tuple[str, int]:
+    """The upload's name and the line to blame. Omitted name is v4's default."""
+    uses = step.get("uses")
+    blame = uses.line if uses is not None else step.line
+    with_ = step.get("with")
+    name = with_.get("name") if with_ is not None else None
+    if name is None or name.kind != "scalar" or name.value is None:
+        return _DEFAULT_ARTIFACT, blame
+    return name.value, name.line
+
+
+def rule_matrix_artifact_names(tree: Tree) -> list[Problem]:
+    """An `upload-artifact` name in a matrix job is unique across the legs that
+    run it. v4 rejects a second upload of the same name in one run (409), which
+    fails that leg and skips every job that needs it. The name varies with the
+    matrix, or an `if` leaves a single leg.
+    """
+    out = []
+    for path, wf in tree.workflows.items():
+        for job in _jobs(wf):
+            strategy = job.get("strategy")
+            matrix = strategy.get("matrix") if strategy is not None else None
+            if matrix is None:
+                continue
+            combos = _expand_matrix(matrix)
+            if combos is None:
+                out.append(
+                    Problem(
+                        path,
+                        matrix.line,
+                        "matrix_artifact_names",
+                        f"job `{job.key}`: matrix is not literal; "
+                        "its upload-artifact names cannot be checked",
+                    )
+                )
+                continue
+            steps = job.get("steps")
+            seen: set[str] = set()
+            reported: set[str] = set()
+            job_if = _if_text(job)
+            for step in steps.items if steps is not None else []:
+                uses = step.get("uses")
+                if uses is None or not (uses.value or "").startswith("actions/upload-artifact@"):
+                    continue
+                template, line = _artifact_name(step)
+                step_if = _if_text(step)
+                for combo in combos:
+                    if not _if_allows(job_if, combo) or not _if_allows(step_if, combo):
+                        continue
+                    name = _bind_matrix(template, combo)
+                    if name not in seen:
+                        seen.add(name)
+                        continue
+                    if name in reported:
+                        continue
+                    reported.add(name)
+                    out.append(
+                        Problem(
+                            path,
+                            line,
+                            "matrix_artifact_names",
+                            f"job `{job.key}` uploads {name!r} more than once in one run; "
+                            "upload-artifact v4 rejects the second (409)",
+                        )
+                    )
+    return out
+
+
 RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_no_expr_in_run,
+    rule_aarch64_arm,
     rule_permissions,
     rule_action_pins,
     rule_runs_on,
     rule_qemu_pin,
+    rule_limine_cache,
     rule_ci_triggers,
     rule_concurrency_group,
     rule_gate_dispatch,
@@ -1456,6 +1870,7 @@ RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_release_one_image,
     rule_release_profile,
     rule_no_core_upload_with_secrets,
+    rule_matrix_artifact_names,
 ]
 
 

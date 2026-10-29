@@ -105,6 +105,9 @@ pub const MAX_PARTS: usize = 16;
 /// disks with their children, plus a disk and the `MAX_PARTS` children an
 /// in-guest partition test registers beside them.
 pub const MAX_BLOCKDEVS: usize = 32;
+/// Software IRQ slots (`irq::IrqTable`, `irq_init` handler and threaded
+/// tables). Zero is `IrqId::NONE`; live ids are `1..=MAX_IRQS`.
+pub const MAX_IRQS: usize = 128;
 /// Registered drivers (`dev::Registry`).
 pub const MAX_DRIVERS: usize = 16;
 /// Device claims (`dev::Registry`).

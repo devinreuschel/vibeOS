@@ -43,6 +43,7 @@ from tests.harness.harness import (
     FirmwareError,
     HarnessError,
     QemuConfig,
+    apply_arch_cli,
     default_iso,
     env_config,
     firmware_dirs,
@@ -170,6 +171,7 @@ def firmware_main(arch: str) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="run_interactive.py", description="interactive QEMU launcher")
+    ap.add_argument("--arch", choices=("x86_64", "aarch64"))
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("run", help="production ISO in a QEMU window, COM1 on this terminal")
     sub.add_parser("panic", help="panic-test ISO, no display")
@@ -180,6 +182,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     fw = sub.add_parser("firmware", help="print the probed UEFI firmware pair")
     fw.add_argument("arch", choices=sorted(FIRMWARE_TABLE))
     args = ap.parse_args(argv)
+    apply_arch_cli(args.arch)
     if args.cmd == "firmware":
         return firmware_main(args.arch)
     try:

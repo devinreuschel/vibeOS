@@ -136,14 +136,57 @@ pub const SNAPSHOT_CHUNK: usize = 16;
 
 /// The scheduler's timeout queue's capacity.
 #[cfg(feature = "kernel_tests")]
+#[cfg_attr(
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
+    expect(dead_code, reason = "boot-CPU S7; unused on this path")
+)]
 pub(crate) fn timeouts_capacity() -> usize {
     with_sched(|s| s.timeouts.capacity())
+}
+
+/// Scan every live thread's stack, one `SCHED` section per slot, and hand
+/// each measurement to `f` with the lock dropped (TESTING §8.2).
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn scan_live_stacks(mut f: impl FnMut(vibeos::sched::stack_depth::Deepest)) {
+    const WORDS_PER_PAGE: usize = vibeos::paging::PAGE_SIZE_4K as usize / 8;
+    let mut i = 0usize;
+    while i < MAX_THREADS {
+        let d = with_sched(|s| {
+            let t = s.slots.get(i)?.as_deref()?;
+            if t.state == ThreadState::Dead {
+                return None;
+            }
+            let st = t.stack.as_ref()?;
+            let words = st.pages() * WORDS_PER_PAGE;
+            // SAFETY: a thread that is not Dead keeps its stack mapped
+            // while SCHED is held: `thread_exit` stores Dead under SCHED
+            // before its switch hands the stack to reclaim (invariant I10,
+            // established at `sched::thread_init::thread_exit`).
+            let used = unsafe {
+                vibeos::sched::stack_depth::used_volatile(st.base().as_u64() as *const u64, words)
+            };
+            Some(vibeos::sched::stack_depth::Deepest {
+                size: words * 8,
+                used,
+                tid: t.id.0,
+                name: t.name,
+            })
+        });
+        if let Some(d) = d {
+            f(d);
+        }
+        i += 1;
+    }
 }
 
 /// The id, name, CPU and `run_tsc` of each thread in the table, up to
 /// `out.len()`, under one SCHED section: a test compares two of these to
 /// name the threads a CPU ran between them. Returns how many it wrote.
 #[cfg(feature = "kernel_tests")]
+#[cfg_attr(
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
+    expect(dead_code, reason = "x86 quantum snapshot; unused on this path")
+)]
 pub(crate) fn run_tsc_snapshot(out: &mut [RunTsc]) -> usize {
     with_sched(|s| {
         let mut n = 0usize;
@@ -165,6 +208,10 @@ pub(crate) fn run_tsc_snapshot(out: &mut [RunTsc]) -> usize {
 
 /// One thread's row of [`run_tsc_snapshot`].
 #[cfg(feature = "kernel_tests")]
+#[cfg_attr(
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
+    expect(dead_code, reason = "x86 quantum snapshot; unused on this path")
+)]
 #[derive(Clone, Copy)]
 pub(crate) struct RunTsc {
     pub id: ThreadId,
@@ -174,6 +221,10 @@ pub(crate) struct RunTsc {
 }
 
 #[cfg(feature = "kernel_tests")]
+#[cfg_attr(
+    all(target_arch = "aarch64", not(feature = "kernel_tests")),
+    expect(dead_code, reason = "x86 quantum snapshot; unused on this path")
+)]
 impl RunTsc {
     pub const EMPTY: Self = Self {
         id: ThreadId::NONE,

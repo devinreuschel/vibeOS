@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import unittest
 from pathlib import Path
 from typing import Any
@@ -402,23 +403,55 @@ class TestGit(unittest.TestCase):
         self.assertEqual(errs, [])
         self.assertEqual(len(warnings), 1)
 
+    def _bare(self, env: dict[str, str] | None = None) -> tuple[int, str]:
+        out, err = io.StringIO(), io.StringIO()
+        base_env = {"BASE_SHA": "", "GITHUB_BASE_REF": ""}
+        if env:
+            base_env.update(env)
+        with mock.patch.object(cgi, "ROOT", self.repo.path), \
+                mock.patch.object(cgi, "static_errors", return_value=[]), \
+                mock.patch.dict(os.environ, base_env), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cgi.main([])
+        return rc, out.getvalue() + err.getvalue()
+
     def test_no_origin_main_skips_diff_rules(self) -> None:
         self.repo.commit("edit", {"scripts/check_x.py": "print('y')\n"})
-        out = io.StringIO()
-        with mock.patch.object(cgi, "ROOT", self.repo.path), \
-                mock.patch.object(cgi, "static_errors", return_value=[]), \
-                contextlib.redirect_stdout(out):
-            rc = cgi.main([])
+        rc, text = self._bare()
         self.assertEqual(rc, 0)
-        self.assertIn("static rules only: no origin/main", out.getvalue())
+        self.assertIn("static rules only: no origin/main", text)
         self.repo.git("update-ref", "refs/remotes/origin/main", self.base)
-        err = io.StringIO()
-        with mock.patch.object(cgi, "ROOT", self.repo.path), \
-                mock.patch.object(cgi, "static_errors", return_value=[]), \
-                contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-            rc = cgi.main([])
+        rc, text = self._bare()
         self.assertEqual(rc, 1)
-        self.assertIn("scripts/check_x.py: modified", err.getvalue())
+        self.assertIn("scripts/check_x.py: modified", text)
+
+    def test_non_main_pull_request_diffs_its_base(self) -> None:
+        """A pull request into phase-11 is judged against that tip. A skip that
+        phase-11 already carries is not this pull request's to explain, and one
+        it adds still is. `main` and a local run stay on origin/main."""
+        self.repo.git("update-ref", "refs/remotes/origin/main", self.base)
+        added = SKIPS + '\n[[skip]]\nname = "b"\nreason = "x86"\narch = "aarch64"\n'
+        phase = self.repo.commit("phase", {"tests/harness/skips.toml": added})
+        self.repo.git("update-ref", "refs/remotes/origin/phase-11", phase)
+        self.repo.commit("pr", {"src.rs": "fn main() {}\n"})
+        rc, text = self._bare()
+        self.assertEqual(rc, 1)
+        self.assertIn("skip entry 'b'", text)
+        rc, text = self._bare({"GITHUB_BASE_REF": "main"})
+        self.assertEqual(rc, 1)
+        self.assertIn("skip entry 'b'", text)
+        rc, text = self._bare({"GITHUB_BASE_REF": "phase-11"})
+        self.assertEqual(rc, 0, text)
+        self.assertIn("against origin/phase-11", text)
+        rc, text = self._bare({"BASE_SHA": phase, "GITHUB_BASE_REF": "main"})
+        self.assertEqual(rc, 0, text)
+        self.assertIn(f"against {phase}", text)
+        self.repo.commit("adds", {"tests/harness/skips.toml": added +
+                         '\n[[skip]]\nname = "c"\nreason = "x86"\narch = "aarch64"\n'})
+        rc, text = self._bare({"GITHUB_BASE_REF": "phase-11"})
+        self.assertEqual(rc, 1)
+        self.assertIn("skip entry 'c'", text)
+        self.assertNotIn("skip entry 'b'", text)
 
 
 class TestSummary(unittest.TestCase):

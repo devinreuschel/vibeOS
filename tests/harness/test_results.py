@@ -169,6 +169,11 @@ class TestResults(unittest.TestCase):
             r = results.Results("a b/c:d.e-f_g", out_dir=Path(d))
             self.assertEqual(r.write().name, "x86_64-a_b_c_d.e-f_g.json")
 
+    def test_arch_names_the_file(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            r = results.Results("test-kernel", "aarch64", out_dir=Path(d))
+            self.assertEqual(r.write().name, "aarch64-test-kernel.json")
+
     def test_e2e_retry_hang_reaches_summary_and_results(self) -> None:
         # Box 1246's proof. No driver retries now (TestNoRetry), so this
         # records the retry an e2e driver would have taken, with its label

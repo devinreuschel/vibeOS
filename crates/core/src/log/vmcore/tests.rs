@@ -786,6 +786,7 @@ fn vmcore_reads_kernel_layouts() {
             rflags: 0x202,
             rsp: 0x8,
             rip: 0x9,
+            extra: [0; 5],
         });
         addr_of_mut!((*t1.p).cpu).write(1);
         addr_of_mut!((*t1.p).pid).write(42);

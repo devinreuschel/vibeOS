@@ -24,6 +24,9 @@ pub const NAME_MAX: usize = 16;
 /// Linux `FD_CLOEXEC`. Distinct from open `O_CLOEXEC`.
 pub const FD_CLOEXEC: u32 = 1;
 
+/// Linux `AT_FDCWD` (`fcntl.h`): `openat` and friends use the cwd.
+pub const AT_FDCWD: i32 = -100;
+
 pub const WNOHANG: u64 = 1;
 
 pub const SIGHUP: u32 = 1;

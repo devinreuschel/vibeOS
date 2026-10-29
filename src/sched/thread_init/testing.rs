@@ -27,21 +27,28 @@ static STALL_MS: AtomicU64 = AtomicU64::new(0);
 /// reclaimable and the switch off it. The hold spins with IF=0 and
 /// services no IPI.
 pub fn arm_exit_stall(cpu: u32, exits: u32, ms: u64) {
+    // Relaxed: the Release store of `STALL_LEFT` below publishes it; pairs with nothing.
     STALL_CPU.store(cpu, Ordering::Relaxed);
+    // Relaxed: as `STALL_CPU`; pairs with nothing.
     STALL_MS.store(ms, Ordering::Relaxed);
+    // Release: pairs with the Acquire `try_update` in `exit_stall`.
     STALL_LEFT.store(exits, Ordering::Release);
 }
 
 pub fn disarm_exit_stall() {
+    // Release: pairs with the Acquire `try_update` in `exit_stall`.
     STALL_LEFT.store(0, Ordering::Release);
+    // Relaxed: a stale CPU only reaches the `STALL_LEFT` check; pairs with nothing.
     STALL_CPU.store(u32::MAX, Ordering::Relaxed);
 }
 
 /// Called by `thread_exit` just before it switches away.
 pub(super) fn exit_stall() {
+    // Relaxed: a stale CPU only reaches the `STALL_LEFT` check below; pairs with nothing.
     if STALL_CPU.load(Ordering::Relaxed) != super::current_cpu() {
         return;
     }
+    // AcqRel, Acquire on failure: pairs with the Release stores in the arm and disarm.
     if STALL_LEFT
         .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
         .is_err()
@@ -50,6 +57,7 @@ pub(super) fn exit_stall() {
     }
     // IF is off here (`thread_exit`'s switch section).
     let _hold = crate::sched::irqoff::deliberate("exit stall");
+    // Relaxed: the `try_update` above read the arm's Release store; pairs with nothing.
     let cycles = STALL_MS
         .load(Ordering::Relaxed)
         .saturating_mul(time_init::tsc_per_ms());
@@ -69,7 +77,9 @@ pub fn drain_local_stack_cache() {
     let kick = crate::per_cpu_init::with_current(|cpu| {
         let mut any = false;
         while let Some(stack) = cpu.stack_cache.take() {
+            // AcqRel: pairs with the Acquire load in `cached_stack_frames` and the other updates.
             super::CACHED_STACK_FRAMES.fetch_sub(stack.pages(), Ordering::AcqRel);
+            // AcqRel: pairs with the Acquire load in `stacks_in_flight` and the other updates.
             super::STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
             // SAFETY: invariant I10, established at
             // `thread_init::finish_switch`, which caches only stacks no CPU
@@ -91,6 +101,7 @@ pub fn drain_local_stack_cache() {
 ///
 /// No CPU runs on `stack`, now or later (invariant I10).
 pub unsafe fn park_on_local_list(stack: crate::kva_init::GuardedStack) {
+    // AcqRel: pairs with the Acquire load in `stacks_in_flight` and the other updates.
     super::STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
     crate::per_cpu_init::with_current(|cpu| {
         // SAFETY: invariant I10, established at `thread_init::finish_switch`
@@ -104,11 +115,11 @@ pub unsafe fn park_on_local_list(stack: crate::kva_init::GuardedStack) {
 /// Make the next `spawn*` made on behalf of a process (a `fork`) return
 /// `SpawnError::NoMemory` before it allocates anything. One-shot.
 pub fn fail_next_fork_stack() {
+    // Release: pairs with the AcqRel swap in `spawn_inner`.
     FAIL_FORK_STACK.store(true, Ordering::Release);
 }
 
-/// C-REQUEUE-HOOK's switch, which `sched::ktest::set_requeue_next_cpu`
-/// sets.
+/// C-REQUEUE-HOOK's switch, which [`set_requeue_next_cpu`] sets.
 pub(in crate::sched) static REQUEUE: AtomicBool = AtomicBool::new(false);
 /// Moves the hook has made since boot (`sched::ktest::requeues`).
 pub(in crate::sched) static REQUEUES: AtomicU64 = AtomicU64::new(0);
@@ -172,7 +183,33 @@ pub fn queue_here(id: ThreadId) {
 }
 
 pub(super) fn requeue_on() -> bool {
+    // Acquire: pairs with the Release store in `set_requeue_next_cpu`.
     REQUEUE.load(Ordering::Acquire)
+}
+
+/// C-REQUEUE-HOOK: move each user or `CpuAffinity::Any` thread to the
+/// next online CPU when its CPU dequeues it ([`requeue_next_cpu`]).
+/// Turning it on forgets the arrivals an earlier use left: a thread
+/// moved just before the hook went off keeps its flag, and a later
+/// thread in that slot would run where it is dequeued instead of moving.
+pub fn set_requeue_next_cpu(on: bool) {
+    if on {
+        for a in ARRIVED.try_get().map_or(&[][..], |v| &v[..]) {
+            // Relaxed: a reset before the hook is published; pairs with nothing.
+            a.store(false, Ordering::Relaxed);
+        }
+    }
+    // Release: pairs with the Acquire load in `requeue_on`.
+    REQUEUE.store(on, Ordering::Release);
+}
+
+/// Turns the requeue hook off when dropped.
+pub struct RequeueGuard;
+
+impl Drop for RequeueGuard {
+    fn drop(&mut self) {
+        set_requeue_next_cpu(false);
+    }
 }
 
 /// The first online CPU after `me`, wrapping; `None` with one CPU.
@@ -186,14 +223,17 @@ pub(super) fn next_online_cpu(me: u32) -> Option<u32> {
 /// Thread-table slot `slot`'s thread was moved. Under SCHED.
 pub(super) fn moved(slot: usize) {
     if let Some(a) = ARRIVED.try_get().and_then(|v| v.get(slot)) {
+        // Release: pairs with the AcqRel swap in `take_arrived`.
         a.store(true, Ordering::Release);
     }
+    // Relaxed: a counter `sched::ktest::requeues` reads; pairs with nothing.
     REQUEUES.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Whether slot `slot`'s thread arrived by a move and has not run since;
 /// clears it. Under SCHED.
 pub(super) fn take_arrived(slot: usize) -> bool {
+    // AcqRel: pairs with the Release store in `moved`.
     ARRIVED
         .try_get()
         .and_then(|v| v.get(slot))
@@ -219,13 +259,17 @@ static PLACE_LATE: AtomicBool = AtomicBool::new(false);
 /// `Blocked` holds it once SCHED has dropped. The thread calls it on
 /// itself before it blocks.
 pub fn arm_wait_window(id: ThreadId) {
+    // Relaxed: the Release store of `WINDOW_TID` below publishes it; pairs with nothing.
     WINDOW_GO.store(false, Ordering::Relaxed);
+    // Relaxed: as `WINDOW_GO`; pairs with nothing.
     WINDOW_HELD.store(false, Ordering::Relaxed);
+    // Release: pairs with the Acquire load in `window_enter` and the CAS in `wait_window`.
     WINDOW_TID.store(id.raw(), Ordering::Release);
 }
 
 /// Whether [`arm_wait_window`]'s thread is held now.
 pub fn wait_window_held() -> bool {
+    // Acquire: pairs with the Release stores in `wait_window`.
     WINDOW_HELD.load(Ordering::Acquire)
 }
 
@@ -234,6 +278,7 @@ pub fn wait_window_held() -> bool {
 /// the section's places are delivered and before `with_sched`'s own guard
 /// drops, so no tick switches the thread off `Blocked` before the hold.
 pub(super) fn window_enter() -> Option<WindowGuard> {
+    // Acquire: pairs with the Release stores in `arm_wait_window` and `disarm_late_wake`.
     let armed = WINDOW_TID.load(Ordering::Acquire);
     (armed != u32::MAX && armed == super::current_id().raw()).then(|| WindowGuard {
         _irq: crate::sched::irqoff::deliberate("late-wake window hold"),
@@ -262,19 +307,24 @@ fn wait_window() {
         return;
     }
     let me = me.raw();
+    // AcqRel: pairs with the Release store in `arm_wait_window`.
+    // Relaxed on failure: no hold follows; pairs with nothing.
     if WINDOW_TID
         .compare_exchange(me, u32::MAX, Ordering::AcqRel, Ordering::Relaxed)
         .is_err()
     {
         return;
     }
+    // Release: pairs with the Acquire load in `wait_window_held`.
     WINDOW_HELD.store(true, Ordering::Release);
     let end =
         time_init::read_tsc().saturating_add(LATE_WAKE_MS.saturating_mul(time_init::tsc_per_ms()));
+    // Acquire: pairs with the Release stores in `place_stall` and `disarm_late_wake`.
     while !WINDOW_GO.load(Ordering::Acquire) && time_init::read_tsc() < end {
         crate::ipi_init::service_incoming();
         core::hint::spin_loop();
     }
+    // Release: pairs with the Acquire load in `wait_window_held`.
     WINDOW_HELD.store(false, Ordering::Release);
 }
 
@@ -283,29 +333,38 @@ fn wait_window() {
 /// [`arm_wait_window`]'s thread go and spins until `id` is `Dead` or 2 s
 /// pass, as a waker preempted at that point would while `id` runs on.
 pub fn arm_late_wake(id: ThreadId) {
+    // Relaxed: the Release store of `PLACE_TID` below publishes it; pairs with nothing.
     PLACE_LATE.store(false, Ordering::Relaxed);
+    // Release: pairs with the AcqRel compare-exchange in `place_stall`.
     PLACE_TID.store(id.raw(), Ordering::Release);
 }
 
 /// Whether [`arm_late_wake`]'s wake went out after its thread died.
 pub fn late_wake_after_death() -> bool {
+    // Acquire: pairs with the Release store in `place_stall`.
     PLACE_LATE.load(Ordering::Acquire)
 }
 
 pub fn disarm_late_wake() {
+    // Release: pairs with the AcqRel compare-exchange in `place_stall`.
     PLACE_TID.store(u32::MAX, Ordering::Release);
+    // Release: pairs with the Acquire load in `window_enter`.
     WINDOW_TID.store(u32::MAX, Ordering::Release);
+    // Release: pairs with the Acquire load in `wait_window`.
     WINDOW_GO.store(true, Ordering::Release);
 }
 
 /// Called by `with_sched` before it delivers each place.
 pub(super) fn place_stall(id: ThreadId) {
+    // AcqRel: pairs with the Release store in `arm_late_wake`.
+    // Relaxed on failure: no stall follows; pairs with nothing.
     if PLACE_TID
         .compare_exchange(id.raw(), u32::MAX, Ordering::AcqRel, Ordering::Relaxed)
         .is_err()
     {
         return;
     }
+    // Release: pairs with the Acquire load in `wait_window`.
     WINDOW_GO.store(true, Ordering::Release);
     // With IF=0 the stall is a deliberate IF-off stretch; with IF=1 it
     // holds none and takes no guard.
@@ -315,6 +374,7 @@ pub(super) fn place_stall(id: ThreadId) {
         time_init::read_tsc().saturating_add(LATE_WAKE_MS.saturating_mul(time_init::tsc_per_ms()));
     while time_init::read_tsc() < end {
         if exited(id) {
+            // Release: pairs with the Acquire load in `late_wake_after_death`.
             PLACE_LATE.store(true, Ordering::Release);
             return;
         }
@@ -333,6 +393,7 @@ const PREEMPT_SPIN_MS: u64 = 1;
 /// between dropping SCHED and placing the wakes, and spins up to 1 ms
 /// for it to land, as a tick at that point would (F034).
 pub fn ktest_preempt_before_places(id: ThreadId) {
+    // Release: pairs with the AcqRel compare-exchange in `preempt_before_places`.
     PREEMPT_TID.store(id.raw(), Ordering::Release);
 }
 
@@ -343,6 +404,8 @@ pub(super) fn preempt_before_places(places: usize) {
         return;
     }
     let me = super::current_id().raw();
+    // AcqRel: pairs with the Release store in `ktest_preempt_before_places`.
+    // Relaxed on failure: no IPI follows; pairs with nothing.
     if PREEMPT_TID
         .compare_exchange(me, u32::MAX, Ordering::AcqRel, Ordering::Relaxed)
         .is_err()
@@ -386,18 +449,21 @@ pub(super) fn overdue_printed(id: ThreadId) {
 /// Called by the sweep once it has scanned the whole table and printed
 /// every find.
 pub(super) fn sweep_done() {
+    // AcqRel: pairs with the Acquire load in `ktest_sweeps`.
     SWEEPS.fetch_add(1, Ordering::AcqRel);
 }
 
 /// The last thread the blocked-thread sweep reported, set after its line
 /// is printed; `ThreadId::NONE` before any.
 pub fn ktest_last_overdue() -> ThreadId {
+    // Acquire: pairs with the Release store in `overdue_printed`.
     ThreadId(LAST_OVERDUE.load(Ordering::Acquire))
 }
 
 /// Whole sweeps finished since boot: a count read after a change the
 /// sweep must see has grown once every sweep that began before it is done.
 pub fn ktest_sweeps() -> u64 {
+    // Acquire: pairs with the AcqRel `fetch_add` in `sweep_done`.
     SWEEPS.load(Ordering::Acquire)
 }
 
@@ -505,7 +571,7 @@ pub fn cpu_of(id: ThreadId) -> u32 {
     super::SCHED.lock().get(id).expect("unknown thread").cpu
 }
 
-/// C-REQUEUE-HOOK: while `sched::ktest::set_requeue_next_cpu` is on, a user
+/// C-REQUEUE-HOOK: while [`set_requeue_next_cpu`] is on, a user
 /// thread or a `CpuAffinity::Any` kernel thread that this CPU dequeues
 /// while another thread is current moves to the next online CPU instead
 /// of running here, once per slice it runs. A preempted thread that is the
@@ -578,6 +644,7 @@ static REFUSED_SWITCH: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// Called by `switch_now` just before a switch that holds a ranked lock.
 pub(super) fn refuse_switch(id: ThreadId) {
+    // Relaxed: read back by the thread that caught the refusal; pairs with nothing.
     REFUSED_SWITCH.store(id.0, Ordering::Relaxed);
 }
 
@@ -585,6 +652,7 @@ pub(super) fn refuse_switch(id: ThreadId) {
 /// already set Running and taken off this CPU's run queue: a test that
 /// catches the refusal `switch_to`s it to undo that. Clears the record.
 pub fn take_refused_switch() -> Option<ThreadId> {
+    // Relaxed: as in `refuse_switch`; pairs with nothing.
     let id = ThreadId(REFUSED_SWITCH.swap(ThreadId::NONE.0, Ordering::Relaxed));
     if id.is_none() { None } else { Some(id) }
 }
@@ -635,34 +703,8 @@ pub(super) fn scan_dead_slot() {
 
 /// Scan every live thread's stack, one `SCHED` section per slot, and hand
 /// each measurement to `f` with the lock dropped (TESTING §8.2).
-pub fn scan_live_stacks(mut f: impl FnMut(Deepest)) {
-    let mut i = 0usize;
-    while i < MAX_THREADS {
-        let d = with_sched(|s| {
-            let t = s.slots.get(i)?.as_deref()?;
-            if t.state == ThreadState::Dead {
-                return None;
-            }
-            let st = t.stack.as_ref()?;
-            let words = st.pages() * WORDS_PER_PAGE;
-            // SAFETY: a thread that is not Dead keeps its stack mapped
-            // while SCHED is held: `thread_exit` stores Dead under SCHED
-            // before its switch hands the stack to reclaim (invariant I10,
-            // established at `sched::thread_init::thread_exit`).
-            let used =
-                unsafe { stack_depth::used_volatile(st.base().as_u64() as *const u64, words) };
-            Some(Deepest {
-                size: words * 8,
-                used,
-                tid: t.id.0,
-                name: t.name,
-            })
-        });
-        if let Some(d) = d {
-            f(d);
-        }
-        i += 1;
-    }
+pub fn scan_live_stacks(f: impl FnMut(Deepest)) {
+    super::scan_live_stacks(f);
 }
 
 const WORDS_PER_PAGE: usize = vibeos::paging::PAGE_SIZE_4K as usize / 8;

@@ -4,8 +4,10 @@ use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::apic::{Polarity, Trigger};
+#[cfg(target_arch = "aarch64")]
+use vibeos::dev::DevRef;
 use vibeos::ipi::MAX_IPI_CPUS;
-use vibeos::irq::{self, IrqError};
+use vibeos::irq::{self, IrqError, IrqId, IrqSpecifier};
 use vibeos::kalloc::TryVec;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::pci::{Bdf, CFG_COMMAND, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
@@ -16,7 +18,7 @@ use crate::apic_init;
 use crate::ipi_init;
 use crate::irq_init;
 use crate::ktest::{
-    EDU_IDENT, EDU_IDENT_VAL, Outcome, Test, alloc_frames_owned, bar0_va, cpu_remote, find_edu,
+    EDU_IDENT, EDU_IDENT_VAL, Outcome, Test, alloc_frames_owned, bar0_va, find_edu,
     free_frames_owned, mmio_r32, mmio_w32, quiescent_free_frames, second_cpu, spawn_thread_on,
     spin_until_ns, test,
 };
@@ -155,7 +157,7 @@ fn record_irq_cpu() {
 }
 
 fn on_msix() {
-    match irq_init::allocate_vector(0) {
+    match irq_init::allocate(0) {
         Err(IrqError::InIrq) => IRQ_ALLOC.store(1, Ordering::SeqCst),
         Ok(_) => IRQ_ALLOC.store(2, Ordering::SeqCst),
         Err(_) => IRQ_ALLOC.store(3, Ordering::SeqCst),
@@ -186,23 +188,43 @@ fn on_intx_no_ack() {
 
 pub(crate) fn test_irq_pool() -> Outcome {
     let n0 = allocated_count();
-    let v = match irq_init::allocate_vector(0) {
+    let irq = match irq_init::allocate(0) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
+    let Some(v) = irq_init::vector(irq) else {
+        let _ = irq_init::free_vector(irq);
+        return Outcome::Fail("no hwirq");
+    };
     if !irq::in_pool(v) || v == vectors::KBD {
-        let _ = irq_init::free_vector(v);
+        let _ = irq_init::free_vector(irq);
         return Outcome::Fail("out of pool");
     }
-    if irq_init::cpu_of(v) != Some(0) {
-        let _ = irq_init::free_vector(v);
+    if irq_init::cpu_of(irq) != Some(0) {
+        let _ = irq_init::free_vector(irq);
         return Outcome::Fail("cpu_of");
     }
-    if irq_init::set_affinity(v, 0).is_err() {
-        let _ = irq_init::free_vector(v);
+    if irq_init::set_affinity(irq, 0).is_err() {
+        let _ = irq_init::free_vector(irq);
         return Outcome::Fail("affinity");
     }
-    match irq_init::free_vector(v) {
+    let isa = match irq_init::map_wired(IrqSpecifier::Isa { line: 5 }) {
+        Ok(i) => i,
+        Err(e) => {
+            let _ = irq_init::free_vector(irq);
+            return Outcome::Fail(e.as_str());
+        }
+    };
+    if irq_init::vector(isa) != Some(0x25) {
+        let _ = irq_init::free_vector(isa);
+        let _ = irq_init::free_vector(irq);
+        return Outcome::Fail("isa vector");
+    }
+    if irq_init::free_vector(isa).is_err() {
+        let _ = irq_init::free_vector(irq);
+        return Outcome::Fail("isa free");
+    }
+    match irq_init::free_vector(irq) {
         Ok(()) => {
             if allocated_count() != n0 {
                 Outcome::Fail("count")
@@ -220,7 +242,7 @@ fn irq_nop() {}
 
 pub(crate) fn test_irq_free_threaded() -> Outcome {
     let n0 = allocated_count();
-    let v = match irq_init::allocate_vector(0) {
+    let v = match irq_init::allocate(0) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
@@ -238,7 +260,7 @@ pub(crate) fn test_irq_free_threaded() -> Outcome {
     if has_threaded(v) {
         return Outcome::Fail("threaded after free");
     }
-    let v2 = match irq_init::allocate_vector(0) {
+    let v2 = match irq_init::allocate(0) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
@@ -267,6 +289,14 @@ pub(crate) fn test_irq_free_threaded() -> Outcome {
     Outcome::Ok
 }
 
+fn arm_e1000_msix(mmio: u64) {
+    mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
+    mmio_w32(mmio, E1000_IVAR, E1000_IVAR_OTHER0);
+    mmio_w32(mmio, E1000_IMS, E1000_ICR_LSC | E1000_ICR_OTHER);
+}
+
+/// MSI-X goes live on CPU 0, then `set_affinity` moves it. The next
+/// interrupt has to arrive on the new CPU (issue #263).
 pub(crate) fn test_msix_cpu() -> Outcome {
     let Some(ap) = second_cpu() else {
         return Outcome::Skip("no AP");
@@ -280,68 +310,84 @@ pub(crate) fn test_msix_cpu() -> Outcome {
     let Some(mmio) = bar0_va(&dev) else {
         return Outcome::Fail("e1000e bar0");
     };
-    let Some(cpu) = cpu_remote(ap) else {
-        return Outcome::Fail("no apic id");
+    // `alloc_msi` maps the ITS event on aarch64. `allocate` does not.
+    let vec = match irq_init::alloc_msi(&dev, 1).ok().and_then(|s| s.get(0)) {
+        Some(v) => v,
+        None => return Outcome::Fail("alloc"),
     };
-    let vec = match irq_init::allocate_vector(0) {
-        Ok(v) => v,
-        Err(e) => return Outcome::Fail(e.as_str()),
-    };
-    if irq_init::set_handler(vec, on_msix).is_err() {
-        let _ = irq_init::free_vector(vec);
-        return Outcome::Fail("handler");
-    }
-    if irq_init::set_affinity(vec, ap).is_err() {
-        let _ = irq_init::free_vector(vec);
-        return Outcome::Fail("affinity");
-    }
-    if irq_init::cpu_of(vec) != Some(ap) {
-        let _ = irq_init::free_vector(vec);
-        return Outcome::Fail("cpu_of ap");
-    }
-    reset_irq_obs();
-    IRQ_MMIO.store(mmio, Ordering::SeqCst);
-    // Decode on, bus mastering and INTx disable off, so a COMMAND write by
-    // `enable_msix` shows; `saved` goes back at the end.
     let saved = pci_init::cfg_read16(dev.addr, CFG_COMMAND);
-    let before = pci_init::update_command(dev.addr, CMD_MEM, CMD_MASTER | CMD_INTX_DISABLE);
-    let restore = || {
+    let restore_cmd = || {
         pci_init::update_command(dev.addr, saved, !saved);
     };
-    if let Err(e) = irq_init::enable_msix(&dev, 0, vec, cpu.apic_id.load(Ordering::Relaxed) as u8) {
+    let fail = |why: &'static str| {
+        mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
+        irq_init::disable_msix(&dev);
         let _ = irq_init::free_vector(vec);
-        restore();
+        IRQ_MMIO.store(0, Ordering::SeqCst);
+        restore_cmd();
+        Outcome::Fail(why)
+    };
+    if irq_init::set_handler(vec, on_msix).is_err() {
+        return fail("handler");
+    }
+    // Decode on, bus mastering and INTx disable off, so a COMMAND write by
+    // `enable_msix` shows; `saved` goes back at the end.
+    let before = pci_init::update_command(dev.addr, CMD_MEM, CMD_MASTER | CMD_INTX_DISABLE);
+    // The entry is live, aimed at CPU 0, before the move.
+    if let Err(e) = irq_init::enable_msix(&dev, 0, vec) {
+        restore_cmd();
+        mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
+        let _ = irq_init::free_vector(vec);
         return Outcome::Fail(e.as_str());
     }
     if pci_init::cfg_read16(dev.addr, CFG_COMMAND) != before {
-        irq_init::disable_msix(&dev);
-        let _ = irq_init::free_vector(vec);
-        restore();
-        return Outcome::Fail("msix wrote command");
+        return fail("msix wrote command");
     }
     // The test is the driver: an MSI-X message is a bus-master write
     // (DESIGN §4.7), and INTx goes off while MSI-X is armed.
     pci_init::update_command(dev.addr, CMD_MASTER | CMD_INTX_DISABLE, 0);
-    mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
-    mmio_w32(mmio, E1000_IVAR, E1000_IVAR_OTHER0);
-    mmio_w32(mmio, E1000_IMS, E1000_ICR_LSC | E1000_ICR_OTHER);
+    reset_irq_obs();
+    IRQ_MMIO.store(mmio, Ordering::SeqCst);
+    arm_e1000_msix(mmio);
     mmio_w32(mmio, E1000_ICS, E1000_ICR_LSC);
-    let fired = spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, 500_000_000);
+    let first = spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, 500_000_000);
+    let cpu0 = IRQ_CPU.load(Ordering::SeqCst);
+    if !first {
+        return fail("no msix");
+    }
+    if cpu0 != 0 {
+        return fail("not cpu0");
+    }
+    reset_irq_obs();
+    if irq_init::set_affinity(vec, ap).is_err() {
+        return fail("affinity");
+    }
+    if irq_init::cpu_of(vec) != Some(ap) {
+        return fail("cpu_of ap");
+    }
+    mmio_w32(mmio, E1000_ICS, E1000_ICR_LSC);
+    let second = spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, 500_000_000);
+    let cpu = IRQ_CPU.load(Ordering::SeqCst);
+    let ap_hits = CPU_HITS
+        .get(ap as usize)
+        .map(|c| c.load(Ordering::SeqCst))
+        .unwrap_or(0);
+    let alloc = IRQ_ALLOC.load(Ordering::SeqCst);
     mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
     irq_init::disable_msix(&dev);
     let _ = irq_init::free_vector(vec);
     IRQ_MMIO.store(0, Ordering::SeqCst);
-    restore();
-    if !fired {
-        return Outcome::Fail("no msix");
+    restore_cmd();
+    if !second {
+        return Outcome::Fail("no msix after move");
     }
-    if IRQ_CPU.load(Ordering::SeqCst) != ap {
+    if cpu != ap {
         return Outcome::Fail("wrong cpu");
     }
-    if CPU_HITS[ap as usize].load(Ordering::SeqCst) == 0 {
+    if ap_hits == 0 {
         return Outcome::Fail("ap counter");
     }
-    if IRQ_ALLOC.load(Ordering::SeqCst) != 1 {
+    if alloc != 1 {
         return Outcome::Fail("alloc in irq");
     }
     Outcome::Ok
@@ -367,7 +413,12 @@ pub(crate) fn test_intx_fallback() -> Outcome {
     if mmio_r32(mmio, EDU_IDENT) != EDU_IDENT_VAL {
         return Outcome::Fail("edu ident");
     }
-    let vec = match irq_init::allocate_vector(0) {
+    let gsi = line as u32;
+    let vec = match irq_init::map_wired(IrqSpecifier::Gsi {
+        gsi,
+        trigger: Trigger::Level,
+        polarity: Polarity::Low,
+    }) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
@@ -375,12 +426,7 @@ pub(crate) fn test_intx_fallback() -> Outcome {
         let _ = irq_init::free_vector(vec);
         return Outcome::Fail("handler");
     }
-    let gsi = line as u32;
     pci_init::update_command(dev.addr, 0, CMD_INTX_DISABLE);
-    if irq_init::route_intx(gsi, vec, 0, Trigger::Level, Polarity::Low).is_err() {
-        let _ = irq_init::free_vector(vec);
-        return Outcome::Fail("route");
-    }
     if irq_init::set_affinity(vec, ap).is_err() {
         apic_init::mask_gsi(gsi);
         let _ = irq_init::free_vector(vec);
@@ -407,7 +453,7 @@ pub(crate) fn test_intx_fallback() -> Outcome {
     Outcome::Ok
 }
 
-fn edu_intx_teardown(bdf: Bdf, gsi: u32, vec: Option<u8>, mmio: u64) {
+fn edu_intx_teardown(bdf: Bdf, gsi: u32, vec: Option<IrqId>, mmio: u64) {
     let st = mmio_r32(mmio, EDU_IRQSTAT);
     if st != 0 {
         mmio_w32(mmio, EDU_ACK, st);
@@ -440,12 +486,16 @@ pub(crate) fn test_intx_free_masks() -> Outcome {
     if mmio_r32(mmio, EDU_IDENT) != EDU_IDENT_VAL {
         return Outcome::Fail("edu ident");
     }
-    let vec = match irq_init::allocate_vector(0) {
+    let gsi = line as u32;
+    let vec = match irq_init::map_wired(IrqSpecifier::Gsi {
+        gsi,
+        trigger: Trigger::Level,
+        polarity: Polarity::Low,
+    }) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
-    let gsi = line as u32;
-    let fail = |why, live: Option<u8>| {
+    let fail = |why, live: Option<IrqId>| {
         edu_intx_teardown(dev.addr, gsi, live, mmio);
         Outcome::Fail(why)
     };
@@ -453,9 +503,6 @@ pub(crate) fn test_intx_free_masks() -> Outcome {
         return fail("handler", Some(vec));
     }
     pci_init::update_command(dev.addr, 0, CMD_INTX_DISABLE);
-    if irq_init::route_intx(gsi, vec, 0, Trigger::Level, Polarity::Low).is_err() {
-        return fail("route", Some(vec));
-    }
     if irq_init::set_affinity(vec, ap).is_err() {
         return fail("affinity", Some(vec));
     }
@@ -488,22 +535,26 @@ pub(crate) fn test_intx_free_masks() -> Outcome {
     if st != 0 {
         mmio_w32(mmio, EDU_ACK, st);
     }
-    let vec2 = match irq_init::allocate_vector(0) {
+    let vec2 = match irq_init::map_wired(IrqSpecifier::Gsi {
+        gsi,
+        trigger: Trigger::Level,
+        polarity: Polarity::Low,
+    }) {
         Ok(v) => v,
         Err(e) => return fail(e.as_str(), None),
     };
-    if vec2 != vec {
+    if irq_init::vector(vec2) != irq_init::vector(vec) {
         return fail("realloc other vec", Some(vec2));
-    }
-    if irq_init::set_handler(vec2, on_intx).is_err() {
-        return fail("handler2", Some(vec2));
     }
     reset_irq_obs();
     mmio_w32(mmio, EDU_RAISE, 1);
     if spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, 50_000_000) {
-        return fail("delivery after free", Some(vec2));
+        return fail("delivery while masked", Some(vec2));
     }
-    if irq_init::route_intx(gsi, vec2, ap, Trigger::Level, Polarity::Low).is_err() {
+    if irq_init::set_handler(vec2, on_intx).is_err() {
+        return fail("handler2", Some(vec2));
+    }
+    if irq_init::set_affinity(vec2, ap).is_err() {
         return fail("reroute", Some(vec2));
     }
     let fired2 = spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, 500_000_000);
@@ -839,6 +890,7 @@ pub(crate) fn reschedule_count() -> u64 {
 }
 
 /// Shootdown requests this kernel has serviced since boot.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn shootdown_count() -> u64 {
     ipi_init::SHOOT_COUNT.load(Ordering::Relaxed)
 }
@@ -863,12 +915,15 @@ pub(crate) fn allocated_count() -> usize {
     irq_init::with_pool(|p| p.allocated())
 }
 
-/// Whether `vec` has a threaded handler or pending threaded work.
-pub(crate) fn has_threaded(vec: u8) -> bool {
-    match irq_init::handler_slot(vec) {
+/// Whether `irq` has a threaded handler or pending threaded work.
+pub(crate) fn has_threaded(irq: IrqId) -> bool {
+    match irq.slot() {
         Some(i) => irq_init::with_irq(|s| {
             let t = &s.th;
-            t.top[i].is_some() || t.work[i].is_some() || t.ctx[i].is_some() || t.pending[i]
+            t.top.get(i).is_some_and(|x| x.is_some())
+                || t.work.get(i).is_some_and(|x| x.is_some())
+                || t.ctx.get(i).is_some_and(|x| x.is_some())
+                || t.pending.get(i).copied() == Some(true)
         }),
         None => false,
     }
@@ -1100,11 +1155,15 @@ pub(crate) fn unowned_vector_storm() -> Outcome {
     if !crate::arch::pic::is_masked(5) {
         return Outcome::Fail("8259 line 5 not masked");
     }
-    let pool = match irq_init::allocate_vector(thread_init::current_cpu()) {
+    let irq = match irq_init::allocate(thread_init::current_cpu()) {
         Ok(v) => v,
-        Err(e) => return crate::fail_fmt!("allocate_vector: {e:?}"),
+        Err(e) => return crate::fail_fmt!("allocate: {e:?}"),
     };
-    if let Err(e) = irq_init::free_vector(pool) {
+    let Some(pool) = irq_init::vector(irq) else {
+        let _ = irq_init::free_vector(irq);
+        return Outcome::Fail("no hwirq");
+    };
+    if let Err(e) = irq_init::free_vector(irq) {
         return crate::fail_fmt!("free_vector({pool:#x}): {e:?}");
     }
     for vec in [pool, 0x85, 0x25] {
@@ -1125,6 +1184,158 @@ pub(crate) fn unowned_vector_storm() -> Outcome {
     Outcome::Ok
 }
 
+#[cfg(target_arch = "aarch64")]
+static LPI_FIRST: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(target_arch = "aarch64")]
+static LPI_SECOND: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(target_arch = "aarch64")]
+fn ack_edu(va: u64) {
+    if va == 0 {
+        return;
+    }
+    let st = mmio_r32(va, EDU_IRQSTAT);
+    if st != 0 {
+        mmio_w32(va, EDU_ACK, st);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn on_lpi_first() {
+    ack_edu(IRQ_MMIO.load(Ordering::SeqCst));
+    LPI_FIRST.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(target_arch = "aarch64")]
+fn on_lpi_second() {
+    ack_edu(IRQ_MMIO.load(Ordering::SeqCst));
+    LPI_SECOND.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(target_arch = "aarch64")]
+fn lpi_realloc_cleanup(dev: &DevRef, saved: u16, mmio: u64, irqs: &[Option<IrqId>; 2]) {
+    ack_edu(mmio);
+    if let Some(cap) = dev.caps.msi {
+        irq_init::disable_msi(dev.addr, cap);
+    }
+    if dev.caps.msix.is_some() {
+        irq_init::disable_msix(dev);
+    }
+    let mut i = 0usize;
+    while i < irqs.len() {
+        if let Some(irq) = irqs.get(i).copied().flatten() {
+            let _ = irq_init::free_vector(irq);
+        }
+        i += 1;
+    }
+    pci_init::update_command(dev.addr, saved, !saved);
+    crate::arch::aarch64::gic::ktest_watch_intid(0);
+    IRQ_MMIO.store(0, Ordering::SeqCst);
+}
+
+#[cfg(target_arch = "aarch64")]
+fn arm_edu_msi(dev: &DevRef, irq: IrqId) -> Result<(), &'static str> {
+    if let Some(cap) = dev.caps.msi {
+        return irq_init::enable_msi(dev.addr, cap, irq).map_err(|e| e.as_str());
+    }
+    if dev.caps.msix.is_some() {
+        return irq_init::enable_msix(dev, 0, irq).map_err(|e| e.as_str());
+    }
+    Err("no msi")
+}
+
+/// Alloc, free, alloc one LPI on edu. The freed INTID is unpublished and
+/// stays quiet; the second allocation is the one that fires.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn lpi_free_realloc() -> Outcome {
+    if !crate::arch::aarch64::gic::has_its() {
+        return Outcome::Skip("no its");
+    }
+    let Some(dev) = find_edu() else {
+        return Outcome::Fail("no edu");
+    };
+    let Some(mmio) = bar0_va(&dev) else {
+        return Outcome::Fail("edu bar0");
+    };
+    if mmio_r32(mmio, EDU_IDENT) != EDU_IDENT_VAL {
+        return Outcome::Fail("edu ident");
+    }
+    LPI_FIRST.store(0, Ordering::SeqCst);
+    LPI_SECOND.store(0, Ordering::SeqCst);
+    crate::arch::aarch64::gic::ktest_watch_intid(0);
+    let saved = pci_init::cfg_read16(dev.addr, CFG_COMMAND);
+    pci_init::update_command(dev.addr, CMD_MEM | CMD_MASTER | CMD_INTX_DISABLE, 0);
+    let mut irqs = [None, None];
+    let fail = |why: &'static str, irqs: [Option<IrqId>; 2]| {
+        lpi_realloc_cleanup(&dev, saved, mmio, &irqs);
+        Outcome::Fail(why)
+    };
+    let first =
+        match irq_init::alloc_msi(&dev, 1).and_then(|s| s.get(0).ok_or(irq::IrqError::Exhausted)) {
+            Ok(irq) => irq,
+            Err(e) => return fail(e.as_str(), irqs),
+        };
+    irqs[0] = Some(first);
+    let Some(old_hwirq) = irq_init::hwirq_of(first) else {
+        return fail("no hwirq", irqs);
+    };
+    if irq_init::set_handler(first, on_lpi_first).is_err() {
+        return fail("handler", irqs);
+    }
+    if let Err(why) = arm_edu_msi(&dev, first) {
+        return fail(why, irqs);
+    }
+    IRQ_MMIO.store(mmio, Ordering::SeqCst);
+    mmio_w32(mmio, EDU_RAISE, 1);
+    if !spin_until_ns(|| LPI_FIRST.load(Ordering::SeqCst) != 0, 500_000_000) {
+        return fail("no first", irqs);
+    }
+    let first_hits = LPI_FIRST.load(Ordering::SeqCst);
+    if irq_init::free_vector(first).is_err() {
+        return fail("free", irqs);
+    }
+    irqs[0] = None;
+    if crate::arch::aarch64::gic::lookup(old_hwirq) != 0 {
+        return fail("stale irq", irqs);
+    }
+    crate::arch::aarch64::gic::ktest_watch_intid(old_hwirq);
+    mmio_w32(mmio, EDU_RAISE, 1);
+    let t0 = time_init::now_ns();
+    while time_init::now_ns().saturating_sub(t0) < 50_000_000 {
+        spin_loop();
+    }
+    if crate::arch::aarch64::gic::ktest_lpi_seen() != 0 {
+        return fail("freed lpi", irqs);
+    }
+    if LPI_FIRST.load(Ordering::SeqCst) != first_hits {
+        return fail("old handler", irqs);
+    }
+    ack_edu(mmio);
+    let second =
+        match irq_init::alloc_msi(&dev, 1).and_then(|s| s.get(0).ok_or(irq::IrqError::Exhausted)) {
+            Ok(irq) => irq,
+            Err(e) => return fail(e.as_str(), irqs),
+        };
+    irqs[1] = Some(second);
+    if irq_init::set_handler(second, on_lpi_second).is_err() {
+        return fail("handler 2", irqs);
+    }
+    if let Err(why) = arm_edu_msi(&dev, second) {
+        return fail(why, irqs);
+    }
+    mmio_w32(mmio, EDU_RAISE, 1);
+    if !spin_until_ns(|| LPI_SECOND.load(Ordering::SeqCst) != 0, 500_000_000) {
+        return fail("no second", irqs);
+    }
+    if LPI_FIRST.load(Ordering::SeqCst) != first_hits {
+        lpi_realloc_cleanup(&dev, saved, mmio, &irqs);
+        return Outcome::Fail("old handler");
+    }
+    lpi_realloc_cleanup(&dev, saved, mmio, &irqs);
+    Outcome::Ok
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -1136,6 +1347,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("msix_cpu", test_msix_cpu),
     test("intx_fallback", test_intx_fallback),
     test("intx_free_masks", test_intx_free_masks),
+    #[cfg(target_arch = "aarch64")]
+    test("lpi_free_realloc", lpi_free_realloc),
     test("msix_cpu_publish_last", msix_cpu_publish_last),
     test("lifetime_shootdown_ack_late", lifetime_shootdown_ack_late).deadline(15_000),
     test("shootdown_ack_while_busy", shootdown_ack_while_busy).deadline(13_000),

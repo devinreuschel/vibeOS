@@ -23,6 +23,7 @@ import tests.harness.run_e2e as run_e2e
 import tests.harness.run_ktest as run_ktest
 from tests.harness import frame, results
 from tests.harness.harness import (
+    AARCH64_FORENSICS,
     AP_ONLINE,
     FORENSICS_DEVICES,
     HPET_OFF_MACHINE,
@@ -145,7 +146,7 @@ class TestMarkerShape(unittest.TestCase):
 
 ABC_MARKERS = [
     Marker("vibeOS: serial online", "a"),
-    Marker("vibeOS: limine: rev 3 ok", "b"),
+    Marker("vibeOS: limine: rev 6 ok", "b"),
     Marker("vibeOS: boot: phase1 done", "c"),
 ]
 FAKE_CFG = QemuConfig(iso="fake.iso")
@@ -294,7 +295,7 @@ class TestMarkerOrder(unittest.TestCase):
     def test_all_present_in_order_quits(self) -> None:
         lines = [
             K("vibeOS: serial online"),
-            K("vibeOS: limine: rev 3 ok"),
+            K("vibeOS: limine: rev 6 ok"),
             K("vibeOS: boot: phase1 done"),
         ]
         result, src = check_fake(lines, ABC_MARKERS)
@@ -306,14 +307,14 @@ class TestMarkerOrder(unittest.TestCase):
         lines = [
             K("vibeOS: boot: phase1 done"),  # too early
             K("vibeOS: serial online"),
-            K("vibeOS: limine: rev 3 ok"),
+            K("vibeOS: limine: rev 6 ok"),
         ]
         with self.assertRaises(HarnessError) as cm:
             check_fake(lines, ABC_MARKERS)
         self.assertIn("'c'", str(cm.exception))
 
     def test_missing_final_marker_fails(self) -> None:
-        lines = [K("vibeOS: serial online"), K("vibeOS: limine: rev 3 ok")]
+        lines = [K("vibeOS: serial online"), K("vibeOS: limine: rev 6 ok")]
         with self.assertRaises(HarnessError) as cm:
             check_fake(lines, ABC_MARKERS)
         # The error names the missing marker's `name`, not its substring.
@@ -361,7 +362,7 @@ class TestMarkerOrder(unittest.TestCase):
             "chatter",
             K("vibeOS: serial online"),
             "more chatter",
-            K("vibeOS: limine: rev 3 ok"),
+            K("vibeOS: limine: rev 6 ok"),
             "even more",
             K("vibeOS: boot: phase1 done"),
         ]
@@ -458,7 +459,7 @@ class TestSmpApCount(unittest.TestCase):
 PANIC_BOOT = [
     "limine: Loading executable `boot():/boot/vibeos`...",
     K("vibeOS: serial online"),
-    K("vibeOS: limine: rev 3 ok"),
+    K("vibeOS: limine: rev 6 ok"),
     K("vibeOS: boot: panic-test armed"),
 ]
 PANIC_DUMP = [
@@ -469,7 +470,7 @@ PANIC_DUMP = [
     K("vibeOS: panic: thread cpu=0 tid=0 <early>"),
     K("vibeOS: log: last 3 (0 dropped)"),
     K("vibeOS: logrec: 2980393398tsc cpu0 info vibeOS: serial online"),
-    K("vibeOS: logrec: 2981355280tsc cpu0 info vibeOS: limine: rev 3 ok"),
+    K("vibeOS: logrec: 2981355280tsc cpu0 info vibeOS: limine: rev 6 ok"),
     K("vibeOS: logrec: 2981513364tsc cpu0 info vibeOS: boot: panic-test armed"),
     K("vibeOS: backtrace:"),
     K("  0xffffffff80001a5b __rustc::rust_begin_unwind+0x1b"),
@@ -564,6 +565,19 @@ class TestExpectPanic(unittest.TestCase):
         self.assertIn(
             "no GUEST_PANICKED within 10 s of 'vibeOS: panic: halted'", str(cm.exception)
         )
+
+    def test_aarch64_halted_ends_without_event(self) -> None:
+        src = FakeLineSource.from_lines(PANIC_BOOT + PANIC_DUMP, end="eof", exit_code=0)
+        result = run_qemu_and_check(
+            dataclasses.replace(FAKE_CFG, expect="panic", arch="aarch64"),
+            halt_test_markers(),
+            dump_needles=PANIC_NEEDLES,
+            line_source=src,
+            qmp=FakeQmp([]),
+        )
+        self.assertEqual(result.matched, ["serial_online", "limine_ok", "panic_test_armed"])
+        self.assertEqual(result.end, "PANIC_DONE")
+        self.assertFalse(src.killed)
 
     def test_dump_ended_before_halted_fails(self) -> None:
         with self.assertRaises(HarnessError) as cm:
@@ -669,7 +683,7 @@ class TestFirstKernelLine(unittest.TestCase):
 MEMINFO_BOOT = [
     "limine: Loading executable `boot():/boot/vibeos`...",
     K("vibeOS: serial online"),
-    K("vibeOS: limine: rev 3 ok"),
+    K("vibeOS: limine: rev 6 ok"),
     K("vibeOS: pmm: 29503 free 4KiB frames"),
     K("vibeOS: pmm: 29503 total, largest order 10"),
     K("vibeOS: paging: cr3 ok"),
@@ -734,6 +748,50 @@ class TestMeminfoCheck(unittest.TestCase):
     def test_trailing_fields_tolerated(self) -> None:
         line = f"{kernel_text(MEMINFO_BOOT[MEMINFO_TOTAL_LINE])}, leaked 0"
         run_e2e.check_meminfo(doctor(MEMINFO_TOTAL_LINE, line))
+
+
+def _meminfo_log(frames: int) -> list[str]:
+    """A boot log whose `pmm:` and `meminfo:` totals are `frames`."""
+    free = 1
+    used = frames - free
+    return [
+        K("vibeOS: serial online"),
+        K(f"vibeOS: pmm: {free} free 4KiB frames"),
+        K(f"vibeOS: pmm: {frames} total, largest order 10"),
+        K(f"vibeOS: meminfo: total {frames} frames, free {free}, used {used}, largest order 10"),
+        K("vibeOS: meminfo: leaked 0 frames"),
+        K("vibeOS: meminfo: heap used 1 B / capacity 2 B"),
+        K("vibeOS: meminfo: kva used 1 B"),
+    ]
+
+
+# 8 GiB in 4 KiB frames. The old physmap cap cannot count past this.
+_EIGHT_GIB_FRAMES = (8 << 30) // 4096
+
+
+class TestHighmemPmm(unittest.TestCase):
+    """`VIBEOS_MEM=9G` requires the buddy total above the old 8 GiB cap."""
+
+    def test_one_frame_over_the_cap_passes(self) -> None:
+        run_e2e.check_highmem_pmm(_EIGHT_GIB_FRAMES + 1, "9G")
+        run_e2e.check_meminfo(_meminfo_log(_EIGHT_GIB_FRAMES + 1), "9G")
+
+    def test_exactly_8gib_fails(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            run_e2e.check_highmem_pmm(_EIGHT_GIB_FRAMES, "9G")
+        self.assertIn("is not above 8 GiB", str(cm.exception))
+        self.assertIn(str(_EIGHT_GIB_FRAMES), str(cm.exception))
+
+    def test_capped_log_fails_through_meminfo(self) -> None:
+        """A buddy that stopped at 8 GiB fails the 9 GiB boot."""
+        with self.assertRaises(HarnessError) as cm:
+            run_e2e.check_meminfo(_meminfo_log(_EIGHT_GIB_FRAMES), "9G")
+        self.assertIn("is not above 8 GiB", str(cm.exception))
+
+    def test_other_mem_skips_the_cap(self) -> None:
+        run_e2e.check_highmem_pmm(_EIGHT_GIB_FRAMES, "128M")
+        run_e2e.check_meminfo(MEMINFO_BOOT, "128M")
+        run_e2e.check_meminfo(MEMINFO_BOOT)
 
 
 QEMU_LOAD_ERR = "qemu-system-x86_64: -bios x.fd: could not load"
@@ -850,6 +908,37 @@ class TestConsoleInput(unittest.TestCase):
         with self.assertRaises(HarnessError) as cm:
             run_qemu_console_input(FAKE_CFG, line_source=src)
         self.assertIn("PS/2 sendkey echo missing", str(cm.exception))
+
+    def test_aarch64_serial_then_virtio_keyboard(self) -> None:
+        lines = [
+            *CONSOLE_OK_LINES[:8],
+            "vibeos> echo kbd-ok",
+            "kbd-ok",
+        ]
+        src = FakeLineSource.from_lines(lines, end="timeout")
+        cfg = dataclasses.replace(FAKE_CFG, arch="aarch64")
+        result = run_qemu_console_input(cfg, line_source=src)
+        self.assertEqual(
+            result.matched,
+            [
+                "shell_ready",
+                "serial_echo",
+                "sh_status",
+                "sh_ps",
+                "kbd_echo",
+                "sh_poweroff",
+                "console_input_sh",
+            ],
+        )
+        self.assertEqual(len(src.monitor_cmds), 1)
+        self.assertTrue(src.monitor_cmds[0].startswith("sendkey e-c-h-o-spc-k-b-d"))
+
+    def test_missing_virtio_keyboard_echo_fails(self) -> None:
+        src = FakeLineSource.from_lines(CONSOLE_OK_LINES[:9])
+        cfg = dataclasses.replace(FAKE_CFG, arch="aarch64")
+        with self.assertRaises(HarnessError) as cm:
+            run_qemu_console_input(cfg, line_source=src)
+        self.assertIn("virtio-keyboard sendkey echo missing", str(cm.exception))
 
     def test_panic_fails(self) -> None:
         src = FakeLineSource.from_lines(["vibeOS: shell ready", K("vibeOS: panic: x")])
@@ -1102,7 +1191,7 @@ class TestKtestProtocol(unittest.TestCase):
         from tests.harness.results import missing_marker
 
         cases = (
-            ([K("vibeOS: limine: rev 3 ok"), "qemu: fatal: lost the disk"], "ktest_begin"),
+            ([K("vibeOS: limine: rev 6 ok"), "qemu: fatal: lost the disk"], "ktest_begin"),
             ([K("vibeOS: ktest: begin 1"), K("vibeOS: ktest: run a 10000")], "ktest_end"),
         )
         for lines, name in cases:
@@ -1628,6 +1717,21 @@ class TestNoRetry(unittest.TestCase):
             self.assertEqual(run_e2e.main(), 1)
         self.assertEqual(inp.call_count, 1)
 
+    def test_pci_golden_is_arch_specific(self) -> None:
+        self.assertIn("8086:1237", run_e2e.pci_golden("x86_64"))
+        self.assertNotIn("8086:1237", run_e2e.pci_golden("aarch64"))
+        self.assertIn("1b36:0008", run_e2e.pci_golden("aarch64"))
+
+    def test_pci_check_accepts_virt_ids(self) -> None:
+        lines = [
+            *[
+                K(f"vibeOS: pci: 00:0{i}.0 {id_}")
+                for i, id_ in enumerate(run_e2e.PCI_GOLDEN_AARCH64)
+            ],
+            K("vibeOS: pci: 6 devices"),
+        ]
+        run_e2e._check_pci_qemu_set(lines, "aarch64")
+
 
 class TestQemuArgv(unittest.TestCase):
     def test_extra_accel_is_effective(self) -> None:
@@ -1737,6 +1841,142 @@ class TestQemuArgv(unittest.TestCase):
             argv = qemu_argv(QemuConfig(iso="x.iso", firmware=fw, boot_order="d"), None)
         self.assertEqual(argv[argv.index("-boot") + 1], "order=d,menu=off")
         self.assertEqual(argv.count("-boot"), 1)
+
+    def test_aarch64_machine_scsi_and_forensics(self) -> None:
+        from tests.harness.harness import remove_vars_copies
+
+        with _firmware_aarch64() as fw:
+            argv = qemu_argv(
+                QemuConfig(iso="x.iso", arch="aarch64", firmware=fw, gic_version="3"),
+                "/tmp/mon",
+            )
+        try:
+            self.assertEqual(argv[0], "qemu-system-aarch64")
+            self.assertEqual(argv[argv.index("-machine") + 1], "virt,acpi=off,gic-version=3")
+            self.assertEqual(
+                argv[argv.index("-global") + 1], "virtio-mmio.force-legacy=off"
+            )
+            self.assertNotIn("-cdrom", argv)
+            blob = " ".join(argv)
+            self.assertIn("virtio-scsi-pci", blob)
+            self.assertIn("scsi-cd,drive=cd0,bootindex=0", blob)
+            self.assertIn("media=cdrom", blob)
+            devices = [argv[i + 1] for i, a in enumerate(argv) if a == "-device"]
+            self.assertIn("ramfb", devices)
+            self.assertIn("virtio-keyboard-pci", devices)
+            self.assertIn("virtio-tablet-pci", devices)
+            self.assertIn("pvpanic-pci", devices)
+            self.assertIn("vmcoreinfo", devices)
+            self.assertNotIn("pvpanic", devices)
+            i = argv.index("-boot")
+            self.assertEqual(argv[i : i + len(OVMF_BOOT_ARGS)], list(OVMF_BOOT_ARGS))
+            self.assertFalse(any(a == "pc,hpet=off" for a in argv))
+            self.assertEqual(
+                AARCH64_FORENSICS,
+                (
+                    "-device", "ramfb",
+                    "-device", "virtio-keyboard-pci",
+                    "-device", "virtio-tablet-pci",
+                    "-device", "pvpanic-pci",
+                    "-device", "vmcoreinfo",
+                ),
+            )
+        finally:
+            remove_vars_copies()
+
+    def test_aarch64_gic_version_2(self) -> None:
+        from tests.harness.harness import remove_vars_copies
+
+        with _firmware_aarch64() as fw:
+            argv = qemu_argv(
+                QemuConfig(iso="x.iso", arch="aarch64", firmware=fw, gic_version="2"),
+                None,
+            )
+        try:
+            self.assertEqual(argv[argv.index("-machine") + 1], "virt,acpi=off,gic-version=2")
+        finally:
+            remove_vars_copies()
+
+    def test_aarch64_hvf_uses_host_cpu(self) -> None:
+        from tests.harness.harness import remove_vars_copies
+
+        with _firmware_aarch64() as fw:
+            argv = qemu_argv(
+                QemuConfig(
+                    iso="x.iso", arch="aarch64", firmware=fw, accel="hvf", cpu="max"
+                ),
+                None,
+            )
+        try:
+            self.assertEqual(argv[argv.index("-cpu") + 1], "host")
+        finally:
+            remove_vars_copies()
+
+    def test_aarch64_tcg_cpu(self) -> None:
+        from tests.harness.harness import AARCH64_TCG_CPU, remove_vars_copies
+
+        with _firmware_aarch64() as fw:
+            argv = qemu_argv(
+                QemuConfig(iso="x.iso", arch="aarch64", firmware=fw, cpu="max"),
+                None,
+            )
+            explicit = qemu_argv(
+                QemuConfig(
+                    iso="x.iso",
+                    arch="aarch64",
+                    firmware=fw,
+                    cpu="max",
+                    cpu_explicit=True,
+                ),
+                None,
+            )
+            hvf_explicit = qemu_argv(
+                QemuConfig(
+                    iso="x.iso",
+                    arch="aarch64",
+                    firmware=fw,
+                    accel="hvf",
+                    cpu="max",
+                    cpu_explicit=True,
+                ),
+                None,
+            )
+            kept = qemu_argv(
+                QemuConfig(iso="x.iso", arch="aarch64", firmware=fw, cpu="cortex-a72"),
+                None,
+            )
+        try:
+            self.assertEqual(argv[argv.index("-cpu") + 1], AARCH64_TCG_CPU)
+            self.assertEqual(AARCH64_TCG_CPU, "neoverse-v1")
+            self.assertEqual(explicit[explicit.index("-cpu") + 1], "max")
+            self.assertEqual(hvf_explicit[hvf_explicit.index("-cpu") + 1], "max")
+            self.assertEqual(kept[kept.index("-cpu") + 1], "cortex-a72")
+        finally:
+            remove_vars_copies()
+
+    def test_aarch64_needs_firmware(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "UEFI firmware"):
+            qemu_argv(QemuConfig(iso="x.iso", arch="aarch64"), None)
+
+
+@contextmanager
+def _firmware_aarch64(directory: str | None = None) -> Iterator[Any]:
+    """An aarch64 AAVMF-named pair in a temporary directory."""
+    import tempfile
+
+    from tests.harness.harness import Firmware
+
+    with tempfile.TemporaryDirectory() as d:
+        if directory is not None:
+            d = os.path.join(d, directory)
+            os.makedirs(d)
+        code = os.path.join(d, "AAVMF_CODE.fd")
+        tmpl = os.path.join(d, "AAVMF_VARS.fd")
+        with open(code, "wb") as f:
+            f.write(b"\x00" * 0x1000)
+        with open(tmpl, "wb") as f:
+            f.write(b"\x00" * 0x1000)
+        yield Firmware("aarch64", code, tmpl)
 
 
 @contextmanager
@@ -1864,6 +2104,11 @@ class TestFirmwareProbe(unittest.TestCase):
 
         rows = (
             ("x86_64", "/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/share/OVMF/OVMF_VARS_4M.fd"),
+            (
+                "aarch64",
+                "/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd",
+                "/usr/share/AAVMF/AAVMF_VARS.fd",
+            ),
             ("aarch64", "/usr/share/AAVMF/AAVMF_CODE.fd", "/usr/share/AAVMF/AAVMF_VARS.fd"),
             (
                 "x86_64",
@@ -1889,6 +2134,14 @@ class TestFirmwareProbe(unittest.TestCase):
         self.put("/opt/homebrew/share/qemu/edk2-x86_64-code.fd")
         self.put("/opt/homebrew/share/qemu/edk2-i386-vars.fd")
         self.assertEqual(self.probe("x86_64").code, ubuntu)
+
+    def test_aarch64_no_secboot_first(self) -> None:
+        preferred = self.put("/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd")
+        self.put("/usr/share/AAVMF/AAVMF_VARS.fd")
+        self.put("/usr/share/AAVMF/AAVMF_CODE.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-aarch64-code.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-arm-vars.fd")
+        self.assertEqual(self.probe("aarch64").code, preferred)
 
     def test_homebrew_prefix(self) -> None:
         self.put("/usr/local/share/qemu/edk2-x86_64-code.fd")
@@ -1974,7 +2227,8 @@ class TestFirmwareProbe(unittest.TestCase):
         self.assertEqual(
             FIRMWARE_VARS, {"x86_64": "VIBEOS_FW_X86_64", "aarch64": "VIBEOS_FW_AARCH64"}
         )
-        self.assertEqual([len(rows) for rows in FIRMWARE_TABLE.values()], [2, 2])
+        self.assertEqual([len(rows) for rows in FIRMWARE_TABLE.values()], [2, 3])
+        self.assertEqual(FIRMWARE_TABLE["aarch64"][0].code, "AAVMF_CODE.no-secboot.fd")
 
 
 class TestStraceE2e(unittest.TestCase):
@@ -2238,6 +2492,10 @@ class TestSendkeyChars(unittest.TestCase):
             sendkey_chars("echo ps2-ok\n"),
             "e-c-h-o-spc-p-s-2-minus-o-k-ret",
         )
+        self.assertEqual(
+            sendkey_chars("echo kbd-ok\n"),
+            "e-c-h-o-spc-k-b-d-minus-o-k-ret",
+        )
 
     def test_rejects_empty_and_unknown(self) -> None:
         from tests.harness.harness import HarnessError, sendkey_chars
@@ -2257,11 +2515,29 @@ class TestDevicePresets(unittest.TestCase):
         self.assertIn("disable-legacy=on", blob)
         self.assertIn("num-queues=4", blob)
         self.assertIn("isa-debug-exit", blob)
-        self.assertIn("edu", args)
+        self.assertIn("edu,dma_mask=0xFFFFFFFF", args)
+        self.assertIn("virtio-keyboard-pci,disable-legacy=on", args)
+        self.assertIn("virtio-tablet-pci,disable-legacy=on", args)
+
+    def test_ktest_devices_aarch64_omits_isa_debug_exit(self) -> None:
+        from tests.harness.harness import ktest_devices
+
+        args = ktest_devices("/tmp/disk.img", 1, arch="aarch64")
+        blob = " ".join(args)
+        self.assertNotIn("isa-debug-exit", blob)
+        self.assertIn("edu,dma_mask=0xFFFFFFFF", args)
         self.assertIn("e1000e", args)
         self.assertIn("virtio-rng-pci", blob)
         self.assertIn("virtio-blk-pci", blob)
+        self.assertNotIn("virtio-blk-device", blob)
+        self.assertNotIn("virtio-keyboard-pci", blob)
+        self.assertNotIn("virtio-tablet-pci", blob)
         self.assertIn("discard=unmap", blob)
+        mmio = ktest_devices("/tmp/disk.img", 4, arch="aarch64", mmio_disk="/tmp/mmio.img")
+        mmio_blob = " ".join(mmio)
+        self.assertIn("virtio-blk-device", mmio_blob)
+        self.assertIn("/tmp/mmio.img", mmio_blob)
+        self.assertIn("num-queues=4", mmio_blob)
 
     def test_ktest_devices_probe_functions(self) -> None:
         from tests.harness.harness import ktest_devices
@@ -2459,6 +2735,14 @@ class TestEnvConfig(unittest.TestCase):
         with overlay_env({}, clear=True):
             self.assertFalse(env_flag("VIBEOS_GP_TEST"))
 
+    def test_expected_clocksource_arch(self) -> None:
+        from tests.harness.harness import expected_clocksource
+
+        self.assertEqual(expected_clocksource(arch="aarch64"), "cntvct")
+        self.assertEqual(expected_clocksource(arch="aarch64", hpet=False), "cntvct")
+        self.assertEqual(expected_clocksource(), "hpet")
+        self.assertEqual(expected_clocksource(hpet=False), "acpi_pm")
+
     def test_env_int(self) -> None:
         from tests.harness.harness import env_int, overlay_env
 
@@ -2500,8 +2784,67 @@ class TestEnvConfig(unittest.TestCase):
             self.assertEqual(cfg.iso, "vibeos.iso")
             self.assertEqual(cfg.smp, 2)
             self.assertEqual(cfg.cpu, "max")
+            self.assertFalse(cfg.cpu_explicit)
             self.assertEqual(cfg.mem, "128M")
             self.assertEqual(cfg.accel, "tcg")
+            self.assertEqual(env.arch, "x86_64")
+            self.assertEqual(cfg.arch, "x86_64")
+
+    def test_env_config_aarch64(self) -> None:
+        from tests.harness.harness import env_config, guest_cpu, overlay_env, remove_vars_copies
+
+        with _firmware_aarch64() as fw:
+            with overlay_env(
+                {"VIBEOS_ARCH": "aarch64", "VIBEOS_FW_AARCH64": fw.code},
+                clear=True,
+            ):
+                env = env_config(default_iso="vibeos.iso", default_timeout=60.0)
+                self.assertEqual(env.arch, "aarch64")
+                self.assertEqual(env.smp, 1)
+                self.assertEqual(env.gic_version, "3")
+                self.assertEqual(env.firmware, fw)
+                cfg = env.qemu()
+                self.assertEqual(cfg.arch, "aarch64")
+                self.assertEqual(cfg.gic_version, "3")
+                self.assertEqual(cfg.firmware, fw)
+                self.assertFalse(cfg.cpu_explicit)
+                self.assertEqual(guest_cpu(cfg), "neoverse-v1")
+            with overlay_env(
+                {
+                    "VIBEOS_ARCH": "aarch64",
+                    "VIBEOS_GIC": "2",
+                    "VIBEOS_FW_AARCH64": fw.code,
+                },
+                clear=True,
+            ):
+                env = env_config(default_iso="x.iso", default_timeout=1)
+                self.assertEqual(env.gic_version, "2")
+                self.assertEqual(env.qemu().gic_version, "2")
+            with overlay_env({"VIBEOS_ARCH": "riscv64"}, clear=True):
+                with self.assertRaisesRegex(HarnessError, "VIBEOS_ARCH"):
+                    env_config(default_iso="x.iso", default_timeout=1)
+            with overlay_env(
+                {
+                    "VIBEOS_ARCH": "aarch64",
+                    "VIBEOS_GIC": "4",
+                    "VIBEOS_FW_AARCH64": fw.code,
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(HarnessError, "VIBEOS_GIC"):
+                    env_config(default_iso="x.iso", default_timeout=1)
+            with overlay_env(
+                {
+                    "VIBEOS_ARCH": "aarch64",
+                    "VIBEOS_FW_AARCH64": fw.code,
+                    "VIBEOS_QEMU_CPU": "max",
+                },
+                clear=True,
+            ):
+                cfg = env_config(default_iso="x.iso", default_timeout=1).qemu()
+                self.assertTrue(cfg.cpu_explicit)
+                self.assertEqual(guest_cpu(cfg), "max")
+        remove_vars_copies()
 
     def test_env_config_overrides(self) -> None:
         from tests.harness.harness import env_config, overlay_env
@@ -2523,6 +2866,8 @@ class TestEnvConfig(unittest.TestCase):
             self.assertEqual(env.iso, "custom.iso")
             self.assertEqual(env.smp, 4)
             self.assertEqual(env.cpu, "qemu64")
+            self.assertTrue(env.cpu_explicit)
+            self.assertTrue(env.qemu().cpu_explicit)
             self.assertEqual(env.mem, "256M")
             self.assertIsNone(env.firmware)
             self.assertEqual(env.accel, "")
@@ -3168,6 +3513,33 @@ class TestSkips(unittest.TestCase):
         self.assertEqual(off["machine"], "pc,hpet=off")
         self.assertEqual(off["accel"], "tcg")
 
+    def test_launch_config_aarch64_cpu(self) -> None:
+        from tests.harness.harness import remove_vars_copies
+        from tests.harness.skips import launch_config
+
+        with _firmware_aarch64() as fw:
+            default = launch_config(
+                QemuConfig(iso="x.iso", arch="aarch64", firmware=fw)
+            )
+            explicit = launch_config(
+                QemuConfig(
+                    iso="x.iso",
+                    arch="aarch64",
+                    firmware=fw,
+                    cpu="max",
+                    cpu_explicit=True,
+                )
+            )
+            host = launch_config(
+                QemuConfig(iso="x.iso", arch="aarch64", firmware=fw, accel="hvf")
+            )
+        try:
+            self.assertEqual(default["cpu"], "neoverse-v1")
+            self.assertEqual(explicit["cpu"], "max")
+            self.assertEqual(host["cpu"], "host")
+        finally:
+            remove_vars_copies()
+
     def test_ktest_selection(self) -> None:
         self.assertEqual(run_ktest.ktest_selection(QemuConfig(iso="x", ktest="a,b*")), "a,b*")
         cfg = QemuConfig(iso="x", cmdline="loglevel=8 vibeos.ktest=x vibeos.ktest=y,z")
@@ -3183,6 +3555,24 @@ class TestSkips(unittest.TestCase):
             self.assertTrue(set(row.match) <= set(FIELDS))
         names = {r.name for r in rows}
         self.assertIn("cpu_hardening", names)
+
+    def test_msix_cpu_skip_needs_an_ap(self) -> None:
+        from tests.harness.skips import check_skips, load_skips
+
+        rows = load_skips()
+        aarch64 = {
+            **self.TCG2,
+            "arch": "aarch64",
+            "machine": "virt,acpi=off,gic-version=3",
+        }
+        check_skips({}, ["msix_cpu"], aarch64, rows)
+        check_skips({"msix_cpu": "no AP"}, ["msix_cpu"], {**aarch64, "smp": 1}, rows)
+        with self.assertRaisesRegex(HarnessError, "msix_cpu ran"):
+            check_skips({}, ["msix_cpu"], {**aarch64, "smp": 1}, rows)
+        x86_smp1 = {**self.TCG2, "smp": 1}
+        check_skips({"msix_cpu": "no AP"}, ["msix_cpu"], x86_smp1, rows)
+        with self.assertRaisesRegex(HarnessError, "msix_cpu ran"):
+            check_skips({}, ["msix_cpu"], x86_smp1, rows)
 
 
 class TestHpetOffBoot(unittest.TestCase):

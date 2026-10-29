@@ -31,8 +31,24 @@ pub enum TrapKind {
     MachineCheck,
     /// x86_64 vectors 9, 15 and 20-31 (`#VE`, `#CP`, `#HV`, `#VC`, `#SX`, reserved).
     Reserved(u8),
-    /// x86_64 vectors 32-255: device IRQs and IPIs.
+    /// x86_64 vectors 32-255: device IRQs and IPIs. aarch64 IRQ slot.
     Interrupt(u8),
+    /// `svc` (ESR EC `0x15`). The syscall path, not a signal.
+    Syscall,
+    /// Trapped `wfi`/`wfe` (EC `0x01`). EL0 steps over; no signal.
+    WaitTrap,
+    /// SError slot. Not a ring-3 fault (DESIGN §11.5).
+    SError,
+    /// FIQ slot. Not a ring-3 fault: nothing routes a FIQ to the kernel.
+    Fiq,
+    /// Unknown, reserved, or a class the kernel leaves off (SIGILL, ILL_ILLOPC).
+    Undef,
+    /// Pointer-authentication failure (EC `0x1C`).
+    PacFail,
+    /// `brk` (EC `0x3C`).
+    SoftwareBreak,
+    /// Synchronous external abort (SIGBUS, BUS_OBJERR).
+    BusError,
 }
 
 /// Why a debug trap fired. `decode` gives `Other`; the fault path refines it from DR6.
@@ -78,6 +94,10 @@ pub enum Ring3Action {
     },
     /// Not a ring-3 fault: the Ring 0 column of DESIGN §5.2 applies.
     NotRing3,
+    /// `svc`: the syscall path, not a signal.
+    Syscall,
+    /// Trapped `wfi`/`wfe`: the handler steps over the instruction.
+    StepOver,
 }
 
 /// `si_code` values, as Linux defines them in
@@ -90,7 +110,9 @@ pub mod si_code {
     pub const FPE_FLTUND: i32 = 5;
     pub const FPE_FLTRES: i32 = 6;
     pub const FPE_FLTINV: i32 = 7;
+    pub const ILL_ILLOPC: i32 = 1;
     pub const ILL_ILLOPN: i32 = 2;
+    pub const BUS_OBJERR: i32 = 3;
     pub const SEGV_MAPERR: i32 = 1;
     pub const SEGV_ACCERR: i32 = 2;
     pub const BUS_ADRALN: i32 = 1;
@@ -112,9 +134,14 @@ pub const fn ring3_action(kind: TrapKind) -> Ring3Action {
         TrapKind::Debug(DebugCause::SingleStep) => sig(SIGTRAP, TRAP_TRACE),
         TrapKind::Debug(DebugCause::HwBreakpoint) => sig(SIGTRAP, TRAP_HWBKPT),
         TrapKind::Debug(DebugCause::Other) => sig(SIGTRAP, TRAP_BRKPT),
-        TrapKind::Nmi | TrapKind::DoubleFault | TrapKind::MachineCheck | TrapKind::Interrupt(_) => {
-            Ring3Action::NotRing3
-        }
+        TrapKind::Nmi
+        | TrapKind::DoubleFault
+        | TrapKind::MachineCheck
+        | TrapKind::Interrupt(_)
+        | TrapKind::SError
+        | TrapKind::Fiq => Ring3Action::NotRing3,
+        TrapKind::Syscall => Ring3Action::Syscall,
+        TrapKind::WaitTrap => Ring3Action::StepOver,
         TrapKind::Breakpoint => sig(SIGTRAP, SI_KERNEL),
         TrapKind::Overflow
         | TrapKind::BoundRange
@@ -143,6 +170,10 @@ pub const fn ring3_action(kind: TrapKind) -> Ring3Action {
             },
         ),
         TrapKind::AlignmentCheck => sig(SIGBUS, BUS_ADRALN),
+        TrapKind::Undef => sig(SIGILL, ILL_ILLOPC),
+        TrapKind::PacFail => sig(SIGILL, ILL_ILLOPN),
+        TrapKind::SoftwareBreak => sig(SIGTRAP, TRAP_BRKPT),
+        TrapKind::BusError => sig(SIGBUS, BUS_OBJERR),
     }
 }
 

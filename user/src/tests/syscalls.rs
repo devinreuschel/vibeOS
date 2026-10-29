@@ -19,6 +19,7 @@ pub fn run(t: &mut Runner) {
 
 /// The banner's `write` to fd 1 returned its length.
 fn write_count() -> Outcome {
+    // Relaxed: a count; pairs with nothing.
     if BANNER_WRITE.load(Ordering::Relaxed) == BANNER.len() {
         Outcome::Ok
     } else {

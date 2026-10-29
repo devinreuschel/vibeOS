@@ -475,7 +475,12 @@ global_asm!(
         swapgs
         mov ebx, 1
     2:
-        mov qword ptr [rsp + {cr2}], 0
+        xor eax, eax
+        cmp edi, {df}
+        jne 7f
+        mov rax, cr2
+    7:
+        mov [rsp + {cr2}], rax
         mov qword ptr [rsp + {dr6}], 0
         cmp edi, {db}
         jne 3f
@@ -545,7 +550,7 @@ unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
     if frame.iret.rflags & RFLAGS_IF != 0 {
         crate::sched::irqoff::off(crate::sched::irqoff::Site::vector(v));
     }
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     if frame.user_mode() {
         testing::on_cpl3_entry(frame);
     }
@@ -557,6 +562,7 @@ unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
         if cpl3_body_if_on(v) && frame.user_mode() {
             x86::sti();
         }
+        // Acquire: pairs with the Release store in `install`.
         let p = BODIES[v as usize].load(Ordering::Acquire);
         if p == 0 {
             default_body(frame);
@@ -616,17 +622,17 @@ pub fn user_fault(frame: &TrapFrame) {
 /// The exception intercept for vectors 0 to 31: `catch::intercept`, which
 /// `catch::init` sets right after `idt::init` (DESIGN §1.2). Unset, no
 /// exception is intercepted. `kernel_tests` only (ROADMAP §10.2, F146).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 static INTERCEPT: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
 /// Install the exception intercept. `true` from it skips the body.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn set_intercept_hook(f: fn(&mut TrapFrame) -> bool) {
     // Release: pairs with the Acquire load in `intercept`.
     INTERCEPT.store(f as *mut (), Ordering::Release);
 }
 
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 #[inline(always)]
 fn intercept(frame: &mut TrapFrame) -> bool {
     // Acquire: pairs with the Release store in `set_intercept_hook`.
@@ -646,7 +652,7 @@ fn intercept(frame: &mut TrapFrame) -> bool {
 /// every body.
 #[inline(always)]
 fn pre_body(frame: &mut TrapFrame, v: u8) -> bool {
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     {
         testing::on_entry(frame, v) || (v < 32 && intercept(frame))
     }
@@ -784,6 +790,7 @@ pub fn set_handler(vector: u8, body: TrapBody) {
 
 /// Store `body` for `vector`, any vector. `init`'s table rows only.
 fn install(vector: u8, body: TrapBody) {
+    // Release: pairs with the Acquire load in `trap_dispatch`.
     BODIES[vector as usize].store(body as usize, Ordering::Release);
 }
 
@@ -809,7 +816,7 @@ fn breakpoint(frame: &mut TrapFrame) {
     if frame.user_mode() {
         user_fault(frame);
     }
-    #[cfg(feature = "kernel_tests")]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
     if !frame.user_mode() {
         testing::note_breakpoint();
     }
@@ -855,7 +862,7 @@ fn nmi(frame: &mut TrapFrame) {
 /// the dispatcher, and can resume instead.
 fn debug_ex(frame: &mut TrapFrame) {
     if frame.user_mode() {
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         if testing::on_user_db(frame) {
             return;
         }
@@ -920,7 +927,7 @@ fn general_protection(frame: &mut TrapFrame) {
 fn page_fault(frame: &mut TrapFrame) {
     let (err, cr2) = (frame.error_code, frame.cr2);
     if frame.user_mode() {
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         testing::on_user_pf(frame);
         user_fault(frame);
     } else if let Some(rip) = super::uaccess::fixup(frame.iret.rip, cr2) {
@@ -932,12 +939,27 @@ fn page_fault(frame: &mut TrapFrame) {
 }
 
 fn double_fault(frame: &mut TrapFrame) {
+    let cr2 = frame.cr2;
+    let t = crate::arch::current_tcb();
+    // SAFETY: `t` is this CPU's TCB or null; we only read `stack`; established here.
+    let in_guard =
+        !t.is_null() && unsafe { (*t).stack.as_ref().is_some_and(|s| s.guard_contains(cr2)) };
+    if in_guard {
+        crate::marker!(
+            "vibeOS: panic: stack overflow far={:#x} esr={:#x} elr={:#x} sp={:#x} thread={:#x}",
+            cr2,
+            frame.error_code,
+            frame.iret.rip,
+            frame.iret.rsp,
+            t as u64
+        );
+    }
     crate::panic::exception_halt(
         b"#DF",
         &frame.iret,
         frame.user().rbp,
         Some(frame.error_code),
-        None,
+        Some(cr2),
     );
 }
 
@@ -1129,7 +1151,7 @@ fn dump(kind: &[u8], frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>)
 }
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub mod testing {
     use core::mem::size_of;
     use core::ptr;
@@ -1149,6 +1171,7 @@ pub mod testing {
     /// Run `hook` on every entry of `vector` until it is cleared with `None`.
     pub fn set_hook(vector: u8, hook: Option<Hook>) {
         let p = hook.map_or(0, |h| h as usize);
+        // Release: pairs with the Acquire load in `on_entry`.
         HOOKS[vector as usize].store(p, Ordering::Release);
     }
     /// CPL-0 `#BP`s whose body ran, past the catch intercept: the
@@ -1171,6 +1194,7 @@ pub mod testing {
 
     /// Entries of `vector` whose saved CS.RPL was 3, since boot.
     pub fn cpl3_hits(vector: u8) -> u64 {
+        // Relaxed: a count; pairs with nothing.
         CPL3_HITS[vector as usize].load(Ordering::Relaxed)
     }
 
@@ -1182,30 +1206,40 @@ pub mod testing {
     /// The next CPL-3 `#PF` at `cr2` yields at the top of its body until
     /// another CPL-3 `#PF` body has run, for at most 1 s of TSC time.
     pub fn arm_pf_yield(cr2: u64) {
+        // Release: pairs with the Acquire loads in `on_user_pf` and `pf_during_yield`.
         PF_DURING_YIELD.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `on_user_pf`.
         PF_YIELDING.store(false, Ordering::Release);
+        // Release: pairs with the Acquire load and compare-exchange in `on_user_pf`.
         PF_YIELD_CR2.store(cr2, Ordering::Release);
     }
 
     pub fn disarm_pf_yield() {
+        // Release: pairs with the Acquire load and compare-exchange in `on_user_pf`.
         PF_YIELD_CR2.store(0, Ordering::Release);
     }
 
     /// The `cr2` of the first CPL-3 `#PF` body that ran during the yield;
     /// 0 for none.
     pub fn pf_during_yield() -> u64 {
+        // Acquire: pairs with the Release stores in `on_user_pf` and `arm_pf_yield`.
         PF_DURING_YIELD.load(Ordering::Acquire)
     }
 
     /// Top of a CPL-3 `#PF` body, after the dispatcher's `sti`.
     pub(super) fn on_user_pf(frame: &TrapFrame) {
+        // Acquire: pairs with the Release stores of `PF_YIELDING` below and in `arm_pf_yield`.
         if PF_YIELDING.load(Ordering::Acquire) {
+            // Acquire: pairs with the Release stores in `arm_pf_yield` and below.
             if PF_DURING_YIELD.load(Ordering::Acquire) == 0 {
+                // Release: pairs with the yield loop's Acquire load below and `pf_during_yield`.
                 PF_DURING_YIELD.store(frame.cr2, Ordering::Release);
             }
             return;
         }
+        // Acquire: pairs with the Release stores in `arm_pf_yield` and `disarm_pf_yield`.
         let armed = PF_YIELD_CR2.load(Ordering::Acquire);
+        // AcqRel, Acquire on failure: pairs with the Release stores of the arm and disarm.
         if armed == 0
             || frame.cr2 != armed
             || PF_YIELD_CR2
@@ -1214,13 +1248,16 @@ pub mod testing {
         {
             return;
         }
+        // Release: pairs with the Acquire load at the top of a later body.
         PF_YIELDING.store(true, Ordering::Release);
         let t0 = crate::time_init::now_ns();
+        // Acquire: pairs with the Release store of another body's `cr2` above.
         while PF_DURING_YIELD.load(Ordering::Acquire) == 0
             && crate::time_init::now_ns().saturating_sub(t0) < 1_000_000_000
         {
             crate::thread_init::yield_now();
         }
+        // Release: pairs with the Acquire load at the top of a later body.
         PF_YIELDING.store(false, Ordering::Release);
     }
 
@@ -1251,36 +1288,50 @@ pub mod testing {
     /// current thread's kernel stack and holds [`GPR_CANARIES`]; at the
     /// `target`th good hit, send the frame's RIP to `exit_va`.
     pub fn arm_canaries(lo: u64, hi: u64, exit_va: u64, target: u64) {
+        // Release: pairs with the Acquire load in `hits`.
         CANARY_HITS.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `bad`.
         CANARY_BAD.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `misplaced`.
         CANARY_MISPLACED.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `on_cpl3_entry`.
         CANARY_EXIT.store(exit_va, Ordering::Release);
+        // Release: pairs with the Acquire load in `on_cpl3_entry`.
         CANARY_TARGET.store(target, Ordering::Release);
+        // Release: pairs with the Acquire load in `on_cpl3_entry`.
         CANARY_HI.store(hi, Ordering::Release);
+        // Release: pairs with the hook's first Acquire load and publishes the stores above.
         CANARY_LO.store(lo, Ordering::Release);
     }
 
     pub fn disarm_canaries() {
+        // Release: pairs with the Acquire load in `on_cpl3_entry`.
         CANARY_LO.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `on_cpl3_entry`.
         CANARY_HI.store(0, Ordering::Release);
     }
 
     pub fn hits() -> u64 {
+        // Acquire: pairs with the AcqRel add in `on_cpl3_entry`.
         CANARY_HITS.load(Ordering::Acquire)
     }
 
     pub fn bad() -> u64 {
+        // Acquire: pairs with the AcqRel add in `on_cpl3_entry`.
         CANARY_BAD.load(Ordering::Acquire)
     }
 
     pub fn misplaced() -> u64 {
+        // Acquire: pairs with the AcqRel add in `on_cpl3_entry`.
         CANARY_MISPLACED.load(Ordering::Acquire)
     }
 
     /// Every CPL-3 entry, before the body.
     pub(super) fn on_cpl3_entry(frame: &mut TrapFrame) {
+        // Acquire: pairs with the Release stores in `arm_canaries` and `disarm_canaries`.
         let lo = CANARY_LO.load(Ordering::Acquire);
         let rip = frame.iret.rip;
+        // Acquire: pairs with the Release stores in `arm_canaries` and `disarm_canaries`.
         if frame.vector != u64::from(vectors::IPI_RESCHEDULE)
             || lo == 0
             || rip < lo
@@ -1297,6 +1348,7 @@ pub mod testing {
             .flatten();
         let at = ptr::from_ref(frame.user()) as u64;
         if top.is_none_or(|top| at != top - size_of::<UserFrame>() as u64) {
+            // AcqRel: pairs with the Acquire load in `misplaced`.
             CANARY_MISPLACED.fetch_add(1, Ordering::AcqRel);
             return;
         }
@@ -1306,11 +1358,15 @@ pub mod testing {
             u.rdx, u.rsi, u.rdi,
         ];
         if got != GPR_CANARIES {
+            // AcqRel: pairs with the Acquire load in `bad`.
             CANARY_BAD.fetch_add(1, Ordering::AcqRel);
             return;
         }
+        // AcqRel: pairs with the Acquire load in `hits`.
         let hits = CANARY_HITS.fetch_add(1, Ordering::AcqRel) + 1;
+        // Acquire: pairs with the Release store in `arm_canaries`.
         if hits == CANARY_TARGET.load(Ordering::Acquire) {
+            // Acquire: pairs with the Release store in `arm_canaries`.
             frame.user_mut().rip = CANARY_EXIT.load(Ordering::Acquire);
         }
     }
@@ -1327,19 +1383,25 @@ pub mod testing {
     /// to another CPU, clear TF in the frame, and resume the program
     /// instead of killing it.
     pub fn arm_db_repin(lo: u64, hi: u64) {
+        // Release: pairs with the Acquire load in `repin_cpus`.
         REPIN_FROM.store(u32::MAX, Ordering::Release);
+        // Release: pairs with the Acquire load in `repin_cpus`.
         REPIN_TO.store(u32::MAX, Ordering::Release);
+        // Release: pairs with the Acquire load in `on_user_db`.
         REPIN_HI.store(hi, Ordering::Release);
+        // Release: pairs with the hook's first Acquire load and publishes the stores above.
         REPIN_LO.store(lo, Ordering::Release);
     }
 
     pub fn disarm_db_repin() {
+        // Release: pairs with the Acquire load and compare-exchange in `on_user_db`.
         REPIN_LO.store(0, Ordering::Release);
     }
 
     /// The CPU the re-pinned `#DB` body started on and the one it resumed
     /// on; `u32::MAX` for none.
     pub fn repin_cpus() -> (u32, u32) {
+        // Acquire: pairs with the Release stores in `on_user_db`.
         (
             REPIN_FROM.load(Ordering::Acquire),
             REPIN_TO.load(Ordering::Acquire),
@@ -1348,8 +1410,10 @@ pub mod testing {
 
     /// Top of a CPL-3 `#DB` body, IF=1. `true`: resume the program.
     pub(super) fn on_user_db(frame: &mut TrapFrame) -> bool {
+        // Acquire: pairs with the Release stores in `arm_db_repin` and `disarm_db_repin`.
         let lo = REPIN_LO.load(Ordering::Acquire);
         let rip = frame.user().rip;
+        // Acquire, AcqRel: pairs with the Release stores of the arm and disarm above.
         if lo == 0
             || rip < lo
             || rip >= REPIN_HI.load(Ordering::Acquire)
@@ -1365,10 +1429,12 @@ pub mod testing {
         // CPU 0 at `-smp 2`. The yield switches away with IF off, as
         // `thread_exit` does.
         let _irq = crate::x86::InterruptGuard::enter();
+        // Release: pairs with the Acquire load in `repin_cpus`.
         REPIN_FROM.store(crate::thread_init::current_cpu(), Ordering::Release);
         crate::sched::ktest::set_requeue_next_cpu(true);
         crate::thread_init::yield_now();
         crate::sched::ktest::set_requeue_next_cpu(false);
+        // Release: pairs with the Acquire load in `repin_cpus`.
         REPIN_TO.store(crate::thread_init::current_cpu(), Ordering::Release);
         frame.user_mut().rflags &= !RFLAGS_TF;
         true
@@ -1378,8 +1444,10 @@ pub mod testing {
 
     pub(super) fn on_entry(frame: &mut TrapFrame, v: u8) -> bool {
         if frame.user_mode() {
+            // Relaxed: a count; pairs with nothing.
             CPL3_HITS[v as usize].fetch_add(1, Ordering::Relaxed);
         }
+        // Acquire: pairs with the Release store in `set_hook`.
         let p = HOOKS[v as usize].load(Ordering::Acquire);
         if p == 0 {
             return false;

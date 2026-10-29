@@ -45,10 +45,9 @@ CONFIGS: dict[str, dict[str, Any]] = {
 BRANCH_POINT: dict[str, list[Entry]] = {
     'hpet_smp1': [
         ('vibeOS: serial online', 'serial_online', (), None, 'kernel'),
-        ('vibeOS: limine: rev 3 ok', 'limine_ok', (), None, 'kernel'),
+        ('vibeOS: limine: rev 6 ok', 'limine_ok', (), None, 'kernel'),
         ('vibeOS: pmm: ', 'pmm_free_frames', (' free 4KiB frames',), None, 'kernel'),
         ('vibeOS: paging: cr3 ok', 'paging_cr3_ok', (), None, 'kernel'),
-        ('vibeOS: paging: mmio uc', 'paging_mmio_uc', (), None, 'kernel'),
         ('vibeOS: heap ok', 'heap_ok', (), None, 'kernel'),
         ('vibeOS: kva: ready', 'kva_ready', (), None, 'kernel'),
         ('vibeOS: gdt ok', 'gdt_ok', (), None, 'kernel'),
@@ -75,10 +74,9 @@ BRANCH_POINT: dict[str, list[Entry]] = {
     ],
     'hpet_smp2': [
         ('vibeOS: serial online', 'serial_online', (), None, 'kernel'),
-        ('vibeOS: limine: rev 3 ok', 'limine_ok', (), None, 'kernel'),
+        ('vibeOS: limine: rev 6 ok', 'limine_ok', (), None, 'kernel'),
         ('vibeOS: pmm: ', 'pmm_free_frames', (' free 4KiB frames',), None, 'kernel'),
         ('vibeOS: paging: cr3 ok', 'paging_cr3_ok', (), None, 'kernel'),
-        ('vibeOS: paging: mmio uc', 'paging_mmio_uc', (), None, 'kernel'),
         ('vibeOS: heap ok', 'heap_ok', (), None, 'kernel'),
         ('vibeOS: kva: ready', 'kva_ready', (), None, 'kernel'),
         ('vibeOS: gdt ok', 'gdt_ok', (), None, 'kernel'),
@@ -109,10 +107,9 @@ BRANCH_POINT: dict[str, list[Entry]] = {
     ],
     'hpet_smp4': [
         ('vibeOS: serial online', 'serial_online', (), None, 'kernel'),
-        ('vibeOS: limine: rev 3 ok', 'limine_ok', (), None, 'kernel'),
+        ('vibeOS: limine: rev 6 ok', 'limine_ok', (), None, 'kernel'),
         ('vibeOS: pmm: ', 'pmm_free_frames', (' free 4KiB frames',), None, 'kernel'),
         ('vibeOS: paging: cr3 ok', 'paging_cr3_ok', (), None, 'kernel'),
-        ('vibeOS: paging: mmio uc', 'paging_mmio_uc', (), None, 'kernel'),
         ('vibeOS: heap ok', 'heap_ok', (), None, 'kernel'),
         ('vibeOS: kva: ready', 'kva_ready', (), None, 'kernel'),
         ('vibeOS: gdt ok', 'gdt_ok', (), None, 'kernel'),
@@ -147,10 +144,9 @@ BRANCH_POINT: dict[str, list[Entry]] = {
     ],
     'pit_smp2': [
         ('vibeOS: serial online', 'serial_online', (), None, 'kernel'),
-        ('vibeOS: limine: rev 3 ok', 'limine_ok', (), None, 'kernel'),
+        ('vibeOS: limine: rev 6 ok', 'limine_ok', (), None, 'kernel'),
         ('vibeOS: pmm: ', 'pmm_free_frames', (' free 4KiB frames',), None, 'kernel'),
         ('vibeOS: paging: cr3 ok', 'paging_cr3_ok', (), None, 'kernel'),
-        ('vibeOS: paging: mmio uc', 'paging_mmio_uc', (), None, 'kernel'),
         ('vibeOS: heap ok', 'heap_ok', (), None, 'kernel'),
         ('vibeOS: kva: ready', 'kva_ready', (), None, 'kernel'),
         ('vibeOS: gdt ok', 'gdt_ok', (), None, 'kernel'),
@@ -181,10 +177,9 @@ BRANCH_POINT: dict[str, list[Entry]] = {
     ],
     'kvm_smp2': [
         ('vibeOS: serial online', 'serial_online', (), None, 'kernel'),
-        ('vibeOS: limine: rev 3 ok', 'limine_ok', (), None, 'kernel'),
+        ('vibeOS: limine: rev 6 ok', 'limine_ok', (), None, 'kernel'),
         ('vibeOS: pmm: ', 'pmm_free_frames', (' free 4KiB frames',), None, 'kernel'),
         ('vibeOS: paging: cr3 ok', 'paging_cr3_ok', (), None, 'kernel'),
-        ('vibeOS: paging: mmio uc', 'paging_mmio_uc', (), None, 'kernel'),
         ('vibeOS: heap ok', 'heap_ok', (), None, 'kernel'),
         ('vibeOS: kva: ready', 'kva_ready', (), None, 'kernel'),
         ('vibeOS: gdt ok', 'gdt_ok', (), None, 'kernel'),
@@ -215,10 +210,9 @@ BRANCH_POINT: dict[str, list[Entry]] = {
     ],
     'kvm_notscdl_smp2': [
         ('vibeOS: serial online', 'serial_online', (), None, 'kernel'),
-        ('vibeOS: limine: rev 3 ok', 'limine_ok', (), None, 'kernel'),
+        ('vibeOS: limine: rev 6 ok', 'limine_ok', (), None, 'kernel'),
         ('vibeOS: pmm: ', 'pmm_free_frames', (' free 4KiB frames',), None, 'kernel'),
         ('vibeOS: paging: cr3 ok', 'paging_cr3_ok', (), None, 'kernel'),
-        ('vibeOS: paging: mmio uc', 'paging_mmio_uc', (), None, 'kernel'),
         ('vibeOS: heap ok', 'heap_ok', (), None, 'kernel'),
         ('vibeOS: kva: ready', 'kva_ready', (), None, 'kernel'),
         ('vibeOS: gdt ok', 'gdt_ok', (), None, 'kernel'),
@@ -249,10 +243,9 @@ BRANCH_POINT: dict[str, list[Entry]] = {
     ],
     'gp_smp2': [
         ('vibeOS: serial online', 'serial_online', (), None, 'kernel'),
-        ('vibeOS: limine: rev 3 ok', 'limine_ok', (), None, 'kernel'),
+        ('vibeOS: limine: rev 6 ok', 'limine_ok', (), None, 'kernel'),
         ('vibeOS: pmm: ', 'pmm_free_frames', (' free 4KiB frames',), None, 'kernel'),
         ('vibeOS: paging: cr3 ok', 'paging_cr3_ok', (), None, 'kernel'),
-        ('vibeOS: paging: mmio uc', 'paging_mmio_uc', (), None, 'kernel'),
         ('vibeOS: heap ok', 'heap_ok', (), None, 'kernel'),
         ('vibeOS: kva: ready', 'kva_ready', (), None, 'kernel'),
         ('vibeOS: gdt ok', 'gdt_ok', (), None, 'kernel'),
@@ -281,7 +274,7 @@ BRANCH_POINT: dict[str, list[Entry]] = {
     ],
     'halt': [
         ('vibeOS: serial online', 'serial_online', (), None, 'kernel'),
-        ('vibeOS: limine: rev 3 ok', 'limine_ok', (), None, 'kernel'),
+        ('vibeOS: limine: rev 6 ok', 'limine_ok', (), None, 'kernel'),
         ('vibeOS: boot: panic-test armed', 'panic_test_armed', (), None, 'kernel'),
     ],
 }
@@ -301,6 +294,9 @@ ADDED: tuple[str, ...] = (
     # §0.3: the halt reasons of the Limine handshake.
     "vibeOS: limine: base revision unsupported",
     "vibeOS: limine: hhdm missing",
+    "vibeOS: limine: hhdm offset outside physmap slot",
+    # §11.5: a device tree that cannot record a reserved range or finish its walk.
+    "vibeOS: dt: refused",
     "vibeOS: limine: memmap missing",
     "vibeOS: limine: executable_address missing",
     "vibeOS: limine: rsdp missing",
@@ -474,7 +470,7 @@ class TestRegistrySchema(unittest.TestCase):
     def test_contract_keys(self) -> None:
         self.bad(ROW + "order = 10\n", "'order' is only for contract rows")
         self.bad(contract_row("vibeOS: x", 10, "x").replace("order = 10\n", ""), "int 'order'")
-        self.bad(contract_row("vibeOS: x", 15, "x"), "not a multiple of 10")
+        self.bad(contract_row("vibeOS: x", 12, "x"), "not a multiple of 5")
         self.bad(contract_row("vibeOS: x", 10, "x") + contract_row("vibeOS: y", 10, "y"),
                  "order 10 repeats row 1")
         self.bad(contract_row("vibeOS: x", 10, "x") + contract_row("vibeOS: y", 20, "x"),

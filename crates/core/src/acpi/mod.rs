@@ -232,6 +232,34 @@ impl Gas {
     pub fn is_empty(self) -> bool {
         self.address == 0 && self.space_id == 0 && self.bit_width == 0
     }
+
+    /// 4 KiB page of a SystemMemory register, or `None` when this GAS is
+    /// not one. The zero page is `None`: nothing maps it.
+    ///
+    /// The ioremap of this page is what [`Self::system_memory_va`] adds
+    /// the register's offset to. An unaligned address would make that
+    /// ioremap already include the offset.
+    pub fn system_memory_page(self) -> Option<u64> {
+        if self.space_id != GAS_SYSTEM_MEMORY || self.address == 0 {
+            return None;
+        }
+        let page = self.address & !0xFFF;
+        (page != 0).then_some(page)
+    }
+
+    /// Byte VA of this SystemMemory register.
+    ///
+    /// `mapped_page` is the ioremap of [`Self::system_memory_page`], not
+    /// the HHDM. `None` when this is not SystemMemory or the page was not
+    /// mapped, so the caller skips the method and tries the next one.
+    pub fn system_memory_va(self, mapped_page: Option<u64>) -> Option<u64> {
+        if self.space_id != GAS_SYSTEM_MEMORY || self.address == 0 {
+            return None;
+        }
+        let page = mapped_page.filter(|p| *p != 0)?;
+        let off = self.address & 0xFFF;
+        page.checked_add(off)
+    }
 }
 
 pub fn parse_gas(bytes: &[u8], off: usize) -> Result<Gas, AcpiError> {
@@ -978,6 +1006,53 @@ mod tests {
         assert_eq!(f.reset.address, 0xCF);
         assert_eq!(f.reset_value, 0x06);
         assert_eq!(f.sleep_control.address, 0x404);
+    }
+
+    /// A SystemMemory write lands at the mapped page VA plus the register's
+    /// offset. An unmapped page produces no address.
+    #[test]
+    fn system_memory_gas_write_uses_mapped_va_not_hhdm() {
+        const HHDM: u64 = 0xFFFF_8000_0000_0000;
+        const PHYS: u64 = 0xFED0_0CF9;
+        const MAPPED: u64 = 0xFFFF_E000_0100_0000;
+        let gas = Gas {
+            space_id: GAS_SYSTEM_MEMORY,
+            bit_width: 8,
+            bit_offset: 0,
+            access_size: 1,
+            address: PHYS,
+        };
+        let hhdm_va = HHDM.wrapping_add(PHYS);
+        let va = gas.system_memory_va(Some(MAPPED)).expect("mapped page");
+        assert_eq!(va, MAPPED + (PHYS & 0xFFF));
+        assert_ne!(va, hhdm_va);
+        assert_eq!(gas.system_memory_page(), Some(PHYS & !0xFFF));
+
+        let mut page = [0u8; 0x1000];
+        let off = (va - MAPPED) as usize;
+        page[off] = 0x06;
+        assert_eq!(page[(PHYS & 0xFFF) as usize], 0x06);
+        assert_eq!(page.iter().filter(|b| **b == 0x06).count(), 1);
+
+        // No mapping: the method is skipped, so nothing is written.
+        assert_eq!(gas.system_memory_va(None), None);
+        assert_eq!(gas.system_memory_va(Some(0)), None);
+        let zero = Gas { address: 0, ..gas };
+        assert_eq!(zero.system_memory_va(Some(MAPPED)), None);
+        assert_eq!(zero.system_memory_page(), None);
+        let low = Gas {
+            address: 0x10,
+            ..gas
+        };
+        assert_eq!(low.system_memory_page(), None);
+
+        let io = Gas {
+            space_id: GAS_SYSTEM_IO,
+            address: 0xCF9,
+            ..Gas::empty()
+        };
+        assert_eq!(io.system_memory_va(Some(MAPPED)), None);
+        assert_eq!(io.system_memory_page(), None);
     }
 
     /// A FADT of `len` bytes with `PM_TMR_BLK` = `blk`, `PM_TMR_LEN` = 4

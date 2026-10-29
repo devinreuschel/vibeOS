@@ -26,7 +26,7 @@ per-architecture uapi (ROADMAP §13.10).
 
 | Concern | Seam | x86_64 | aarch64 | ROADMAP |
 |---|---|---|---|---|
-| Boot handover: the machine state the boot handshake hands over, normalized into `BootInfo` | trait (`BootHandover`) | Limine base revision 3, until ROADMAP §11.1's bump moves it to aarch64's; long mode; without Limine, the direct entry (§4.1): a PVH door and a 64-bit door into one body | Limine base revision 6, EL1, or EL2 with VHE; without Limine, the direct entry (§4.1) behind an arm64 `Image` header, entered with the MMU off | §10.3, §11.1, §25.4, §26.4 |
+| Boot handover: the machine state the boot handshake hands over, normalized into `BootInfo` | trait (`BootHandover`) | Limine base revision 6, as on aarch64; long mode; without Limine, the direct entry (§4.1): a PVH door and a 64-bit door into one body | Limine base revision 6, EL1, or EL2 with VHE; without Limine, the direct entry (§4.1) behind an arm64 `Image` header, entered with the MMU off | §10.3, §11.1, §25.4, §26.4 |
 | Early console | port module | 16550 on COM1 | PL011 | §11.1 |
 | Exception entry and exit | port module: generated entry code | one stub per IDT vector ([§5.10](INTERRUPTS.md#510-privilege-transitions) rule 1) | one 16-entry vector table ([§11.5](#115-aarch64-exceptions-and-privilege-transitions)) | §10.6, §11.3 |
 | Trap decode | pure half: a trap to a `TrapKind` (§5.2) | vector and error code | vector slot and `ESR_EL1` (§11.5) | §10.6, §11.3 |
@@ -80,14 +80,15 @@ The machine description is one portable struct, `MachineDesc` in `vibeos-core`, 
 needs from firmware and nothing that needs AML: the CPUs with their hardware ids (APIC ID or MPIDR) and
 enable method, the interrupt controllers, the timers, the consoles, the PCI host bridges (segment, bus
 range, and ECAM base), and the memory that must stay out of the buddy (the device tree's
-`/reserved-memory` and its header's reservation block). The ACPI tables ([§7.1](SMP.md#71-acpi), and on
+`/reserved-memory` and its header's reservation block). A `no-map` range is also left out of the
+cacheable physmap. The ACPI tables ([§7.1](SMP.md#71-acpi), and on
 aarch64 from ROADMAP §20.7) and the device tree (ROADMAP §11.5) each fill it, and SMP bring-up, the IRQ
 layer, and the device registry read only it, so a firmware format is one more producer, never another
 consumer path. A device, its resources, and its INTx routing are not in it: a driver binds through
 ROADMAP §6.1's registry to a firmware-node handle, a device-tree node or an ACPI namespace node, matched
 by compatible string or `_HID`, whose resources ROADMAP §20.2's `_CRS` and `_PRT` fill at runtime and
-hot removal can take away. Planned (ROADMAP §11.5); today the ACPI parser's results feed x86_64's
-consumers directly.
+hot removal can take away. The ACPI parser (MADT, HPET, MCFG) and the device-tree parser each fill it;
+x86_64's consumers of those tables read `MachineDesc`.
 
 The mechanism:
 
@@ -174,9 +175,9 @@ those bits from `FAR_EL1` before it uses the address, so neither the lookup nor 
 sees the tag. The opt-in, `PR_SET_TAGGED_ADDR_CTRL`, is ROADMAP §18.4's; until it lands that `prctl`
 returns `EINVAL`, and `docs/LINUX.md` lists the difference.
 
-Planned (ROADMAP §11.2): ASIDs, so a context switch changes TTBR0 without flushing the TLB. The
-allocator is Linux arm64's generation scheme. An address space holds one 64-bit value, a generation
-counter above its ASID bits, and each CPU holds an atomic `active_asid`. A switch into an address
+The ASID allocator is in `vibeos-core` (`mm/asid.rs`), Linux arm64's generation scheme, so a
+context switch changes TTBR0 without flushing the TLB. An address space holds one 64-bit value, a
+generation counter above its ASID bits, and each CPU holds an atomic `active_asid`. A switch into an address
 space whose generation is current publishes that value with a compare-exchange against the CPU's
 `active_asid` and loads TTBR0. Any other switch takes the allocator lock, keeps the space's old ASID
 if it is free or reserved in the current generation, and otherwise takes a free one. When none is
@@ -227,9 +228,16 @@ MSR only the bits this table names are written. The values are Linux's on each a
 software that runs on Linux sees the same machine (ROADMAP, How to read this). A control here holds one
 value for every thread. A line that makes one per-thread (Linux's `PR_SET_TSC` for `CR4.TSD`,
 `ARCH_SET_CPUID`, `perf_user_access` for `PMUSERENR_EL0`) moves it to §7.5's per-thread table under
-AGENTS.md rule 8, and a line that changes a value changes its row in the same commit. Rule; not yet
-enforced: ROADMAP §11.6. On x86_64 `arch::cpu::init_control_regs` writes CR0 and CR4 whole on every
-CPU, and the aarch64 port does not exist.
+AGENTS.md rule 8, and a line that changes a value changes its row in the same commit. On x86_64
+`arch::cpu::init_control_regs` writes CR0 and CR4 whole on every CPU, the CPU's last CR4 store, and
+clears the CPUID faulting bit where `MSR_PLATFORM_INFO` enumerates it. No CPUID bit says that MSR
+exists, and `rdmsr` of a missing one raises `#GP`, so the read runs only on a bare-metal Intel CPU
+with SSE4.2 (Nehalem and every Intel core since have the MSR). CPUID.1:ECX[31] skips it: a
+hypervisor that reports that model may not implement the MSR, and a VM starts with
+`MSR_MISC_FEATURES_ENABLES` at 0, so there is nothing to clear. The aarch64 port writes `SCTLR_EL1`,
+`CNTKCTL_EL1` (`CNTHCTL_EL2` at EL2 with VHE), `PMUSERENR_EL0`, and `CPACR_EL1` from the computed
+values on every CPU at bring-up (ROADMAP §11.2, §11.4). ROADMAP §11.6's `/bin/tests` `user_env` case
+proves the EL0-visible rows that case covers.
 
 | Architecture | Control | Value | What user code sees |
 |---|---|---|---|
@@ -239,6 +247,7 @@ CPU, and the aarch64 port does not exist.
 | aarch64 | `SCTLR_EL1.UMA` | 0 | an EL0 access to `DAIF` (`msr daifset`, `msr daifclr`, `mrs`) traps and gets `SIGILL`, so user code never masks an interrupt (§2.5) |
 | aarch64 | `SCTLR_EL1.nTWE` | 1 | `wfe` runs at EL0 |
 | aarch64 | `SCTLR_EL1.nTWI` | 0 | an EL0 `wfi` traps, and the exception handler steps over it, so it returns at once with no signal, as on Linux arm64 |
+| aarch64 | `SCTLR_EL1.TSCXT` | 1 | an EL0 `mrs` or `msr` of `SCXTNUM_EL0` traps and gets `SIGILL` where FEAT_CSV2_2 is present, so the register does not carry state between processes; the bit is RES1 where that feature is absent (Arm ARM DDI0487 SCTLR_EL1) |
 | aarch64 | `SCTLR_EL1.SA0` | 1 | an EL0 load or store through a misaligned SP raises an SP alignment fault and gets `SIGBUS` |
 | aarch64 | `SCTLR_EL1.A` | 0 (ROADMAP §11.1) | an EL0 load or store to Normal memory may be unaligned, as on Linux arm64; the user crate's `aarch64-unknown-linux-musl` code is not built for strict alignment and relies on it |
 | aarch64 | `SCTLR_EL1.E0E` | 0 | EL0 is little-endian |
@@ -254,7 +263,7 @@ CPU, and the aarch64 port does not exist.
 | aarch64 | EL0 `mrs` of an ID register | traps | `SIGILL`, and `AT_HWCAP` carries no `HWCAP_CPUID`, until ROADMAP §23.1 emulates the sanitized fields |
 | x86_64 | `CR4.TSD` | 0 | `rdtsc` and `rdtscp` run at CPL 3, as the ROADMAP §13.10 vDSO clock needs |
 | x86_64 | `CR4.PCE` | 0 | `rdpmc` at CPL 3 raises `#GP` and gets `SIGSEGV` |
-| x86_64 | CPUID faulting (`MSR_MISC_FEATURES_ENABLES` bit 0, where `MSR_PLATFORM_INFO` bit 31 enumerates it) | 0 | `cpuid` runs at CPL 3 |
+| x86_64 | CPUID faulting (`MSR_MISC_FEATURES_ENABLES` bit 0, where `MSR_PLATFORM_INFO` bit 31 enumerates it; that MSR is not read when CPUID.1:ECX[31] is set) | 0 | `cpuid` runs at CPL 3 |
 | x86_64 | `CR4.UMIP` | 1 where CPUID enumerates it (§5.1) | `sgdt`, `sidt`, `sldt`, `smsw`, and `str` at CPL 3 raise `#GP` (§5.2) |
 | x86_64 | `CR4.OSXSAVE`, `CR4.PKE` | 0 (ROADMAP §11.1, F130) | `xgetbv`, `rdpkru`, and `wrpkru` raise `#UD` and get `SIGILL`; ROADMAP §13.8 changes the `OSXSAVE` row if it chooses XSAVE |
 | x86_64 | `CR4.FSGSBASE` | 0 until ROADMAP §18.3 | `rdfsbase`, `wrfsbase`, `rdgsbase`, and `wrgsbase` raise `#UD` |
@@ -266,10 +275,12 @@ CPU, and the aarch64 port does not exist.
 | x86_64 | `CR4.OSXMMEXCPT` | 1 | an unmasked SIMD floating-point exception raises `#XM` and gets `SIGFPE` rather than `#UD` and `SIGILL` |
 | x86_64 | `IA32_SYSENTER_CS`, `IA32_SYSENTER_ESP`, `IA32_SYSENTER_EIP` | 0, as Linux writes them without IA32 emulation | `sysenter` at CPL 3 raises `#GP` on Intel and gets `SIGSEGV` (`#UD` and `SIGILL` on AMD, which has no `sysenter` in long mode); a value firmware left would enter ring 0 at its address. The GDT has no 32-bit user code slot, so ring 3 never reaches compatibility mode and `IA32_CSTAR` is never used |
 
-At EL2 with VHE, `CNTKCTL_EL1` names `CNTHCTL_EL2`, whose EL0 fields sit at the same bits. The boot
-CPU computes that register's whole value with the EL0 fields above, which clears the `EL0PCTEN` bit
-Limine sets at EL2 entry, and ROADMAP §11.4's stub writes the same value on every core, as it writes
-the boot CPU's `SCTLR_EL1`.
+At EL2 with VHE (`HCR_EL2.E2H` is 1), `CNTKCTL_EL1` names `CNTHCTL_EL2`. Bits 0 and 1 are then
+`EL0PCTEN` and `EL0VCTEN`, the same fields as `CNTKCTL_EL1`, not `EL1PCTEN` and `EL1PCEN`, which are
+those bits only when E2H is 0. The boot CPU writes `CNTKCTL_EL1`'s value (`EL0VCTEN` alone) into
+`CNTHCTL_EL2`, which clears the `EL0PCTEN` bit Limine sets at EL2 entry, and ROADMAP §11.4's stub
+writes that value on every core. The nightly EL2 leg runs `/bin/tests` `user_env`
+(`el0_env_every_cpu`).
 
 Why: user code depends on these values (a JIT's cache maintenance, glibc's `memset`, the vDSO's clock),
 and the kernel's own safety depends on others (`UMA`, `EL0VTEN`). Their reset values are UNKNOWN.
@@ -286,8 +297,9 @@ aarch64's counterpart of §5.1 to §5.3 and of the x86_64 mechanism behind §5.1
 gives the required state at each boundary, and its rules 9 onward hold on both architectures. The
 kernel runs at EL1, or at EL2 with VHE when Limine entered there (ROADMAP §11.1); at EL2 the `_EL1`
 names below reach their `_EL2` registers through VHE's redirection, and `VBAR_EL2`, `ESR_EL2`,
-`FAR_EL2`, `ELR_EL2`, and `SPSR_EL2` take the roles given here to the `_EL1` ones. Planned (ROADMAP
-§11.3, §11.6): the aarch64 port does not exist.
+`FAR_EL2`, `ELR_EL2`, and `SPSR_EL2` take the roles given here to the `_EL1` ones. The sixteen-entry
+vector table, the stack-bit test, and the `TrapKind` decode are built (ROADMAP §11.3). User `svc`
+and the return to EL0 are ROADMAP §11.6.
 
 1. One vector table, generated by the port from one list, as §5.10 rule 1 generates x86_64's stubs.
    Of its 16 entries (synchronous, IRQ, FIQ, and SError, each taken at the current level on
@@ -339,7 +351,6 @@ says it is not a ring-3 fault (§5.2 for x86_64's vectors). On aarch64 the decod
 slot and, for a synchronous exception, the exception class (EC) and ISS of `ESR_EL1` and an abort's
 fault status code. The Ring 3 column is Linux arm64's. A host test runs every EC from `0x00` to
 `0x3F`, and the IRQ, FIQ, and SError slots, through decode and table, and pins each row below.
-Planned (ROADMAP §11.3, §11.6).
 
 | EC | Class | Ring 0 (at the kernel's level) | Ring 3 (from EL0) |
 |----|-------|--------------------------------|-------------------|

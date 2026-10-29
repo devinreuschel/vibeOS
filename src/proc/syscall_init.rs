@@ -1,6 +1,8 @@
 //! STAR / LSTAR / FMASK / SCE, syscall entry asm, FPU, RSP0/CR3 on switch.
 //! ROADMAP §9.1 / §9.3. Same entry as Slice A; stub is the dispatch table.
 
+#![cfg(target_arch = "x86_64")]
+
 use core::arch::global_asm;
 use core::mem::{offset_of, size_of};
 use core::ptr;
@@ -20,7 +22,7 @@ use crate::arch::gdt::{self, CpuTables};
 use crate::arch::idt::TrapFrame;
 use crate::per_cpu_init;
 use crate::x86::{
-    self, EFER_SCE, FMASK_SYSCALL, IA32_EFER, IA32_FMASK, IA32_FS_BASE, IA32_GS_BASE,
+    self, EFER_FFXSR, EFER_SCE, FMASK_SYSCALL, IA32_EFER, IA32_FMASK, IA32_FS_BASE, IA32_GS_BASE,
     IA32_KERNEL_GS_BASE, IA32_LSTAR, IA32_STAR, IA32_SYSENTER_CS, IA32_SYSENTER_EIP,
     IA32_SYSENTER_ESP,
 };
@@ -248,6 +250,7 @@ static EXIT_WORK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 pub fn set_exit_work_hooks(pending: fn() -> bool, work: fn(&mut UserFrame)) {
     // Release: pairs with the Acquire loads in `exit_work`.
     EXIT_WORK.store(work as *mut (), Ordering::Release);
+    // Release: pairs with the Acquire load in `exit_work`.
     EXIT_PENDING.store(pending as *mut (), Ordering::Release);
 }
 
@@ -274,6 +277,7 @@ pub fn exit_work(kind: u64, frame: &mut UserFrame) {
     crate::proc::ktest::exit_seen(frame);
     // Acquire: pairs with the Release stores in `set_exit_work_hooks`.
     let pending = EXIT_PENDING.load(Ordering::Acquire);
+    // Acquire: pairs with the Release store in `set_exit_work_hooks`.
     let work = EXIT_WORK.load(Ordering::Acquire);
     if !pending.is_null() && !work.is_null() {
         // SAFETY: invariant: non-null hooks hold a `fn() -> bool` and a
@@ -317,6 +321,7 @@ unsafe extern "C" fn vibeos_syscall_bad_rip(frame: *mut UserFrame) -> ! {
     // established by `syscall_init::vibeos_syscall_entry` or
     // `thread_init::spawn_user`.
     let f = unsafe { &*frame };
+    // Relaxed: a count; pairs with nothing.
     #[cfg(feature = "kernel_tests")]
     testing::BAD_RIP_KILLS.fetch_add(1, Ordering::Relaxed);
     crate::arch::idt::user_fault(&TrapFrame::for_user(vectors::GP, 0, f));
@@ -353,7 +358,8 @@ unsafe extern "C" {
 /// the SYSCALL MSRs, and zero the SYSENTER ones: Intel runs `sysenter` in
 /// 64-bit mode, and with `IA32_SYSENTER_CS` 0 it raises `#GP` and the
 /// process gets `SIGSEGV` (DESIGN §11.4), where a value firmware left
-/// would enter ring 0 at its address. Per CPU.
+/// would enter ring 0 at its address. EFER gains SCE and loses FFXSR, so
+/// the FP switch's `fxsave64` saves XMM0-15 (F130). Per CPU.
 ///
 /// # Safety
 /// GDT loaded, `GS_BASE` is this CPU's `PerCpu`.
@@ -364,8 +370,9 @@ pub unsafe fn init_cpu() {
     // SAFETY: STAR, LSTAR, FMASK, the SYSENTER MSRs and EFER are
     // architectural MSRs that every x86_64 CPU has; STAR names the GDT's
     // selectors and LSTAR the entry stub, 0 in the SYSENTER MSRs makes
-    // `sysenter` fault, and EFER keeps its other bits. The GDT is loaded (this
-    // fn's contract, `syscall_init::init_cpu`).
+    // `sysenter` fault, and EFER gains SCE, loses FFXSR, which every CPU
+    // takes clear, and keeps its other bits. The GDT is loaded (this fn's
+    // contract, `syscall_init::init_cpu`).
     unsafe {
         x86::wrmsr(IA32_STAR, star);
         x86::wrmsr(IA32_LSTAR, entry);
@@ -374,8 +381,9 @@ pub unsafe fn init_cpu() {
         x86::wrmsr(IA32_SYSENTER_ESP, 0);
         x86::wrmsr(IA32_SYSENTER_EIP, 0);
         let efer = x86::rdmsr(IA32_EFER);
-        x86::wrmsr(IA32_EFER, efer | EFER_SCE);
+        x86::wrmsr(IA32_EFER, (efer | EFER_SCE) & !EFER_FFXSR);
     }
+    assert!(x86::rdmsr(IA32_EFER) & EFER_FFXSR == 0, "EFER.FFXSR set");
 }
 
 /// BSP: attach the GDT TSS and the dedicated RSP0 stack.
@@ -393,6 +401,7 @@ pub unsafe fn init_bsp() {
         let top = gdt::bsp_rsp0_top();
         cpu.fallback_rsp0 = top;
         cpu.kernel_rsp0 = top;
+        // Release: pairs with the Acquire load in `addr_space_init::root_holder`.
         cpu.remote
             .as_cr3
             .store(crate::paging_init::kernel_cr3(), Ordering::Release);
@@ -417,6 +426,7 @@ pub unsafe fn init_ap(tables: *const CpuTables, rsp0: u64) {
         cpu.tables = tables.cast();
         cpu.fallback_rsp0 = rsp0;
         cpu.kernel_rsp0 = rsp0;
+        // Release: pairs with the Acquire load in `addr_space_init::root_holder`.
         cpu.remote
             .as_cr3
             .store(crate::paging_init::kernel_cr3(), Ordering::Release);
@@ -614,6 +624,7 @@ pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     } else {
         tcb.as_cr3
     };
+    // Relaxed: only this CPU stores its `as_cr3`; pairs with nothing.
     if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
         return true;
     }
@@ -622,6 +633,7 @@ pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     // the kernel half this code and stack run in; established by
     // `addr_space_init::SpaceCore`'s drop.
     unsafe { x86::write_cr3(want) };
+    // Release: pairs with the Acquire load in `addr_space_init::root_holder`.
     cpu.remote.as_cr3.store(want, Ordering::Release);
     false
 }
@@ -664,6 +676,17 @@ pub unsafe fn switch_fpu(cpu: &mut PerCpu, old: *mut Tcb) {
 /// `thread_init::switch_now` establishes each, inside
 /// `with_current_switch`.
 pub unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
+    if !old.is_null() {
+        // SAFETY: invariant I9: `old` is the TCB this CPU is switching
+        // off; `user_tls` is still the outgoing `FS_BASE` because
+        // `switch_now` has not loaded the incoming selectors yet;
+        // established by `thread_init::switch_now`.
+        unsafe {
+            if (*old).pid != 0 {
+                (*old).tls_base = crate::arch::current::user_tls();
+            }
+        }
+    }
     // SAFETY: `switch_fpu`'s contract, which this fn's `# Safety` covers;
     // established by `thread_init::switch_now`.
     unsafe { switch_fpu(cpu, old) };
@@ -676,6 +699,9 @@ pub unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
         unsafe {
             set_rsp0_for(cpu, &*new);
             switch_cr3_for(cpu, &*new);
+            if (*new).pid != 0 {
+                crate::arch::current::set_user_tls((*new).tls_base);
+            }
         }
     }
 }
@@ -706,7 +732,10 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
         // SAFETY: invariant: `current_tcb` is the TCB this CPU runs, live
         // and written only by this thread or under its parent's fork before
         // `make_ready`; established by `thread_init::switch_now`.
-        unsafe { (*t).user_segs }
+        unsafe {
+            (*t).tls_base = fs_base;
+            (*t).user_segs
+        }
     };
     let segs = u64::from(segs.ds)
         | u64::from(segs.es) << 16
@@ -792,10 +821,12 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
 static TRACE: AtomicBool = AtomicBool::new(false);
 
 pub fn set_trace(on: bool) {
+    // Release: pairs with the Acquire load in `trace_enabled`.
     TRACE.store(on, Ordering::Release);
 }
 
 pub fn trace_enabled() -> bool {
+    // Acquire: pairs with the Release store in `set_trace`.
     TRACE.load(Ordering::Acquire)
 }
 
@@ -880,22 +911,27 @@ pub(crate) mod testing {
     /// The next exit of syscall `nr` from a process returns to a
     /// non-canonical RIP.
     pub(crate) fn arm_noncanonical_rip(nr: u64) {
+        // Release: pairs with the compare-exchange in `on_exit`.
         ARMED_NR.store(nr.wrapping_add(1), Ordering::Release);
     }
 
     /// Undo [`arm_noncanonical_rip`] and [`arm_noncanonical_entry`].
     pub(crate) fn disarm_noncanonical() {
+        // Release: pairs with the compare-exchange in `on_exit`.
         ARMED_NR.store(0, Ordering::Release);
+        // Release: pairs with the AcqRel swap in `on_first_return`.
         ARMED_ENTRY.store(false, Ordering::Release);
     }
 
     /// The next `first_return` returns to a non-canonical RIP.
     pub(crate) fn arm_noncanonical_entry() {
+        // Release: pairs with the AcqRel swap in `on_first_return`.
         ARMED_ENTRY.store(true, Ordering::Release);
     }
 
     /// Processes the syscall exit's non-canonical path has killed.
     pub(crate) fn bad_rip_kills() -> u64 {
+        // Relaxed: a count; pairs with nothing.
         BAD_RIP_KILLS.load(Ordering::Relaxed)
     }
 
@@ -907,6 +943,14 @@ pub(crate) mod testing {
             return;
         }
         let armed = f.orig_rax.wrapping_add(1);
+        // 0 is "unarmed", and also what an `orig_rax` of -1 (no syscall)
+        // gives. A compare-exchange of 0 with 0 would succeed every time
+        // nothing is armed.
+        if armed == 0 {
+            return;
+        }
+        // AcqRel: pairs with the Release stores of the arm and disarm above.
+        // Relaxed on failure: the exit is not the armed one; pairs with nothing.
         if ARMED_NR
             .compare_exchange(armed, 0, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
@@ -918,6 +962,7 @@ pub(crate) mod testing {
     /// Top of `first_return`: an armed entry gets a non-canonical RIP in
     /// the frame it returns over.
     pub(super) fn on_first_return() {
+        // AcqRel: pairs with the Release stores in `arm_noncanonical_entry` and the disarm.
         if !ARMED_ENTRY.swap(false, Ordering::AcqRel) {
             return;
         }
@@ -936,6 +981,7 @@ pub(crate) mod testing {
 
     /// Whether [`fork_wait_stall_point`] still holds an entry.
     pub(super) fn fork_wait_stall_armed() -> bool {
+        // Acquire: pairs with the Release store in `arm_fork_wait_stall` and the update below.
         FORK_WAIT_STALLS.load(Ordering::Acquire) != 0
     }
 
@@ -946,6 +992,7 @@ pub(crate) mod testing {
     /// Hold the next `n` first ring-3 entries at [`fork_wait_stall_point`];
     /// 0 disarms.
     pub(crate) fn arm_fork_wait_stall(n: u32) {
+        // Release: pairs with the Acquire load above and the update in `fork_wait_stall_point`.
         FORK_WAIT_STALLS.store(n, Ordering::Release);
     }
 
@@ -954,6 +1001,7 @@ pub(crate) mod testing {
     /// there lands inside that window (ROADMAP §10.2, F021). It reads no
     /// `gs:` operand, since GS already names the user's base.
     pub(crate) extern "C" fn fork_wait_stall_point() {
+        // AcqRel, Acquire on failure: pairs with the Release store in `arm_fork_wait_stall`.
         if FORK_WAIT_STALLS
             .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
             .is_err()

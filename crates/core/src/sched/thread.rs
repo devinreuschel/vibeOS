@@ -4,7 +4,8 @@
 //! lives in each port's hardware half (`arch::x86_64::switch` on x86_64).
 //! The TCB table, KVA mapping, and `spawn` live in the binary crate.
 
-use core::mem::{offset_of, size_of};
+use core::mem::{MaybeUninit, offset_of, size_of};
+use core::ptr;
 
 use crate::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::desc::UserSegs;
@@ -108,11 +109,13 @@ impl WaitOutcome {
 
 pub use crate::limits::MAX_STACK_PAGES;
 
-/// A guarded kernel stack: `pages` mapped pages above one unmapped guard
-/// page at `guard` (default 4×4 KiB, DESIGN §4.5), and the order-0
-/// [`Frames`] of each mapped page, lowest first. A move-only handle with
-/// private fields: only `kva_init::alloc_guarded_stack` builds one
-/// (through [`GuardedStack::from_raw_parts`]) and only `kva_init::free_stack`
+/// A guarded kernel stack: `pages` mapped pages at a `2S`-aligned
+/// address, with `S` unmapped bytes below (`S = pages × 4 KiB`,
+/// DESIGN §4.5), and the order-0 [`Frames`] of each mapped page, lowest
+/// first. A move-only handle with private fields: only
+/// `kva_init::alloc_guarded_stack` and `kva_init::alloc_boxed_stack`
+/// build one (through [`GuardedStack::from_raw_parts`] or
+/// [`GuardedStack::write_empty`]) and only `kva_init::free_stack`
 /// takes it apart, so the stack and its frames are freed once, by their
 /// owner. It lives in this crate so `Tcb` can own it.
 pub struct GuardedStack {
@@ -123,10 +126,11 @@ pub struct GuardedStack {
 
 impl GuardedStack {
     /// # Safety
-    /// `[guard, guard + (pages + 1) * 4 KiB)` came from
-    /// `Kva::alloc_guarded(pages)`, the guard page is not mapped, upper
-    /// page `i` maps `frames[i]` for every `i < pages`, the other slots are
-    /// `None`, and no other `GuardedStack` names the range.
+    /// `[guard, guard + 2S)` came from `Kva::alloc_guarded(pages)`
+    /// (`S = pages × 4 KiB`), the guard `[guard, guard + S)` is not
+    /// mapped, page `i` of the stack maps `frames[i]` for every
+    /// `i < pages`, the other slots are `None`, and no other
+    /// `GuardedStack` names the range.
     pub unsafe fn from_raw_parts(
         guard: VirtAddr,
         pages: usize,
@@ -139,6 +143,51 @@ impl GuardedStack {
         }
     }
 
+    /// Write `guard` and `pages` and empty `frames` into an exclusive
+    /// uninitialized allocation. The caller fills mapped pages with
+    /// [`set_frame`].
+    ///
+    /// # Safety
+    /// `slot` is the exclusive `MaybeUninit<GuardedStack>` the caller
+    /// allocated. `[guard, guard + 2S)` came from `Kva::alloc_guarded(pages)`
+    /// (the contract [`from_raw_parts`] states). The caller writes page
+    /// `i`'s frame with [`set_frame`] for every `i < pages` before any
+    /// other accessor reads `frames`, and never maps the guard.
+    pub unsafe fn write_empty(
+        slot: *mut MaybeUninit<Self>,
+        guard: VirtAddr,
+        pages: usize,
+    ) -> *mut Self {
+        let p = slot.cast::<Self>();
+        // SAFETY: `slot` is the exclusive allocation this fn's contract
+        // names; each field is written once, then `p` is a live `Self`;
+        // established here.
+        unsafe {
+            ptr::addr_of_mut!((*p).guard).write(guard);
+            ptr::addr_of_mut!((*p).pages).write(pages);
+            let frames = ptr::addr_of_mut!((*p).frames).cast::<Option<Frames>>();
+            let mut i = 0;
+            while i < MAX_STACK_PAGES {
+                frames.add(i).write(None);
+                i += 1;
+            }
+        }
+        p
+    }
+
+    /// Record that page `i` maps `f`.
+    ///
+    /// # Safety
+    /// `i < self.pages()`, page `i` maps `f`, and no other token names `f`.
+    pub unsafe fn set_frame(&mut self, i: usize, f: Frames) {
+        self.frames[i] = Some(f);
+    }
+
+    /// The frame slots, for an unfinished handle's error path.
+    pub fn frames_mut(&mut self) -> &mut [Option<Frames>] {
+        &mut self.frames
+    }
+
     /// Give the range and its frames back to the allocator that built it.
     ///
     /// # Safety
@@ -148,19 +197,26 @@ impl GuardedStack {
         (self.guard, self.pages, self.frames)
     }
 
-    /// The unmapped guard page.
+    /// The unmapped guard (`S` bytes).
     pub fn guard(&self) -> VirtAddr {
         self.guard
     }
 
-    /// The lowest mapped byte.
+    /// The lowest mapped byte: a `2S`-aligned address.
     pub fn base(&self) -> VirtAddr {
-        VirtAddr(self.guard.as_u64() + PAGE_SIZE_4K)
+        VirtAddr(self.guard.as_u64() + self.pages as u64 * PAGE_SIZE_4K)
     }
 
     /// One past the highest mapped byte: the initial RSP.
     pub fn top(&self) -> VirtAddr {
-        VirtAddr(self.guard.as_u64() + (self.pages as u64 + 1) * PAGE_SIZE_4K)
+        VirtAddr(self.guard.as_u64() + self.pages as u64 * 2 * PAGE_SIZE_4K)
+    }
+
+    /// Whether `va` lies in this stack's unmapped guard.
+    pub fn guard_contains(&self, va: u64) -> bool {
+        let g = self.guard.as_u64();
+        let s = self.pages as u64 * PAGE_SIZE_4K;
+        va >= g && va < g + s
     }
 
     /// Mapped pages, the guard page not counted.
@@ -174,11 +230,16 @@ impl GuardedStack {
     }
 }
 
-/// FXSAVE area. 16-byte aligned. Every thread starts from [`Fxsave::INITIAL`].
+/// FXSAVE area. 16-byte aligned. A new TCB starts from [`Fxsave::INITIAL`]
+/// on x86_64 and [`Fxsave::ZERO`] on aarch64.
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
 pub struct Fxsave {
     pub bytes: [u8; 512],
+    /// aarch64 `FPCR`; unused on x86_64 (the FXSAVE image holds MXCSR).
+    pub fpcr: u32,
+    /// aarch64 `FPSR`; unused on x86_64.
+    pub fpsr: u32,
 }
 
 impl Fxsave {
@@ -188,7 +249,7 @@ impl Fxsave {
     /// exceptions masked, round to nearest) at bytes 24-27, every other
     /// byte zero: empty x87 tags, zeroed ST and XMM registers. `execve`,
     /// `spawn_user`, kernel-thread creation and `init_bootstrap` start a
-    /// thread from it (DESIGN §7.5).
+    /// thread from it on x86_64 (DESIGN §7.5).
     pub const INITIAL: Self = {
         let mut bytes = [0u8; 512];
         let fcw = 0x037Fu16.to_le_bytes();
@@ -199,7 +260,19 @@ impl Fxsave {
         bytes[25] = mxcsr[1];
         bytes[26] = mxcsr[2];
         bytes[27] = mxcsr[3];
-        Self { bytes }
+        Self {
+            bytes,
+            fpcr: 0,
+            fpsr: 0,
+        }
+    };
+
+    /// aarch64 initial user FP: V0–V31, FPCR, and FPSR all zero (ROADMAP
+    /// §11.6). x86_64 keeps [`INITIAL`].
+    pub const ZERO: Self = Self {
+        bytes: [0u8; 512],
+        fpcr: 0,
+        fpsr: 0,
     };
 }
 
@@ -239,9 +312,9 @@ impl OnCpu {
     /// The incoming side of a switch marks the thread on this CPU.
     #[inline(always)]
     pub fn set(&self) {
-        // Relaxed (P10-S08): the scheduler lock, held across the switch's
-        // bookkeeping, orders this store with every reader that could see
-        // the thread Dead; nothing is published through it.
+        // Relaxed (P10-S08): pairs with nothing; the scheduler lock, held
+        // across the switch's bookkeeping, orders this store with every
+        // reader that could see the thread Dead.
         self.0.store(true, Ordering::Relaxed);
     }
 
@@ -250,8 +323,8 @@ impl OnCpu {
     #[inline(always)]
     pub fn clear(&self) {
         // Release: pairs with the Acquire load in `is_clear`, so a CPU that
-        // sees the flag clear sees every save into the TCB before it.
-        // Relaxed only in the loom model's variant (ROADMAP §10.8).
+        // sees the flag clear sees every save into the TCB before it. The
+        // loom model's variant is Relaxed, which pairs with nothing (ROADMAP §10.8).
         self.0.store(
             false,
             variant::pick(
@@ -319,6 +392,11 @@ pub struct Tcb {
     /// switch away from it and loaded by the switch to it, by its first
     /// entry, and by `execve`. Unused for a kernel thread (`pid` 0).
     pub user_segs: UserSegs,
+    /// User TLS base: `FS_BASE` on x86_64, `TPIDR_EL0` on aarch64
+    /// (DESIGN §7.5). `on_switch` saves the live register for an outgoing
+    /// user thread and loads this for an incoming one. A kernel thread
+    /// keeps 0.
+    pub tls_base: u64,
     /// Syscalls this thread has entered. Its own entry bumps it
     /// (`syscall_init::bump_counter`); other threads read it for the
     /// per-process sum (`thread_init::sum_syscalls`), so it is atomic. A
@@ -334,7 +412,11 @@ pub struct Tcb {
     pub no_reclaim: AtomicU32,
 }
 
-/// Callee-saved GPRs, rflags, rsp, return address. No XMM: soft-float.
+/// Callee-saved GPRs, rflags/DAIF, stack pointer, return address.
+/// No XMM: soft-float. aarch64 overlays x19-x24 on the first six words
+/// and keeps x25-x29 in `extra` (DESIGN §7.5). The 40-byte tail is
+/// unused on x86_64; both ports share one layout so vibeos-core stays
+/// free of `cfg(target_arch)` (ROADMAP §10.3).
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CpuContext {
@@ -347,7 +429,17 @@ pub struct CpuContext {
     pub rflags: u64,
     pub rsp: u64,
     pub rip: u64,
+    pub extra: [u64; 5],
 }
+
+/// PSTATE.I / SPSR.I: IRQs masked when set.
+pub const DAIF_I: u64 = 1 << 7;
+/// PSTATE.F.
+pub const DAIF_F: u64 = 1 << 6;
+/// PSTATE.A.
+pub const DAIF_A: u64 = 1 << 8;
+/// PSTATE.D.
+pub const DAIF_D: u64 = 1 << 9;
 
 impl CpuContext {
     pub const RBX: usize = 0;
@@ -359,6 +451,21 @@ impl CpuContext {
     pub const RFLAGS: usize = 48;
     pub const RSP: usize = 56;
     pub const RIP: usize = 64;
+    pub const EXTRA: usize = 72;
+    pub const X19: usize = Self::RBX;
+    pub const X20: usize = Self::RBP;
+    pub const X21: usize = Self::R12;
+    pub const X22: usize = Self::R13;
+    pub const X23: usize = Self::R14;
+    pub const X24: usize = Self::R15;
+    pub const X25: usize = 72;
+    pub const X26: usize = 80;
+    pub const X27: usize = 88;
+    pub const X28: usize = 96;
+    pub const X29: usize = 104;
+    pub const DAIF: usize = Self::RFLAGS;
+    pub const SP: usize = Self::RSP;
+    pub const LR: usize = Self::RIP;
 
     pub const fn empty() -> Self {
         Self {
@@ -371,7 +478,16 @@ impl CpuContext {
             rflags: RFLAGS_RESERVED1,
             rsp: 0,
             rip: 0,
+            extra: [0; 5],
         }
+    }
+
+    pub fn irq_word_mut(&mut self) -> &mut u64 {
+        &mut self.rflags
+    }
+
+    pub fn stack_ptr(&self) -> u64 {
+        self.rsp
     }
 }
 
@@ -385,9 +501,11 @@ const _: () = {
     assert!(offset_of!(CpuContext, rflags) == CpuContext::RFLAGS);
     assert!(offset_of!(CpuContext, rsp) == CpuContext::RSP);
     assert!(offset_of!(CpuContext, rip) == CpuContext::RIP);
-    assert!(size_of::<CpuContext>() == 72);
+    assert!(offset_of!(CpuContext, extra) == CpuContext::EXTRA);
+    assert!(size_of::<CpuContext>() == 112);
     assert!(size_of::<ThreadId>() == 4);
     assert!(offset_of!(Tcb, fpu) % 16 == 0);
+    assert!(size_of::<Fxsave>() == 528);
 };
 
 /// One slot of the kernel's TCB table (`thread_init`'s `Sched.slots`): null,
@@ -428,20 +546,23 @@ const _: () = {
     assert!(tag(&ThreadState::Dead) == 4);
     assert!(size_of::<ThreadState>() == 24);
     assert!(align_of::<ThreadState>() == 8);
-    assert!(size_of::<Tcb>() == if DEBUG { 1264 } else { 1008 });
     assert!(align_of::<Tcb>() == 16);
     assert!(offset_of!(Tcb, id) == 0);
     assert!(offset_of!(Tcb, state) == 24);
     assert!(offset_of!(Tcb, context) == if DEBUG { 592 } else { 336 });
-    assert!(offset_of!(Tcb, cpu) == if DEBUG { 680 } else { 424 });
-    assert!(offset_of!(Tcb, pid) == if DEBUG { 1256 } else { 1000 });
-    assert!(size_of::<CpuContext>() == 72);
+    // +40 for `CpuContext.extra`, then +8 so `fpu` stays 16-aligned.
+    // +8 `tls_base`, +16 `Fxsave` FPCR/FPSR tail, +8 so `align(16)` holds.
+    assert!(size_of::<Tcb>() == if DEBUG { 1344 } else { 1088 });
+    assert!(offset_of!(Tcb, cpu) == if DEBUG { 720 } else { 464 });
+    assert!(offset_of!(Tcb, pid) == if DEBUG { 1328 } else { 1072 });
+    assert!(size_of::<CpuContext>() == 112);
     assert!(size_of::<TcbSlot>() == size_of::<usize>());
 };
 
 /// SysV: `rsp % 16 == 8` on function entry. `stack_top` must be 16-aligned.
 /// IF is off (`rflags = 0x2`). `schedule` applies [`apply_if_on_resume`]
 /// so a first-run or timer-preempted thread is not stuck tick-deaf.
+/// The aarch64 port builds its first frame through `Arch::prepare`.
 pub fn prepare_thread(ctx: &mut CpuContext, stack_top: u64, entry: u64) {
     assert!(
         stack_top.is_multiple_of(16),
@@ -462,11 +583,14 @@ pub fn prepare_thread(ctx: &mut CpuContext, stack_top: u64, entry: u64) {
 /// therefore enables IF on the incoming thread even if the outgoing
 /// stack still has an open ISR / `InterruptGuard` — expected; the
 /// guard lives on the preempted stack.
-pub fn apply_if_on_resume(rflags: &mut u64, irq_nest: u32) {
+///
+/// On aarch64 the port's `Arch::resume_with_irqs` applies the DAIF
+/// equivalent (I set means IRQs masked).
+pub fn apply_if_on_resume(flags: &mut u64, irq_nest: u32) {
     if irq_nest == 0 {
-        *rflags |= RFLAGS_IF;
+        *flags |= RFLAGS_IF;
     } else {
-        *rflags &= !RFLAGS_IF;
+        *flags &= !RFLAGS_IF;
     }
 }
 
@@ -491,6 +615,14 @@ mod tests {
         }
         assert_eq!(b[..2], [0x7F, 0x03]);
         assert_eq!(b[24..28], [0x80, 0x1F, 0, 0]);
+    }
+
+    #[test]
+    fn fxsave_zero_is_zero() {
+        let t = Fxsave::ZERO;
+        assert_eq!(t.bytes, [0u8; 512]);
+        assert_eq!(t.fpcr, 0);
+        assert_eq!(t.fpsr, 0);
     }
 
     #[test]
@@ -530,7 +662,8 @@ mod tests {
         assert_eq!(offset_of!(CpuContext, rflags), CpuContext::RFLAGS);
         assert_eq!(offset_of!(CpuContext, rsp), CpuContext::RSP);
         assert_eq!(offset_of!(CpuContext, rip), CpuContext::RIP);
-        assert_eq!(size_of::<CpuContext>(), 72);
+        assert_eq!(offset_of!(CpuContext, extra), CpuContext::EXTRA);
+        assert_eq!(size_of::<CpuContext>(), 112);
     }
 
     #[test]

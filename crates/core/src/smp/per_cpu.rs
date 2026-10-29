@@ -234,6 +234,9 @@ pub struct PerCpu {
     /// This CPU's view in `per_cpu_init`'s separate array, the only
     /// per-CPU state another CPU reads.
     pub remote: &'static PerCpuRemote,
+    /// Overflow-stack top (aarch64 VBAR stub). After `remote` so that
+    /// offset stays fixed (C-PERCPU).
+    pub overflow_sp: u64,
 }
 
 // SAFETY: invariant I43 and invariant I21, established by the view split
@@ -275,6 +278,7 @@ impl PerCpu {
             fp_owner: crate::fpu::NO_OWNER,
             syscall_scratch: 0,
             remote,
+            overflow_sp: 0,
         }
     }
 
@@ -288,6 +292,7 @@ impl PerCpu {
     /// end of every `&mut PerCpu` scope; a run-queue change made outside
     /// one leaves the published length stale until the next scope ends.
     pub fn publish_runq_len(&self) {
+        // Relaxed: a published hint; pairs with nothing.
         self.remote
             .runq_len
             .store(self.runq.len(), Ordering::Relaxed);
@@ -313,10 +318,11 @@ const _: () = {
 const _: () = {
     use core::mem::{align_of, size_of};
     const DEBUG: bool = cfg!(debug_assertions);
-    assert!(size_of::<PerCpu>() == if DEBUG { 1872 } else { 1104 });
+    assert!(size_of::<PerCpu>() == if DEBUG { 1920 } else { 1152 });
+    assert!(offset_of!(PerCpu, runq) == 184);
+    assert!(offset_of!(PerCpu, remote) == if DEBUG { 1904 } else { 1136 });
+    assert!(offset_of!(PerCpu, overflow_sp) == if DEBUG { 1912 } else { 1144 });
     assert!(align_of::<PerCpu>() == 8);
-    assert!(offset_of!(PerCpu, runq) == 144);
-    assert!(offset_of!(PerCpu, remote) == if DEBUG { 1864 } else { 1096 });
     assert!(size_of::<PerCpuRemote>() == 256);
     assert!(align_of::<PerCpuRemote>() == 64);
     assert!(offset_of!(PerCpuRemote, apic_id) == 168);

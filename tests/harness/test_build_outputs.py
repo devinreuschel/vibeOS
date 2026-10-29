@@ -125,6 +125,27 @@ class NamedOutputsTest(unittest.TestCase):
         self.assertEqual(isos, [default_iso(v) for v in VARIANTS])
         self.assertEqual(db.variables["KERNEL_ELF"], "build/kernels/vibeos-default.elf")
 
+    def test_aarch64_elides_x86_only_variants(self) -> None:
+        # ROADMAP §11.7: aarch64 prebuilt is default + ktest; gp_test is x86.
+        proc = subprocess.run(
+            ["make", "-pRrq", "-f", "Makefile", "ARCH=aarch64", ":"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        db = parse_db(proc.stdout)
+        elfs = db.variables["KERNEL_ELFS"].split()
+        self.assertEqual(
+            elfs,
+            [
+                "build/kernels/vibeos-default.elf",
+                "build/kernels/vibeos-panic.elf",
+                "build/kernels/vibeos-ktest.elf",
+            ],
+        )
+        self.assertNotIn("build/kernels/vibeos-gp.elf", elfs)
+
     def test_iso_reads_only_its_own_elf(self) -> None:
         db = make_db()
         for v in VARIANTS:

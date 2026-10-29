@@ -88,6 +88,14 @@ impl UserFrame {
         f.orig_rax = u64::MAX;
         f
     }
+
+    /// A successful `execve`'s frame: [`new_user`] plus the syscall
+    /// number the exit is still returning from. `new_user` writes -1.
+    pub const fn exec_from(rip: u64, rsp: u64, nr: u64) -> Self {
+        let mut f = Self::new_user(rip, rsp);
+        f.orig_rax = nr;
+        f
+    }
 }
 
 /// Whether the syscall exit may leave `f` through `sysretq`, as Linux
@@ -324,6 +332,14 @@ mod tests {
     }
 
     #[test]
+    fn exec_from_keeps_syscall_nr() {
+        let f = UserFrame::exec_from(0x40_0000, 0x7fff_f000, 59);
+        assert!(sysret_ok(&f));
+        assert_eq!(f.orig_rax, 59);
+        assert_eq!((f.rip, f.rcx, f.rsp), (0x40_0000, 0x40_0000, 0x7fff_f000));
+    }
+
+    #[test]
     fn sysret_ok_rule() {
         let base = UserFrame::new_user(0x40_0000, 0x7fff_f000);
         assert!(sysret_ok(&base));
@@ -457,7 +473,9 @@ mod tests {
                 assert_eq!(sig, SIGSEGV, "error {e:#x}");
                 si_code
             }
-            Ring3Action::NotRing3 => panic!("error {e:#x} is not a ring-3 fault"),
+            Ring3Action::NotRing3 | Ring3Action::Syscall | Ring3Action::StepOver => {
+                panic!("error {e:#x} is not a ring-3 fault")
+            }
         };
         assert_eq!(code(0x0), SEGV_MAPERR);
         assert_eq!(code(0x2), SEGV_MAPERR);

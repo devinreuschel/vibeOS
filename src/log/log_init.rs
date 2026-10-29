@@ -63,6 +63,7 @@ fn cpu_index() -> usize {
 }
 
 fn runtime() -> Level {
+    // Acquire: pairs with the Release store in `set_max_level`.
     Level::from_u8(RUNTIME.load(Ordering::Acquire)).unwrap_or(DEFAULT_RUNTIME_MAX)
 }
 
@@ -113,10 +114,12 @@ pub unsafe fn with_logger_unlocked<R>(f: impl FnOnce(&Logger<RING_CAP, MSG_CAP>)
 
 /// Whether this CPU is inside `log_fmt`. IF=0 callers only.
 pub fn is_emitting() -> bool {
+    // Relaxed: this CPU's own slot, read with IF=0; pairs with nothing.
     EMITTING[cpu_index()].load(Ordering::Relaxed)
 }
 
 pub fn set_max_level(max: Level) {
+    // Release: pairs with the Acquire load in `runtime`.
     RUNTIME.store(max as u8, Ordering::Release);
     with_logger(|l| l.filter.set(max));
 }
@@ -166,10 +169,13 @@ pub fn log_fmt(level: Level, args: fmt::Arguments<'_>) {
     }
     let _irq = InterruptGuard::enter();
     let i = cpu_index();
+    // Acquire: pairs with the Release store that ends `log_fmt`.
+    // Relaxed on failure: the slot is busy and the record dropped; pairs with nothing.
     if EMITTING[i]
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
+        // Relaxed: a count; pairs with nothing.
         REENTRY_DROPS.fetch_add(1, Ordering::Relaxed);
         return;
     }
@@ -200,18 +206,22 @@ pub fn log_fmt(level: Level, args: fmt::Arguments<'_>) {
     // cannot split it (ROADMAP §10.2, F138).
     let sent = crate::serial::Serial::try_write_bytes(buf.get(..=n).unwrap_or(&[]));
     if !sent {
+        // Relaxed: a count; pairs with nothing.
         SINK_DROPS.fetch_add(1, Ordering::Relaxed);
     }
+    // Release: pairs with the next emit's Acquire compare-exchange above.
     EMITTING[i].store(false, Ordering::Release);
 }
 
 /// Records whose serial copy the try-lock sink dropped.
 pub fn sink_drops() -> u64 {
+    // Relaxed: a count; pairs with nothing.
     SINK_DROPS.load(Ordering::Relaxed)
 }
 
 /// Records `log_fmt` dropped on re-entry from its own CPU.
 pub fn reentry_drops() -> u64 {
+    // Relaxed: a count; pairs with nothing.
     REENTRY_DROPS.load(Ordering::Relaxed)
 }
 

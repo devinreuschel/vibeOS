@@ -18,7 +18,7 @@ adopting it re-plans this table. Kernel regions are fixed, not discovered, excep
 | `0x0000_0000_0000_0000` – `0x0000_7FFF_FFFF_FFFF` | 128 TiB | User address space, one PML4 per process (`AddressSpace`), below `USER_END`. Page 0 is never mapped (`NULL_GUARD_LEN`). The top 4 KiB page is never mapped either: user mappings end at `USER_MAP_END` (`0x0000_7FFF_FFFF_F000`), which the ELF loader and every address-space range check use, so a `syscall` in the last mappable page returns to a canonical RIP. The syscall exit still sends a non-canonical saved RIP to `SIGSEGV` (§5.10 rule 2). Each user PML4 copies the kernel's PML4[256..512) at creation, so the whole kernel half stays mapped, supervisor-only, while ring 3 runs: no KPTI (ROADMAP §18.3, F024, F133). |
 | `0x0000_0000_0000_0000` – `0x0000_0000_2000_0000` | 512 MiB | Low identity window, kernel PML4 only (user PML4s do not copy slot 0), until `smp: done`: the first 2 MiB as 4 KiB pages, the rest 2 MiB pages, all GLOBAL, writable and NX except the trampoline page. From `smp: done` only the trampoline page stays: 4 KiB, read-only, executable, not global. |
 | *hole* | | Non-canonical. Any pointer here is a bug. |
-| Limine's HHDM offset +, inside the slot `0xFFFF_8000_0000_0000` – `0xFFFF_C000_0000_0000` | 64 TiB slot; today `map_end` ≤ 8 GiB, plus leaves added above it | Physmap, `virt = phys + ` the HHDM offset, discovered at boot (below the table); today the constant `HHDM_BASE`, which `boot::capture` asserts Limine's offset equals. 2 MiB pages up to `map_end`. Above it: 4 KiB leaves from `acpi_init::map_gap` (no cap), and write-back leaves for a claimed BAR that overlaps a framebuffer from `paging_init::ensure_physmap_wb` (below `PHYSMAP_CAP`). The physmap never leaves its slot (below the table). |
+| Limine's HHDM offset +, inside the slot `0xFFFF_8000_0000_0000` – `0xFFFF_C000_0000_0000` | 64 TiB slot | Physmap, `virt = phys + ` the HHDM offset, discovered at boot (below the table) and stored in `BootInfo.hhdm_offset`. Only the RAM-typed ranges of the boot memory map, sorted and coalesced, each span rounded inward to 4 KiB, largest page that span allows (1 GiB where the CPU has it), except the kernel image's physical span at 4 KiB. A device-tree `no-map` range is left out of those ranges. Device MMIO is `ioremap`; firmware tables and framebuffers outside RAM are `memremap`. The physmap never leaves its slot (below the table). |
 | `0xFFFF_C000_0000_0000` – `0xFFFF_C000_0400_0000` | 64 MiB | Kernel heap. Starts at 1 MiB mapped and grows. Planned (ROADMAP §12.6): the region's size is set at boot from installed memory, up to the 16 TiB below the KVA region, so the heap can grow as far as RAM does ([§4.4](#44-kernel-heap)). |
 | `0xFFFF_D000_0000_0000` – `0xFFFF_D010_0000_0000` | 64 GiB | Kernel VA allocator: guarded stacks, `vmap`, large transient mappings. |
 | `0xFFFF_E000_0000_0000` – `0xFFFF_E000_1000_0000` | 256 MiB | `ioremap` window for device MMIO that should not be reached through the physmap. Today a bump allocator that never frees a mapping; a failed map unmaps what it mapped and gives its reservation back, unless a leaf it did not map refused it or it added a page table: then the cursor stays past that VA, so no later `ioremap` gets it and fails the same way (`ioremap_failure_returns_va`). Planned (ROADMAP §20.1): §4.5's range allocator over its slot, with `iounmap`. Its slot ends at `0xFFFF_EA00_0000_0000` (10 TiB); ROADMAP §20.1 sizes the window inside it. |
@@ -70,9 +70,8 @@ protocol says "may vary between boots, including for randomisation", and which a
 not assume". The kernel adopts that offset as its own physmap base, so a physical address has the
 same alias before and after its `mov cr3`, and reads it once into `BootInfo`; every physical-to-virtual
 translation uses that one value. `boot::capture` checks that the HHDM offset lies in the physmap's
-slot (below) and halts with a named reason if it does not. Rule; not yet enforced:
-`paging_init::HHDM_BASE` is a constant, and `boot::capture` asserts that Limine's offset equals it
-(ROADMAP §11.1). ROADMAP §18.2 later draws the other bases from entropy too.
+slot (below) and halts with `vibeOS: limine: hhdm offset outside physmap slot` if it does not.
+ROADMAP §18.2 later draws the other bases from entropy too.
 
 Planned (ROADMAP §25.4, §26.4): the kernel base and the HHDM offset have two sources, Limine's
 responses and the image's own direct entry, which every boot without Limine takes. The direct entry,
@@ -89,59 +88,52 @@ every later kernel.
 The physmap's slot is `0xFFFF_8000_0000_0000` – `0xFFFF_C000_0000_0000` on x86_64 (aarch64: §11.2).
 Limine's `randomise_hhdm_base` (ROADMAP §18.2) raises the offset above the slot's base by a draw in
 1 GiB steps below 2^(VA bits − 3), 32 TiB with 48-bit VAs, so RAM that ends at or below 32 TiB fits
-under every draw and RAM up to 64 TiB fits as the draw allows. Planned (ROADMAP §11.1, §11.2): the
-physmap builder leaves a RAM-typed range whose alias would pass the slot's end out of the physmap and
-the buddy, with the registered marker `vibeOS: pmm: <n> MiB past the physmap slot ignored`, as Linux
-drops RAM past `MAXMEM`, and hot-added RAM past it is refused the same way (ROADMAP §27.6). One
-`vibeos-core` function answers whether a physical range lies in the physmap; the builder and every
-`HhdmPhys` translation use it (ROADMAP §20.1, F136).
+under every draw and RAM up to 64 TiB fits as the draw allows. The physmap builder leaves a
+RAM-typed range whose alias would pass the slot's end out of the physmap and the buddy, with the
+registered marker `vibeOS: pmm: <n> MiB past the physmap slot ignored`, as Linux drops RAM past
+`MAXMEM`, and hot-added RAM past it is refused the same way (ROADMAP §27.6). One `vibeos-core`
+function answers whether a physical range lies in the physmap; the builder and every `HhdmPhys`
+translation use it (ROADMAP §20.1, F136).
 
 The low identity window exists for one reason: an AP starting from SIPI runs in real mode and then
 32-bit protected mode in the trampoline page below 1 MiB (§7.3), so that page must be identity
 mapped and executable. After `smp: done`, `smp_init::init` asserts that the bootstrap thread's stack
 and its own RSP lie outside the window and calls `paging_init::teardown_identity`, which unmaps every
-identity leaf but the trampoline page's and flushes the whole TLB, global entries included, on every
-CPU (§4.3). From then a NULL-plus-offset access from kernel code faults, as it does from user code,
-and no buddy frame has an identity alias. The trampoline page stays mapped, read-only, executable and
-not global, for as long as the kernel CR3 lives.
+identity leaf but the trampoline page's and drops the window's translations, global ones included, on
+every CPU (§4.3). From then a NULL-plus-offset access from kernel code faults, as it does from user
+code, and no buddy frame has an identity alias. The trampoline page stays mapped, read-only, executable
+and not global, for as long as the kernel CR3 lives.
 
-The physmap is capped at 8 GiB (`PHYSMAP_CAP`) regardless of what the memory map says. Some firmware
-describes MMIO BARs as multi-terabyte regions, and walking that to build page tables at boot does not
-finish. `paging_init::physmap_extent` sets `map_end` to the 2 MiB-rounded maximum of the usable-RAM
-end, the kernel image end, each framebuffer's end, and each Limine module's end (the initrd, which
-`fat_init` reads and writes in place), capped at 8 GiB, and ignores raw memory map entries. Limine loads
-modules top-down, so on a guest with RAM past the cap the initrd lies above `map_end`; `install`
-then maps each module's pages above `map_end` at their physmap alias, in 4 KiB leaves where they are
-not 2 MiB aligned, and `fat_init` mounts the initrd only once it finds its first and last byte
-mapped. `acpi_init::map_gap` then adds 4 KiB leaves above `map_end` for ACPI tables (write-back) and
-for the LAPIC, I/O APIC, and HPET (UC), with no cap. RAM above the cap never enters the buddy:
-free-list nodes, page tables, and heap pages are all reached through the physmap after `mov cr3`, so a
-frame past it triple-faults on first touch. The physmap covers a framebuffer only below the cap, so for a
-framebuffer that extends past 8 GiB `fb_init` writes through an unmapped address and boot halts at
-console init (ROADMAP §11.2, F020).
-
-Planned (ROADMAP §11.2): one physmap policy on both architectures. The physmap maps only the
+One physmap policy on both architectures (ROADMAP §11.2). The portable builder maps only the
 RAM-typed ranges of the memory map (usable, bootloader-reclaimable, executable and modules, ACPI
-reclaimable, ACPI NVS), inside its slot, and nothing else. It maps the kernel image's physical span
-at 4 KiB on both architectures, since ROADMAP §18.1 gives that span per-section permissions and a
-live aarch64 block is never split (ROADMAP §11.2); every other range takes the largest page its
-alignment allows. After boot the physmap changes only in ROADMAP §12.1's `debug_mm` build, which maps
-it at 4 KiB and unmaps or remaps a frame by one atomic exchange of its existing leaf. Device MMIO is
-reached only through `ioremap`. Memory the kernel does not own that is not device MMIO (a firmware
-table or an AML `SystemMemory` region outside the RAM-typed ranges, a framebuffer, and a capture
-kernel's view of the crashed kernel's RAM, ROADMAP §25.4) is reached through `memremap`, which maps
-the range in the KVA region through §4.5's allocator with the memory type the range needs: write-back
-on x86_64, where MTRRs keep device memory uncached whatever the page attribute says; on aarch64 the
-EFI memory map's attribute for the range (ROADMAP §20.9), and Device through `ioremap` where no map
-describes it, as Linux's `acpi_os_ioremap` does; for a framebuffer, the type ROADMAP §11.1 gives its
-location; for the crashed kernel's RAM, write-back. `memunmap` frees the range after §4.5's
-shootdown. A firmware region described as terabytes of MMIO then costs nothing, which
-removes the reason for the cap, so the cap goes and RAM above 8 GiB joins the buddy. Rejected:
-keeping x86_64's whole-range physmap with in-place UC patches beside aarch64's RAM-only one, which
-would leave the portable page-table code two policies for one primitive (AGENTS.md rule 10) and keeps
-the UC-alias bug class (F104) alive. Rejected: a physmap leaf added when a firmware table is first
-read, which allocates page tables at run time under `PT`, is always write-back, and aliases another
-region for an address past the slot.
+reclaimable, ACPI NVS), inside its slot, and nothing else. A device-tree `no-map` range is cut out
+of those ranges before the builder sees them, so the CPU is not given a cacheable alias of firmware
+or TEE memory. It sorts those ranges, coalesces overlaps
+and abutments, and rounds each span inward to 4 KiB before choosing a page size. Limine promises
+that alignment and no overlap only for usable and bootloader-reclaimable entries. A partial page
+stays out of the physmap; `physmap_covers` checks each page, and a miss is read through `memremap`.
+It maps the kernel image's physical span at 4 KiB on both architectures, since ROADMAP §18.1 gives
+that span per-section permissions and a live aarch64 block is never split; every other span takes
+the largest page its alignment allows (1 GiB where the CPU has `pdpe1gb` or an aarch64 level-1
+block, else 2 MiB, else 4 KiB). After boot the physmap changes only in ROADMAP §12.1's `debug_mm`
+build, which maps it at 4 KiB and unmaps or
+remaps a frame by one atomic exchange of its existing leaf. Device MMIO is reached only through
+`ioremap` (PCD + PWT on x86_64, Device-nGnRE on aarch64). Memory the kernel does not own that is not
+device MMIO (a firmware table or an AML `SystemMemory` region outside the RAM-typed ranges, a
+framebuffer, and a capture kernel's view of the crashed kernel's RAM, ROADMAP §25.4) is reached
+through `memremap`, which maps the range in the KVA region through §4.5's allocator with the memory
+type the range needs: write-back on x86_64, where MTRRs keep device memory uncached whatever the page
+attribute says; on aarch64 the EFI memory map's attribute for the range (ROADMAP §20.9), and Device
+through `ioremap` where no map describes it, as Linux's `acpi_os_ioremap` does; for a framebuffer,
+the type ROADMAP §11.1 gives its location; for the crashed kernel's RAM, write-back. `memunmap` frees
+the range after §4.5's shootdown. `Fb::new` refuses a framebuffer it cannot reach, and the console
+falls back to serial with `vibeOS: fb: unreachable` (F020). A firmware region described as terabytes
+of MMIO costs nothing, so RAM above 8 GiB joins the buddy. Rejected: keeping x86_64's whole-range
+physmap with in-place UC patches beside aarch64's RAM-only one, which would leave the portable
+page-table code two policies for one primitive (AGENTS.md rule 10) and keeps the UC-alias bug class
+(F104) alive. Rejected: a physmap leaf added when a firmware table is first read, which allocates
+page tables at run time under `PT`, is always write-back, and aliases another region for an address
+past the slot.
 
 ## 4.2 Physical memory: buddy allocator
 
@@ -259,20 +251,26 @@ The kernel builds its own PML4 from buddy frames rather than editing Limine's. C
 time:
 
 1. Kernel image, mapped per section with correct permissions.
-2. Physmap over `[0, map_end)` at the HHDM offset, using 2 MiB pages.
+2. Physmap over the coalesced RAM-typed ranges at the HHDM offset, each rounded inward to 4 KiB:
+   1 GiB where the CPU and alignment allow, else 2 MiB, else 4 KiB, and the kernel image's physical
+   span at 4 KiB. No MMIO, framebuffer, firmware hole, or device-tree `no-map` range.
 3. Low identity window, 512 MiB: the first 2 MiB as 4 KiB pages, with the trampoline page (§7.3)
    read-only, executable and not global, and the rest 2 MiB pages. `paging_init::teardown_identity`
    removes all of it but the trampoline page after `smp: done` (§4.1).
 4. The bootloader stack window, duplicated out of Limine's active tables so `_start`'s own stack keeps
    working across the `mov cr3`.
 
-Then set `EFER.NXE` if it is not already on, load CR3, and print `paging: cr3 ok`. Immediately after,
-`acpi_init` patches the physmap PTEs covering the LAPIC, I/O APIC, and HPET to PCD + PWT. An address
-above `map_end` first gets fresh 4 KiB UC leaves (`map_gap`). Inside `map_end`,
-`Mapper::patch_physmap_uc` marks the whole covering 2 MiB leaf UC without splitting it, so RAM that
-shares the leaf becomes UC too, and its walk can skip a trailing leaf of an unaligned range (ROADMAP
-§11.2, F104). Planned (ROADMAP §11.2): these devices move to `ioremap`, the physmap maps no device
-memory, and this patch and `map_gap` are deleted (§4.1).
+Then set `EFER.NXE` if it is not already on, load CR3, and print `paging: cr3 ok`. On aarch64 that
+load is `TTBR1_EL1`, and the marker is `vibeOS: paging: ttbr ok`. Limine's global entries can still
+be cached at a different block size, so the install points TTBR0 at a temporary identity map of the
+switch sequence and drops the local TLB, then from that map writes a reserved empty TTBR1,
+`tlbi vmalle1`, `dsb nsh`, `isb`, then the new root. TTBR0 is pointed at an
+empty root and the local TLB is invalidated again before `install` returns, so the identity map does
+not survive. Immediately after,
+`acpi_init` ioremaps the LAPIC, I/O APIC, and HPET pages (PCD + PWT), and on x86_64 a
+SystemMemory FADT reset or sleep-control page that the physmap does not cover. The portable `Mapper` is the
+only writer of live entries and refuses a live change of output address, memory type, size, or
+Contiguous bit, and nG→global, unless the leaf was invalidated first (ROADMAP §11.2).
 
 The kernel tables are reached only through `paging_init::current_mapper()`, which takes the PT lock
 and returns a `MapperGuard` that holds it for as long as the guard lives and derefs to the `Mapper`
@@ -312,9 +310,10 @@ scanout is a later polish pass; double buffering is also parked (ROADMAP §5.1).
 
 - `invlpg` after any single-PTE edit, including MMIO attribute patches.
 - The identity teardown (§4.1) unmaps its leaves under PT, dropping it at least every 64 leaves
-  (§2.9 rule 2), then flushes the whole TLB, global entries included, on this CPU (a `CR4.PGE`
-  toggle, or a CR3 reload when PGE is clear) and on every other online CPU through
-  `ipi_init::call_mask`, before anything relies on VA 0 faulting.
+  (§2.9 rule 2), then drops the window's translations, global ones included, on this CPU and on
+  every other online CPU through `ipi_init::call_mask`, before anything relies on VA 0 faulting:
+  one `invlpg` per leaf `paging_init::install` mapped there, 512 of 4 KiB and 255 of 2 MiB, since
+  no CR4 write follows `arch::cpu::init_control_regs` (§11.4) to toggle `CR4.PGE`.
 - Kernel mappings are `GLOBAL`, and every CPU sets `CR4.PGE` (`arch::cpu::init_control_regs`,
   §11.4), so they survive a CR3 reload. Unmapping one requires a shootdown on every online CPU
   before the VA or the frame behind it can be reused (§2.4). See [section 7.9](SMP.md#79-tlb-shootdown).
@@ -684,8 +683,7 @@ is the second.
   aarch64 kernel runs on (thread, idle, and overflow stacks) to have one size, 16 KiB. x86_64 needs no
   test, since `#DF` switches to its IST stack (§5.1), and its `#DF` handler reports stack overflow
   when CR2 lies in the guard of the stack the interrupted code ran on; it uses the same layout, so
-  stack allocation has one path. Rule; not yet enforced: ROADMAP §11.3. Today a guarded stack of *n*
-  pages reserves *n+1* pages of VA, maps the upper *n*, and has no alignment.
+  stack allocation has one path. `Kva::alloc_guarded` reserves `2S` at that alignment.
 - A `GuardedStack` (`vibeos::thread::GuardedStack`, re-exported as `kva_init::GuardedStack`) is a
   move-only handle with private fields; only `kva_init::alloc_guarded_stack` builds one, and
   `free_stack` takes it by value.
@@ -760,7 +758,12 @@ stack's size minus 4 KiB; the planted boot, `stack_depth_planted`'s 13 KiB recur
 stack, proves the check fails. The deepest 16 KiB path measured when the check landed was a user
 spawn (`proc_init::spawn_image`, `start_loaded`, `thread_init::spawn_inner` and its `Tcb`,
 `user_init::new_space`) with an interrupt on top, about 11.9 KiB, after the FAT cluster buffers moved
-into the volume and virtio-blk's `pump` shrank to a 4-completion batch.
+into the volume and virtio-blk's `pump` shrank to a 4-completion batch. aarch64's 16 KiB bootstrap
+runs the same `/hello` spawn; `spawn_inner` holds the new stack as a `TryBox<GuardedStack>`
+and `kva_init::alloc_boxed_stack` writes the frame tokens in that box, so the handle's 520
+bytes and the `MAX_STACK_PAGES` array are not on that frame. `spawn_inner` writes the `Tcb`
+in its `TryBox`, and virtio-blk `harvest` finishes `PUMP_BATCH` completions at a time, same as
+`pump`.
 
 ## 4.6 What comes later
 

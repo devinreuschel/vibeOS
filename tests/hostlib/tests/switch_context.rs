@@ -1,16 +1,21 @@
-//! `switch_context_roundtrip`: the kernel's x86_64 switch assembly, run on the
-//! host (ROADMAP §10.2, F142).
+//! `switch_context_roundtrip`: the kernel's switch assembly, run on the
+//! host (ROADMAP §10.2, F142; §11.4 on aarch64).
 //!
 //! `vibeos-core` carries no assembly, so this test includes the port's
-//! `src/arch/x86_64/switch.rs` itself, with `cli` and `sti` supplied empty,
-//! since ring 3 cannot run them. The assembly uses ELF directives and
-//! unprefixed symbol names, as the kernel's object format does, so the test
-//! builds only on x86_64 Linux; other hosts build an empty test binary.
-#![cfg(all(target_arch = "x86_64", target_os = "linux"))]
+//! `src/arch/*/switch.rs` itself, with IRQ masking supplied empty, since
+//! ring 3 cannot run `cli`/`sti` or `msr daif*`. The assembly uses ELF
+//! directives and unprefixed symbol names, so the test builds only on
+//! Linux for the matching arch; other hosts build an empty test binary.
+#![cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_os = "linux"
+))]
 
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
-use vibeos::thread::{CpuContext, prepare_thread};
+use vibeos::thread::CpuContext;
+#[cfg(target_arch = "x86_64")]
+use vibeos::thread::prepare_thread;
 
 /// `switch.rs`'s `cli`: none on a host.
 macro_rules! switch_cli {
@@ -26,7 +31,21 @@ macro_rules! switch_sti {
     };
 }
 
+/// Host cannot `mrs daif` at EL0 (SIGILL). The kernel defines this as
+/// `mrs x2, daif`.
+#[cfg(target_arch = "aarch64")]
+macro_rules! switch_read_daif {
+    () => {
+        "mov x2, xzr"
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
 #[path = "../../../src/arch/x86_64/switch.rs"]
+mod switch;
+
+#[cfg(target_arch = "aarch64")]
+#[path = "../../../src/arch/aarch64/switch.rs"]
 mod switch;
 
 use switch::switch_context;
@@ -70,8 +89,18 @@ fn switch_context_roundtrip() {
     // worker, and both contexts are locals this frame owns; the worker
     // switches straight back; established here.
     unsafe {
-        prepare_thread(&mut *worker_p, top, worker_entry as *const () as u64);
-        ((*worker_p).rsp as *mut u64).write_volatile(0);
+        #[cfg(target_arch = "x86_64")]
+        {
+            prepare_thread(&mut *worker_p, top, worker_entry as *const () as u64);
+            ((*worker_p).rsp as *mut u64).write_volatile(0);
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            // `prepare_thread` subtracts 8 for the SysV x86 red zone. AAPCS64
+            // wants a 16-aligned SP at the callee; LR is the entry.
+            (*worker_p).rip = worker_entry as *const () as u64;
+            (*worker_p).rsp = top;
+        }
         switch_context(main_p, worker_p);
     }
     assert_eq!(FLAG.load(Ordering::SeqCst), 0xC0FFEE);

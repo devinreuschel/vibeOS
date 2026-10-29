@@ -6,7 +6,7 @@ use vibeos::proc::wait_exited;
 
 use crate::fat_init;
 use crate::file_init;
-use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, x86_user_code};
 use crate::ktest::{Outcome, fid};
 
 /// `unlink` drops the name from the directory the path resolved to: a
@@ -39,7 +39,7 @@ fn unlink_drops() -> Result<(), &'static str> {
 // and write 4 bytes; read 8 zero bytes from /dev/zero; read 1 to 16
 // bytes from /dev/random, sleeping through EAGAIN a bounded number of
 // times; close each. Exit 0, or the number of the step that failed.
-user_code!(
+x86_user_code!(
     VFS_DEV_NODES,
     "
     lea rdi, [rip + 90f]

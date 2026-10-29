@@ -18,9 +18,9 @@ use vibeos::lock::RANK_DEVICE;
 use vibeos::pic::{PIC_EOI, PIC1_CMD};
 use vibeos::vectors;
 
-use crate::acpi_init;
 use crate::apic_init;
 use crate::arch;
+use crate::machine_init;
 use crate::per_cpu_init;
 use crate::sync_init::SpinMutex;
 use crate::x86;
@@ -101,11 +101,13 @@ pub fn init() -> bool {
     match routed {
         Some(gsi) => {
             apic_init::unmask_gsi(gsi);
+            // Release: pairs with the Acquire load in `console::ktest::hooks::gsi`.
             GSI.store(gsi, Ordering::Release);
         }
         None if !apic_init::owns_tick() => {
             // PIT path: 8259 still live via LINT0 ExtINT.
             arch::pic::unmask(1);
+            // Release: pairs with the Acquire load in `console::ktest::hooks::pic_fallback`.
             PIC_FALLBACK.store(true, Ordering::Release);
         }
         None => {
@@ -114,16 +116,17 @@ pub fn init() -> bool {
             crate::marker!("vibeOS: kbd: no ioapic route");
         }
     }
+    // Release: pairs with the Acquire load in `console::ktest::hooks::kbd_live`.
     LIVE.store(true, Ordering::Release);
     true
 }
 
 fn route_keyboard() -> Option<u32> {
-    let info = acpi_init::info()?;
-    let madt = info.madt.as_ref()?;
-    let isos = &madt.isos[..madt.iso_count];
+    let desc = machine_init::info()?;
+    let isos = desc.irq_overrides();
     let gsi = apic::gsi_for_isa_irq(1, isos);
     let (trig, pol) = iso_irq1(isos, gsi);
+    // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
     let dest = per_cpu_init::cpu(0)
         .map(|c| c.apic_id.load(Ordering::Relaxed) as u8)
         .unwrap_or(0);

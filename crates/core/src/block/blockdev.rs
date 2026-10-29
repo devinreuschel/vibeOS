@@ -124,11 +124,12 @@ impl DiskSeq {
 
     /// The next id. `NoMem` once the counter is exhausted, never a reuse.
     pub fn next(&self) -> Result<u64, BlockError> {
-        // Relaxed: the id orders nothing; only its uniqueness matters, which
-        // the read-modify-write gives.
+        // Relaxed: pairs with nothing. Only the id's uniqueness matters,
+        // which the read-modify-write gives.
         let mut v = self.next.load(statics::Ordering::Relaxed);
         loop {
             let n = v.checked_add(1).ok_or(BlockError::NoMem)?;
+            // Relaxed both ways: only the id's uniqueness matters; pairs with nothing.
             match self.next.compare_exchange_weak(
                 v,
                 n,
@@ -405,7 +406,8 @@ impl BlockRef {
     }
 
     fn set_published(&self, on: bool) {
-        // Release: a `kill` that reads `false` sees the removal before it.
+        // Release: pairs with the Acquire load in `kill`, so a `kill` that
+        // reads `false` sees the removal before it.
         self.0.published.store(on, Ordering::Release);
     }
 }
