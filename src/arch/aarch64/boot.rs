@@ -139,6 +139,7 @@ pub fn early_init() {
     super::percpu::set_tpidr_el2(cpu::el2_vhe());
     cpu::check_isa_floor();
     cpu::set_pan();
+    cpu::clear_tpidrro_el0();
     vectors::init_early();
 }
 

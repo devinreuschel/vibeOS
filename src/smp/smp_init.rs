@@ -1352,6 +1352,7 @@ fn finish_aarch64_failure(
 extern "C" fn ap_entry_aarch64(cpu: *mut PerCpu) -> ! {
     arch::aarch64::cpu::cli();
     arch::aarch64::cpu::set_pan();
+    arch::aarch64::cpu::clear_tpidrro_el0();
     // SAFETY: `cpu` is this AP's slot; the BSP's `with_cpu` ended before
     // CPU_ON (I43, I21, established at `smp_init::start_one_aarch64`).
     let cpu = unsafe { &mut *cpu };

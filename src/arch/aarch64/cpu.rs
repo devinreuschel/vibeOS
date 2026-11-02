@@ -263,6 +263,30 @@ pub fn set_pan() {
     unsafe { asm!("msr pan, #1", options(nostack, preserves_flags)) };
 }
 
+/// Zero `TPIDRRO_EL0`, the EL0-readable word the overflow stub stashes its
+/// SP in (DESIGN §11.5 rule 6). Each CPU clears it before it can return to EL0.
+pub fn clear_tpidrro_el0() {
+    // SAFETY: `TPIDRRO_EL0` is writable at EL1; established here.
+    unsafe {
+        asm!(
+            "msr tpidrro_el0, xzr",
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+}
+
+/// `TPIDRRO_EL0` as this CPU holds it.
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(dead_code, reason = "in-guest TPIDRRO check (kernel_tests)")
+)]
+pub fn tpidrro_el0() -> u64 {
+    let v: u64;
+    // SAFETY: `TPIDRRO_EL0` is readable at EL1; established here.
+    unsafe { asm!("mrs {0}, tpidrro_el0", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
 /// Clear PAN for a kernel access to a user VA. Restore with [`set_pan`].
 #[cfg(feature = "kernel_tests")]
 pub fn clear_pan() {
