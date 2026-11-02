@@ -577,7 +577,12 @@ fn handle_sync(frame: &mut TrapFrame, kind: TrapKind) {
         on_eret_breakpoint(frame);
         return;
     }
-    if let Some(fix) = super::uaccess::fixup(frame.elr, untag_user_addr(frame.far)) {
+    let fix = if trap::is_el1_data_abort(frame.esr) {
+        super::uaccess::fixup(frame.elr, untag_user_addr(frame.far))
+    } else {
+        None
+    };
+    if let Some(fix) = fix {
         frame.elr = fix;
         return;
     }

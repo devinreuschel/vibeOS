@@ -38,6 +38,24 @@ const fn esr_iss(esr: u64) -> u32 {
     (esr & ESR_ISS_MASK) as u32
 }
 
+/// Exception class of a data abort taken at the kernel's own level.
+const EC_DABT_EL1: u8 = 0x25;
+/// Exception class of an instruction abort taken at the kernel's own level.
+const EC_IABT_EL1: u8 = 0x21;
+
+/// A data abort at the kernel's own level (EC 0x25). Only this class may
+/// resume at a user-memory accessor's fixup (PORTABILITY §11.5, the table's
+/// `0x24`, `0x25` row).
+pub const fn is_el1_data_abort(esr: u64) -> bool {
+    esr_ec(esr) == EC_DABT_EL1
+}
+
+/// An abort at the kernel's own level, data (EC 0x25) or instruction (EC
+/// 0x21): what a `catch_dabt` window arms for.
+pub const fn is_el1_abort(esr: u64) -> bool {
+    matches!(esr_ec(esr), EC_DABT_EL1 | EC_IABT_EL1)
+}
+
 /// Slot kind: bits [1:0] of the 16-entry index.
 const fn slot_group(slot: u8) -> u8 {
     slot & 3
@@ -319,6 +337,22 @@ mod tests {
                 fetch: true
             }
         );
+    }
+
+    #[test]
+    fn el1_aborts_are_their_own_classes_only() {
+        for ec in 0u8..=0x3F {
+            // The ISS varies too: the class alone decides.
+            for iss in [0, 0x0000_0040, 0x0000_0005] {
+                let e = esr_iss(ec, iss);
+                assert_eq!(is_el1_data_abort(e), ec == 0x25, "data ec {ec:#x}");
+                assert_eq!(
+                    is_el1_abort(e),
+                    ec == 0x21 || ec == 0x25,
+                    "abort ec {ec:#x}"
+                );
+            }
+        }
     }
 
     #[test]
