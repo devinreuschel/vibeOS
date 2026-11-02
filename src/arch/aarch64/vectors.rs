@@ -148,10 +148,30 @@ global_asm!(
     "    b vibeos_overflow",
     "    .balign 0x80",
     ".endm",
-    "    vibeos_slot_el1 0",
-    "    vibeos_slot_el1 1",
-    "    vibeos_slot_el1 2",
-    "    vibeos_slot_el1 3",
+    // Slots 0 to 3 and 12 to 15 are never taken: the kernel runs on SP_ELx,
+    // and EL0 is AArch64 only (PORTABILITY §11.5 rule 1). They dump and halt
+    // without the IRQ, uaccess, or ring-3 paths.
+    ".macro vibeos_slot_halt n",
+    "    vibeos_swap_sp_x0",
+    "    sub x0, x0, #{frame}",
+    "    tbnz x0, #{sbit}, 1f",
+    "    vibeos_swap_sp_x0",
+    "    mov x0, \\n",
+    "    b vibeos_halt_slot",
+    "1:",
+    "    add x0, x0, #{frame}",
+    "    vibeos_swap_sp_x0",
+    "    msr tpidr_el0, x0",
+    "    mov x0, sp",
+    "    msr tpidrro_el0, x0",
+    "    mov x0, \\n",
+    "    b vibeos_overflow",
+    "    .balign 0x80",
+    ".endm",
+    "    vibeos_slot_halt 0",
+    "    vibeos_slot_halt 1",
+    "    vibeos_slot_halt 2",
+    "    vibeos_slot_halt 3",
     "    vibeos_slot_el1 4",
     "    vibeos_slot_el1 5",
     "    vibeos_slot_el1 6",
@@ -160,10 +180,10 @@ global_asm!(
     "    vibeos_slot_el0 9",
     "    vibeos_slot_el0 10",
     "    vibeos_slot_el0 11",
-    "    vibeos_slot_el1 12",
-    "    vibeos_slot_el1 13",
-    "    vibeos_slot_el1 14",
-    "    vibeos_slot_el1 15",
+    "    vibeos_slot_halt 12",
+    "    vibeos_slot_halt 13",
+    "    vibeos_slot_halt 14",
+    "    vibeos_slot_halt 15",
     "vibeos_save_el1:",
     "    stp x2, x3, [sp, #16]",
     "    stp x4, x5, [sp, #32]",
@@ -415,6 +435,29 @@ extern "C" fn vibeos_early_rust(sp: u64, elr: u64, esr: u64, far: u64) -> ! {
         elr,
         esr,
         far
+    );
+    cpu::halt();
+}
+
+/// Dump and halt for a vector slot no kernel path takes (PORTABILITY §11.5
+/// rule 1). The stack test has passed, so the stack has room for this call.
+#[unsafe(no_mangle)]
+extern "C" fn vibeos_halt_slot(slot: u64) -> ! {
+    let far: u64;
+    let esr: u64;
+    let elr: u64;
+    // SAFETY: the syndrome registers are readable at EL1; established here.
+    unsafe {
+        asm!("mrs {0}, far_el1", out(reg) far, options(nomem, nostack, preserves_flags));
+        asm!("mrs {0}, esr_el1", out(reg) esr, options(nomem, nostack, preserves_flags));
+        asm!("mrs {0}, elr_el1", out(reg) elr, options(nomem, nostack, preserves_flags));
+    }
+    crate::marker!(
+        "vibeOS: panic: sync esr={:#x} far={:#x} elr={:#x} slot={}",
+        esr,
+        far,
+        elr,
+        slot
     );
     cpu::halt();
 }
