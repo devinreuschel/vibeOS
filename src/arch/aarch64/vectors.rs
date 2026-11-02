@@ -492,6 +492,10 @@ extern "C" fn vibeos_vector_rust(frame: &mut TrapFrame) {
         }
         _ => handle_sync(frame, kind),
     }
+    // A debug exception or SError between the ELR_EL1 and SPSR_EL1 writes
+    // and the `eret` would overwrite them, so every DAIF bit is set first.
+    // The `eret` restores the interrupted mask from SPSR_EL1.
+    cpu::daif_set_all();
     restore(frame);
 }
 
