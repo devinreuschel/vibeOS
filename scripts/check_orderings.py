@@ -60,7 +60,12 @@ SITE = re.compile(rf"\b\w*Ordering::({NAMES})\b")
 PAIRS = re.compile(r"\bpairs with\s+\S")
 USE = re.compile(r"\buse\b[^;]*;")
 BARE = re.compile(rf"\bOrdering::(?:\*|\{{[^}}]*\b(?:{NAMES})\b|(?:{NAMES})\b)")
-RENAME = re.compile(r"\batomic::(?:\{[^}]*?)?\bOrdering\s+as\s+(\w+)")
+RENAME = re.compile(r"\batomic::(?:Ordering::\{[^}]*?\bself|(?:\{[^}]*?)?\bOrdering)\s+as\s+(\w+)")
+TYPE_ALIAS = re.compile(r"\btype\s+(\w+)\s*=\s*(?:[\w:]*::)?\w*Ordering\s*;")
+ORDERING_ITEM = re.compile(
+    r"\b(?:const|static)\s+(?:mut\s+)?(\w+)\s*:\s*(?:[\w:]*::)?\w*Ordering\b"
+)
+METAVAR_ORDERING = re.compile(r"\w*Ordering::\$")
 # What may follow a `}` that closes a block inside a statement.
 GOES_ON = re.compile(r"\s*(?:[.?,)\]]|else\b)")
 
@@ -181,6 +186,23 @@ def file_errors(rel: str, text: str) -> tuple[list[str], int]:
         elif alias and not alias.group(1).endswith("Ordering"):
             errs.append(f"{rel}:{line}: renames `Ordering` to `{alias.group(1)}`; keep a name "
                         "ending in `Ordering` (ROADMAP §11.7)")
+    # A name bound to an ordering, or a macro metavariable, hides the ordering
+    # from the site rule, so each is an error rather than a site.
+    for m in TYPE_ALIAS.finditer(code):
+        line = line_of(code, m.start())
+        if line - 1 not in skip and not m.group(1).endswith("Ordering"):
+            errs.append(f"{rel}:{line}: renames `Ordering` to `{m.group(1)}`; keep a name "
+                        "ending in `Ordering` (ROADMAP §11.7)")
+    for m in ORDERING_ITEM.finditer(code):
+        line = line_of(code, m.start())
+        if line - 1 not in skip:
+            errs.append(f"{rel}:{line}: binds an ordering to `{m.group(1)}`; write "
+                        "`Ordering::<name>` at each access (ROADMAP §11.7)")
+    for m in METAVAR_ORDERING.finditer(code):
+        line = line_of(code, m.start())
+        if line - 1 not in skip:
+            errs.append(f"{rel}:{line}: names an ordering with a macro metavariable; pass "
+                        "`Ordering::<name>` at the call site (ROADMAP §11.7)")
     return errs, n
 
 

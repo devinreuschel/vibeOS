@@ -169,6 +169,52 @@ class TestFileErrors(unittest.TestCase):
             [],
         )
 
+    def test_self_alias_must_end_in_ordering(self) -> None:
+        e = errs("use core::sync::atomic::Ordering::{self as O};\n")
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("renames `Ordering` to `O`", e[0])
+        text = (
+            "use core::sync::atomic::Ordering::{self as AcqOrdering};\n"
+            "// Acquire: pairs with the Release store in unlock.\n"
+            "X.load(AcqOrdering::Acquire);\n"
+        )
+        self.assertEqual(errs(text), [])
+
+    def test_type_alias_must_end_in_ordering(self) -> None:
+        e = errs("type X = core::sync::atomic::Ordering;\n")
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("renames `Ordering` to `X`", e[0])
+
+    def test_ordering_constant_fails(self) -> None:
+        text = (
+            "// Acquire: pairs with the Release store in unlock.\n"
+            "const ACQ: Ordering = Ordering::Acquire;\n"
+            "X.load(ACQ);\n"
+        )
+        e = errs(text)
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("binds an ordering", e[0])
+        e = errs("static ACQ: AtomicOrdering = AtomicOrdering::Acquire;\n")
+        self.assertIn("binds an ordering", e[-1])
+
+    def test_metavariable_ordering_fails(self) -> None:
+        text = (
+            "macro_rules! load {\n"
+            "    ($x:expr, $o:ident) => { $x.load(Ordering::$o) };\n"
+            "}\n"
+        )
+        e = errs(text)
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("macro metavariable", e[0])
+        text = (
+            "macro_rules! load {\n"
+            "    ($x:expr, $ord:expr) => { $x.load($ord) };\n"
+            "}\n"
+            "// Acquire: pairs with the Release store in unlock.\n"
+            "load!(X, Ordering::Acquire);\n"
+        )
+        self.assertEqual(errs(text), [])
+
     def test_one_line_rule(self) -> None:
         text = (
             "// Acquire:\n"
