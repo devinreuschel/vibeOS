@@ -539,3 +539,22 @@ fn invalidate_runs_break_then_make() {
     assert_eq!(log.dropped(), 0);
     assert_eq!(log.as_slice(), &[Event::BbmBreak(va.0), Event::BbmMake]);
 }
+
+#[test]
+fn mmio_pages_counts_the_pages_a_window_touches() {
+    // A 0x1C-byte window, the PL011's FR at +0x18 included.
+    // Aligned: one page.
+    assert_eq!(mmio_pages(0x0900_0000, 0x1C), Some(1));
+    // Offset that stays inside its page.
+    assert_eq!(mmio_pages(0x0900_0010, 0x1C), Some(1));
+    // Last byte is the page's last byte: still one page.
+    assert_eq!(mmio_pages(0x0900_0FE4, 0x1C), Some(1));
+    // One byte further reaches into the next page.
+    assert_eq!(mmio_pages(0x0900_0FE5, 0x1C), Some(2));
+    // A zero-length window touches no page.
+    assert_eq!(mmio_pages(0x0900_0FF0, 0), Some(0));
+    // The top page of the address space is one page.
+    assert_eq!(mmio_pages(u64::MAX - 0xFFF, 0x1000), Some(1));
+    // A last byte past the top of the address space is refused.
+    assert_eq!(mmio_pages(u64::MAX - 0x10, 0x1C), None);
+}

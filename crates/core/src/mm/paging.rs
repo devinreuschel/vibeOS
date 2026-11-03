@@ -944,6 +944,23 @@ pub const fn mmio_flags() -> PageFlags {
     )
 }
 
+/// Device pages that hold the `span` bytes at physical `base`. `base` need
+/// not be page aligned (a DT `reg` is not), so the window can reach into the
+/// page after its first. `None` when the window's last byte leaves the
+/// 64-bit address space.
+pub const fn mmio_pages(base: u64, span: u64) -> Option<u64> {
+    let Some(span_last) = span.checked_sub(1) else {
+        return Some(0);
+    };
+    let Some(last) = base.checked_add(span_last) else {
+        return None;
+    };
+    match (last >> PAGE_SHIFT).checked_sub(base >> PAGE_SHIFT) {
+        Some(d) => d.checked_add(1),
+        None => None,
+    }
+}
+
 /// Physmap leaf flags: writable, NX, global.
 pub const fn physmap_flags() -> PageFlags {
     PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::GLOBAL | PageFlags::NX)

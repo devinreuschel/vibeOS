@@ -47,6 +47,11 @@ const MMIO_DATA: u64 = 0x00;
 const MMIO_SELECTOR: u64 = 0x08;
 #[cfg(target_arch = "aarch64")]
 const MMIO_DMA: u64 = 0x10;
+/// Bytes from the window's base through its last register this module
+/// touches, the 64-bit DMA address at `MMIO_DMA`. `paging_init` maps the
+/// pages this span reaches, since the base need not be page aligned.
+#[cfg(target_arch = "aarch64")]
+pub const MMIO_SPAN: u64 = MMIO_DMA + 8;
 
 /// Directory entries walked at most: QEMU's machines hold far fewer.
 const DIR_MAX: u32 = 1024;

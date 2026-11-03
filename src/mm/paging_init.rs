@@ -547,42 +547,24 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         let uart = crate::machine_init::info()
             .and_then(|d| d.console_uart())
             .unwrap_or(0x0900_0000);
-        let va = VirtAddr(hhdm_offset().wrapping_add(uart & !0xFFF));
-        let pa = PhysAddr(uart & !0xFFF);
-        // SAFETY: one Device page for the console UART, mapped in the new
-        // root before `set_root`; established here.
-        let uart_map = unsafe {
-            mapper.map_page(
-                va,
-                pa,
-                paging::mmio_flags(),
-                PageSize::Size4K,
-                MapMode::Fresh,
-                &mut alloc,
-            )
-        };
-        if uart_map.is_err() {
+        if !map_device_window(
+            &mut mapper,
+            &mut alloc,
+            uart,
+            crate::serial::raw::PL011_SPAN,
+        ) {
             boot::halt_with("vibeOS: paging: uart map failed");
         }
         let fw = crate::machine_init::info()
             .and_then(|d| d.fw_cfg)
             .map(|d| d.base)
             .unwrap_or(0x0902_0000);
-        let va = VirtAddr(hhdm_offset().wrapping_add(fw & !0xFFF));
-        let pa = PhysAddr(fw & !0xFFF);
-        // SAFETY: one Device page for fw_cfg, mapped in the new root
-        // before `set_root`; established here.
-        let fw_map = unsafe {
-            mapper.map_page(
-                va,
-                pa,
-                paging::mmio_flags(),
-                PageSize::Size4K,
-                MapMode::Fresh,
-                &mut alloc,
-            )
-        };
-        if fw_map.is_err() {
+        if !map_device_window(
+            &mut mapper,
+            &mut alloc,
+            fw,
+            crate::boot::fw_cfg_init::MMIO_SPAN,
+        ) {
             boot::halt_with("vibeOS: paging: fw_cfg map failed");
         }
     }
@@ -713,6 +695,45 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         kernel_data_bytes: data_bytes,
         duplicated_stack_entry: duplicated,
     }
+}
+
+/// Maps the Device pages under the `span` bytes at physical `base` into the
+/// new root. `base` may start mid-page, so the window can reach into the
+/// page after its first. False when the window wraps, an offset overflows,
+/// or a map fails.
+#[cfg(target_arch = "aarch64")]
+fn map_device_window(mapper: &mut Mapper, alloc: &mut BuddyFrames, base: u64, span: u64) -> bool {
+    let Some(pages) = paging::mmio_pages(base, span) else {
+        return false;
+    };
+    let first = base & !(PAGE_SIZE_4K - 1);
+    for k in 0..pages {
+        let Some(off) = k.checked_mul(PAGE_SIZE_4K) else {
+            return false;
+        };
+        let Some(pa) = first.checked_add(off) else {
+            return false;
+        };
+        let Some(va) = hhdm_offset().checked_add(pa) else {
+            return false;
+        };
+        // SAFETY: one Device page of the window, mapped in the new root
+        // before `set_root`; established here.
+        let mapped = unsafe {
+            mapper.map_page(
+                VirtAddr(va),
+                PhysAddr(pa),
+                paging::mmio_flags(),
+                PageSize::Size4K,
+                MapMode::Fresh,
+                alloc,
+            )
+        };
+        if mapped.is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 /// The low identity window's range, virtual and physical alike (DESIGN

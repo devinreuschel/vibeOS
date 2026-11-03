@@ -57,6 +57,11 @@ static HALT_HOOK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 const PL011_DR: u64 = 0x00;
 #[cfg(target_arch = "aarch64")]
 const PL011_FR: u64 = 0x18;
+/// Bytes from the PL011's base through its last register this module
+/// touches, FR (a 32-bit register). `paging_init` maps the pages this span
+/// reaches, since the base need not be page aligned.
+#[cfg(target_arch = "aarch64")]
+pub const PL011_SPAN: u64 = PL011_FR + 4;
 #[cfg(target_arch = "aarch64")]
 const PL011_TXFF: u32 = 1 << 5;
 #[cfg(target_arch = "aarch64")]
