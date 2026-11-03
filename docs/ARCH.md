@@ -78,7 +78,7 @@ and its `InterruptMask`, `CycleCounter`, `ContextSwitch`, `Barriers`,
 `PerCpuBase`, `SyscallAbi` and `Port` impls), `src/arch/aarch64/boot.rs`
 (Limine / Image header, EL2 VHE), `src/arch/aarch64/catch.rs` (`kernel_tests`
 fault catcher), `src/arch/aarch64/cpu.rs` (DAIF, idle `wfi`, RNDR, TLS),
-`src/arch/aarch64/gdt.rs` (overflow stack), `src/arch/aarch64/gic.rs` (GICv2/v3),
+`src/arch/aarch64/gdt.rs` (overflow stack), `src/arch/aarch64/gic.rs` (GICv2/v3), `src/arch/aarch64/gic_common.rs` (GIC state and MMIO), `src/arch/aarch64/gic_its.rs` (GICv3 ITS),
 `src/arch/aarch64/gs.rs` (TPIDR), `src/arch/aarch64/idt.rs` (vector table install),
 `src/arch/aarch64/ipi.rs` (SGI), `src/arch/aarch64/irqchip.rs` (IrqChip),
 `src/arch/aarch64/ktest.rs`, `src/arch/aarch64/ktest_asid.rs`,

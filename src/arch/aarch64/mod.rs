@@ -17,6 +17,8 @@ pub mod catch;
 pub mod cpu;
 pub mod gdt;
 pub(crate) mod gic;
+pub(crate) mod gic_common;
+pub(crate) mod gic_its;
 pub mod gs;
 pub mod idt;
 pub(crate) mod ipi;

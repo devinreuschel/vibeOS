@@ -77,9 +77,9 @@ pub fn send_ipi_all_ex_self(_vec: u8) -> Result<(), IpiError> {
 
 /// # Safety
 /// This CPU's GIC interface is unused; IRQs masked.
-pub unsafe fn enable_ap() {
+pub unsafe fn enable_ap() -> bool {
     // SAFETY: this fn's `# Safety`; established here.
-    unsafe { gic::enable_ap() };
+    unsafe { gic::enable_ap() }
 }
 
 pub fn arm_ap() {

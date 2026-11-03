@@ -1372,7 +1372,11 @@ extern "C" fn ap_entry_aarch64(cpu: *mut PerCpu) -> ! {
     arch::aarch64::cpu::release_debug_os_lock();
     arch::aarch64::cpu::print_exception_level();
     // SAFETY: this CPU's GIC; IRQs masked. established here.
-    unsafe { apic_init::enable_ap() };
+    if !unsafe { apic_init::enable_ap() } {
+        // No redistributor for this CPU: park before `ready`, so the boot
+        // CPU times it out and frees or leaks it as an unready AP.
+        park_lost();
+    }
     apic_init::arm_ap();
     maybe_stall_ap();
     if !claim_online(cpu.cpu_id) {

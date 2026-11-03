@@ -27,9 +27,54 @@ pub const ITS_ITT_ALIGN: u64 = 256;
 /// Size is EventID bits minus one: five bits.
 pub const ITS_SIZE_MAX: u8 = 31;
 
-/// RDbase occupies DW2[50:16] (35 bits).
-const RDBASE_BITS: u32 = 35;
+/// RDbase occupies DW2[51:16] (36 bits): PA[51:16] when PTA=1, or the
+/// processor number in its low 16 bits when PTA=0 (IHI 0069G).
+const RDBASE_BITS: u32 = 36;
 const RDBASE_SHIFT: u32 = 16;
+
+/// MAPC/SYNC RDbase field for one redistributor. With GITS_TYPER.PTA clear
+/// the field is the processor number, GICR_TYPER[23:8]. With PTA set it is
+/// the redistributor's physical address, PA[51:16], given as `redist_pa`.
+pub const fn rdbase_field(pta: bool, gicr_typer: u64, redist_pa: u64) -> u64 {
+    if pta {
+        (redist_pa >> RDBASE_SHIFT) & ((1u64 << RDBASE_BITS) - 1)
+    } else {
+        (gicr_typer >> 8) & 0xFFFF
+    }
+}
+
+/// Entry size in bytes of a GITS_BASER<n> table: Entry_Size (bits [52:48])
+/// is the size minus one (IHI 0069G).
+pub const fn baser_entry_bytes(baser: u64) -> u64 {
+    ((baser >> 48) & 0x1F) + 1
+}
+
+/// DeviceID bits the ITS implements: GITS_TYPER.Devbits (bits [17:13]) plus
+/// one (IHI 0069G).
+pub const fn gits_devbits(typer: u64) -> u32 {
+    (((typer >> 13) & 0x1F) + 1) as u32
+}
+
+/// `true` when `device_id` indexes inside a one-level device table of
+/// `table_bytes` with `entry_bytes` per entry, and fits in the `devbits`
+/// DeviceID bits the ITS implements. A zero size or width refuses every ID.
+pub const fn its_device_fits(
+    device_id: u32,
+    table_bytes: u64,
+    entry_bytes: u64,
+    devbits: u32,
+) -> bool {
+    if entry_bytes == 0 || devbits == 0 {
+        return false;
+    }
+    let entries = table_bytes / entry_bytes;
+    let id_limit = match 1u64.checked_shl(devbits) {
+        Some(v) => v,
+        None => u64::MAX,
+    };
+    let id = device_id as u64;
+    id < entries && id < id_limit
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItsError {
@@ -295,5 +340,55 @@ mod tests {
         assert_eq!(its_event_limit(ITS_MAPD_SIZE), Some(16));
         assert_eq!(its_event_limit(32), None);
         assert_eq!(its_event_limit(31), None);
+    }
+
+    #[test]
+    fn rdbase_is_processor_number_or_pa() {
+        // PTA=0: GICR_TYPER[23:8] is the processor number; the rest of
+        // GICR_TYPER does not leak in.
+        let typer = (0x7u64 << 8) | (0x1u64 << 4) | (0xABu64 << 32);
+        assert_eq!(rdbase_field(false, typer, 0x080A_0000), 7);
+        // PTA=1: PA[51:16] of the redistributor frame.
+        assert_eq!(
+            rdbase_field(true, typer, 0x0801_2340_0000),
+            0x0801_2340_0000 >> 16
+        );
+        assert_eq!(rdbase_field(true, typer, 0x0801_0000), 0x0801);
+        // PA bit 51 is the top bit of the 36-bit field.
+        assert_eq!(rdbase_field(true, 0, 1u64 << 51), 1u64 << 35);
+        // A MAPC built from the helper puts the field at DW2[51:16].
+        let mapc = ItsCommand::mapc(3, rdbase_field(true, 0, 1u64 << 51), true);
+        assert_eq!(mapc.dw[2], (1u64 << 63) | (1u64 << 51) | 3);
+        let mapc = ItsCommand::mapc(3, rdbase_field(false, 0x7 << 8, 0), true);
+        assert_eq!(mapc.dw[2], (1u64 << 63) | (7u64 << 16) | 3);
+    }
+
+    #[test]
+    fn baser_and_typer_fields() {
+        // Entry_Size (bits [52:48]) is minus one: 0 is 1 byte, 7 is 8 bytes.
+        assert_eq!(baser_entry_bytes(7u64 << 48), 8);
+        assert_eq!(baser_entry_bytes(0), 1);
+        // Devbits (bits [17:13]) is minus one: 0x0F is 16 bits.
+        assert_eq!(gits_devbits(0x0F << 13), 16);
+        assert_eq!(gits_devbits(0), 1);
+    }
+
+    #[test]
+    fn device_table_refuses_ids_it_cannot_index() {
+        // One 4 KiB page of 8-byte entries holds 512 DeviceIDs, and 16 bits
+        // are implemented.
+        assert!(its_device_fits(0, 4096, 8, 16));
+        assert!(its_device_fits(511, 4096, 8, 16));
+        assert!(!its_device_fits(512, 4096, 8, 16));
+        assert!(!its_device_fits(0x1_0000, 65536, 8, 16));
+        // The implemented DeviceID width caps a larger table.
+        assert!(!its_device_fits(16, 4096, 1, 4));
+        assert!(its_device_fits(15, 4096, 1, 4));
+        // No device table, zero entry size, or zero width refuses every ID.
+        assert!(!its_device_fits(0, 0, 8, 16));
+        assert!(!its_device_fits(0, 4096, 0, 16));
+        assert!(!its_device_fits(0, 4096, 8, 0));
+        // A width of 32 or more does not overflow the shift.
+        assert!(its_device_fits(7, 4096, 8, 32));
     }
 }

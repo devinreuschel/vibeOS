@@ -1,20 +1,21 @@
 //! GICv2 / GICv3 + ITS / GICv2m as `IrqChip`s (DESIGN §5.4, §11.5).
 
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
-use vibeos::irq::{
-    ITS_MAPD_SIZE, IrqChip, IrqError, IrqSpecifier, ItsCommand, encode_device_unmap,
-    encode_lpi_free, gic, its_event_limit,
-};
-use vibeos::lock::RANK_DEVICE;
+use vibeos::irq::{IrqChip, IrqError, IrqSpecifier, gic};
 use vibeos::log::Level;
 use vibeos::machine::PhysRange;
 use vibeos::paging::PhysAddr;
 
+use super::gic_common::{
+    CHIP, GICR_TYPER, Gic, Kind, LPI_BASE, LPI_SLOTS, SPI_SLOTS, XBASER_SHARE_IS, alloc_pages,
+    clean_table_if_needed, gic, mmio32, mmio32w, mmio64, mmio64w, note_shareability,
+};
+use super::gic_its::{LPI_EVENT, discard_lpi, init_its, map_collection, movi_lpi};
+pub use super::gic_its::{map_its_event, remove_its_device};
 use crate::cell::BootCell;
 use crate::machine_init;
 use crate::paging_init;
-use crate::sync_init::SpinMutex;
 
 const GICD_CTLR: u64 = 0x0000;
 const GICD_TYPER: u64 = 0x0004;
@@ -30,6 +31,8 @@ const GICD_CTLR_ENABLE_G0: u32 = 1;
 const GICD_CTLR_ENABLE_G1: u32 = 1 << 1;
 const GICD_CTLR_ARE_NS: u32 = 1 << 4;
 const GICD_CTLR_ENABLE_G1A: u32 = 1 << 1;
+/// GICD_CTLR.RWP (bit 31): a write to GICD_CTLR is still propagating (IHI 0069).
+const GICD_CTLR_RWP: u32 = 1 << 31;
 
 const GICC_CTLR: u64 = 0x0000;
 const GICC_CTLR_ENABLE_G0: u32 = 1;
@@ -42,13 +45,15 @@ const GICC_IAR: u64 = 0x000C;
 const GICC_EOIR: u64 = 0x0010;
 
 const GICR_CTLR: u64 = 0x0000;
-const GICR_TYPER: u64 = 0x0008;
 const GICR_TYPER_LAST: u64 = 1 << 4;
+/// Smallest redistributor frame; a frame with VLPIS is 0x40000 (`gic::gicr_frame_stride`).
 const GICR_STRIDE: u64 = 0x2_0000;
 const GICR_WAKER: u64 = 0x0014;
 const GICR_WAKER_PS: u32 = 1 << 1;
 const GICR_WAKER_CA: u32 = 1 << 2;
 const GICR_CTLR_ENABLE_LPIS: u32 = 1;
+/// GICR_CTLR.RWP (bit 3): an EnableLPIs write is still propagating (IHI 0069).
+const GICR_CTLR_RWP: u32 = 1 << 3;
 const GICR_SGI_BASE: u64 = 0x1_0000;
 const GICR_IGROUPR0: u64 = GICR_SGI_BASE + 0x0080;
 const GICR_ISENABLER0: u64 = GICR_SGI_BASE + 0x0100;
@@ -57,54 +62,14 @@ const GICR_IPRIORITYR: u64 = GICR_SGI_BASE + 0x0400;
 const GICR_PROPBASER: u64 = 0x0070;
 const GICR_PENDBASER: u64 = 0x0078;
 
-const GITS_CTLR: u64 = 0x0000;
-const GITS_TYPER: u64 = 0x0008;
-/// GITS_TYPER.PTA: MAPC's RDbase is the redistributor PA[51:16], not its
-/// processor number (IHI 0069G).
-const GITS_TYPER_PTA: u64 = 1 << 19;
-const GITS_CBASER: u64 = 0x0080;
-const GITS_CWRITER: u64 = 0x0088;
-const GITS_CREADR: u64 = 0x0090;
-const GITS_BASER: u64 = 0x0100;
-const GITS_CTLR_ENABLED: u32 = 1;
-/// GITS_CREADR bit 0: the ITS stalled on the command at this offset.
-const GITS_CREADR_STALLED: u64 = 1;
 const GICR_INVALLR: u64 = 0x00B0;
 const GICR_SYNCR: u64 = 0x00C0;
-/// GITS_CBASER / GITS_BASER physical address (IHI 0069G bits [51:12]).
-const ITS_PA_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-const GITS_BASER_TYPE_DEVICE: u64 = 1;
-const GITS_BASER_TYPE_COLLECTION: u64 = 4;
+/// GICR_PROPBASER / GICR_PENDBASER InnerCache (bits [9:7]): Normal Inner
+/// write-back, read- and write-allocate, `0b111` (IHI 0069).
+const GICR_XBASER_INNER_WB: u64 = (0b11 << 8) | (0b01 << 7);
+/// LPI property and pending tables are 16 pages each (`alloc_pages(16)`).
+const LPI_TABLE_BYTES: usize = 16 * 4096;
 
-const SPI_SLOTS: usize = 1024;
-const LPI_SLOTS: usize = 256;
-const LPI_BASE: u32 = gic::LPI_BASE;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    V2,
-    V3,
-}
-
-struct Gic {
-    kind: Kind,
-    /// `ICC_CTLR_EL1.RSS`, sampled on the BSP in `init`.
-    rss: bool,
-    dist: u64,
-    cpu_or_redist: u64,
-    /// Physical base of the redistributor window (`cpu_or_redist` is its VA).
-    redist_pa: u64,
-    redist_size: u64,
-    lpi_prop: AtomicU64,
-    its: Option<u64>,
-    v2m: Option<(u64, u32, u16)>,
-    spi_irqs: [AtomicU32; SPI_SLOTS],
-    lpi_irqs: [AtomicU32; LPI_SLOTS],
-    next_lpi: AtomicU32,
-    next_v2m: AtomicU32,
-}
-
-static CHIP: BootCell<Gic> = BootCell::new();
 static CHIP_OBJ: GicChip = GicChip;
 static CHIP_DYN: BootCell<&'static dyn IrqChip> = BootCell::new();
 static DISPATCH: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
@@ -117,10 +82,6 @@ pub fn set_dispatch(f: fn(u32)) {
 
 struct GicChip;
 
-fn gic() -> Option<&'static Gic> {
-    CHIP.try_get()
-}
-
 pub fn chip() -> Option<&'static dyn IrqChip> {
     CHIP_DYN.try_get().copied()
 }
@@ -130,42 +91,6 @@ fn map_mmio(r: PhysRange) -> Option<u64> {
     // SAFETY: `r` is a GIC MMIO range from MachineDesc; established by
     // `crate::arch::aarch64::gic::init` from the device tree.
     unsafe { paging_init::ioremap(PhysAddr(r.start), size) }.map(|v| v.as_u64())
-}
-
-/// Read a 32-bit GIC register.
-///
-/// # Safety
-/// `va+off` is a mapped GIC register the caller owns.
-unsafe fn mmio32(va: u64, off: u64) -> u32 {
-    // SAFETY: this fn's `# Safety`; established by `crate::arch::aarch64::gic::init`.
-    unsafe { core::ptr::read_volatile((va.wrapping_add(off)) as *const u32) }
-}
-
-/// Write a 32-bit GIC register.
-///
-/// # Safety
-/// As [`mmio32`].
-unsafe fn mmio32w(va: u64, off: u64, v: u32) {
-    // SAFETY: this fn's `# Safety`; established by `crate::arch::aarch64::gic::init`.
-    unsafe { core::ptr::write_volatile((va.wrapping_add(off)) as *mut u32, v) };
-}
-
-/// Read a 64-bit GIC register.
-///
-/// # Safety
-/// As [`mmio32`].
-unsafe fn mmio64(va: u64, off: u64) -> u64 {
-    // SAFETY: this fn's `# Safety`; established by `crate::arch::aarch64::gic::init`.
-    unsafe { core::ptr::read_volatile((va.wrapping_add(off)) as *const u64) }
-}
-
-/// Write a 64-bit GIC register.
-///
-/// # Safety
-/// As [`mmio32`].
-unsafe fn mmio64w(va: u64, off: u64, v: u64) {
-    // SAFETY: this fn's `# Safety`; established by `crate::arch::aarch64::gic::init`.
-    unsafe { core::ptr::write_volatile((va.wrapping_add(off)) as *mut u64, v) };
 }
 
 /// Bring up the boot CPU's GIC from `MachineDesc`.
@@ -204,6 +129,13 @@ pub unsafe fn init() {
     let v2m = desc.gic_v2m().next().and_then(|(r, base, n)| {
         let va = map_mmio(r)?;
         let (base, n) = v2m_spi_range(va, base, n);
+        if !gic::v2m_range_ok(base, u32::from(n)) {
+            crate::klog!(
+                Level::Error,
+                "vibeOS: gic: v2m SPIs {base} + {n} are not all SPIs; v2m absent"
+            );
+            return None;
+        }
         Some((va, base, n))
     });
     let mut g = Gic {
@@ -319,9 +251,10 @@ fn mpidr_aff32() -> u64 {
     (v & 0x00FF_FFFF) | (((v >> 32) & 0xFF) << 24)
 }
 
-/// This CPU's redistributor VA, or the mapped base if the walk misses.
-fn this_redist(g: &Gic) -> u64 {
-    find_redist(g, mpidr_aff32()).unwrap_or(g.cpu_or_redist)
+/// This CPU's redistributor VA, or `None` when no frame in the window has
+/// its affinity. There is no fallback frame: a CPU must own its own.
+fn this_redist(g: &Gic) -> Option<u64> {
+    find_redist(g, mpidr_aff32())
 }
 
 fn find_redist(g: &Gic, aff: u64) -> Option<u64> {
@@ -339,19 +272,41 @@ fn find_redist(g: &Gic, aff: u64) -> Option<u64> {
         if typer & GICR_TYPER_LAST != 0 {
             break;
         }
-        off = off.saturating_add(GICR_STRIDE);
+        off = off.saturating_add(gic::gicr_frame_stride(typer));
     }
     None
+}
+
+/// Poll an `RWP` bit after a write to a GIC control register, up to a bound.
+/// On timeout it logs an Error line and returns, and boot goes on.
+///
+/// # Safety
+/// `va + off` is a mapped GIC control register the caller owns.
+unsafe fn wait_rwp(va: u64, off: u64, rwp: u32, what: &str) {
+    let mut n = 100_000u32;
+    while n > 0 {
+        // SAFETY: this fn's `# Safety`; established here.
+        if unsafe { mmio32(va, off) } & rwp == 0 {
+            return;
+        }
+        n -= 1;
+        core::hint::spin_loop();
+    }
+    crate::klog!(Level::Error, "vibeOS: gic: {what} rwp timeout");
 }
 
 fn init_v3(g: &Gic) {
     // SAFETY: mapped GICD/GICR; system registers are the CPU interface. established here.
     unsafe {
-        let rd = this_redist(g);
+        let Some(rd) = this_redist(g) else {
+            crate::klog!(Level::Error, "vibeOS: gic: no redistributor for boot CPU");
+            crate::boot::halt_with("vibeOS: gic: no redistributor");
+        };
         wake_redist(rd);
         let typer = mmio32(g.dist, GICD_TYPER);
         let lines = ((typer & 0x1F) + 1) * 32;
         mmio32w(g.dist, GICD_CTLR, 0);
+        wait_rwp(g.dist, GICD_CTLR, GICD_CTLR_RWP, "gicd");
         let mut i = 32u32;
         while i < lines {
             mmio32w(g.dist, GICD_IGROUPR + u64::from(i / 32) * 4, 0xFFFF_FFFF);
@@ -373,11 +328,12 @@ fn init_v3(g: &Gic) {
             i = i.saturating_add(4);
         }
         mmio32w(g.dist, GICD_CTLR, GICD_CTLR_ENABLE_G1A | GICD_CTLR_ARE_NS);
+        wait_rwp(g.dist, GICD_CTLR, GICD_CTLR_RWP, "gicd");
         program_sgi_ppi(rd);
         enable_lpi(g, rd);
         icc_enable();
         if let Some(its) = g.its {
-            init_its(g, its);
+            init_its(g, its, rd);
         }
     }
 }
@@ -497,492 +453,26 @@ unsafe fn enable_lpi(g: &Gic, rd: u64) {
     // SAFETY: `rd` is this CPU's redistributor. established here.
     unsafe {
         let idbits = 15u64;
-        mmio64w(
-            rd,
-            GICR_PROPBASER,
-            prop | idbits | (1 << 10) | (0b11 << 8) | (0b01 << 7),
-        );
-        mmio64w(
-            rd,
-            GICR_PENDBASER,
-            pend | (1 << 10) | (0b11 << 8) | (1 << 62),
-        );
+        let prop_val = prop | idbits | XBASER_SHARE_IS | GICR_XBASER_INNER_WB;
+        let pend_val = pend | XBASER_SHARE_IS | GICR_XBASER_INNER_WB | (1 << 62);
+        mmio64w(rd, GICR_PROPBASER, prop_val);
+        mmio64w(rd, GICR_PENDBASER, pend_val);
+        let prop_read = mmio64(rd, GICR_PROPBASER);
+        let pend_read = mmio64(rd, GICR_PENDBASER);
+        note_shareability(prop_val, prop_read);
+        note_shareability(pend_val, pend_read);
+        // The tables are cleaned after the readback, before LPIs can read them.
+        clean_table_if_needed(prop, LPI_TABLE_BYTES);
+        clean_table_if_needed(pend, LPI_TABLE_BYTES);
         let c = mmio32(rd, GICR_CTLR) | GICR_CTLR_ENABLE_LPIS;
         mmio32w(rd, GICR_CTLR, c);
+        wait_rwp(rd, GICR_CTLR, GICR_CTLR_RWP, "gicr");
         mmio64w(rd, GICR_INVALLR, 0);
         let mut n = 100_000u32;
         while n > 0 && mmio32(rd, GICR_SYNCR) & 1 != 0 {
             n -= 1;
             core::hint::spin_loop();
         }
-    }
-}
-
-fn alloc_pages(pages: usize) -> Option<u64> {
-    let order = pages.trailing_zeros() as u8;
-    if 1usize.checked_shl(u32::from(order))? != pages {
-        return None;
-    }
-    let f = crate::pmm_init::with_buddy(|b| b.alloc(order))?;
-    let pa = f.into_entry();
-    let va = crate::paging_init::hhdm_offset().wrapping_add(pa);
-    // SAFETY: buddy block, HHDM maps it (I14). established here.
-    unsafe { core::ptr::write_bytes(va as *mut u8, 0, pages.saturating_mul(4096)) };
-    Some(pa)
-}
-
-const ITS_DEV_MAX: usize = 16;
-const ITS_DEV_EMPTY: u32 = u32::MAX;
-
-struct ItsDev {
-    id: AtomicU32,
-    itt: AtomicU64,
-    next_event: AtomicU32,
-    /// MAPD V=1 has completed for this DeviceID.
-    mapped: AtomicBool,
-}
-
-static ITS_DEVS: [ItsDev; ITS_DEV_MAX] = [const {
-    ItsDev {
-        id: AtomicU32::new(ITS_DEV_EMPTY),
-        itt: AtomicU64::new(0),
-        next_event: AtomicU32::new(0),
-        mapped: AtomicBool::new(false),
-    }
-}; ITS_DEV_MAX];
-/// EventID programmed for each LPI slot, for `compose_msi`.
-static LPI_EVENT: [AtomicU32; LPI_SLOTS] = [const { AtomicU32::new(0) }; LPI_SLOTS];
-/// DeviceID of a mapped LPI. [`LPI_NO_DEV`] means `map_its_event` has not
-/// published one, so `set_affinity` cannot `MOVI` it.
-const LPI_NO_DEV: u32 = u32::MAX;
-static LPI_DEV: [AtomicU32; LPI_SLOTS] = [const { AtomicU32::new(LPI_NO_DEV) }; LPI_SLOTS];
-/// Collection (logical CPU) the LPI was last moved to.
-static LPI_COL: [AtomicU32; LPI_SLOTS] = [const { AtomicU32::new(0) }; LPI_SLOTS];
-static CMDQ: AtomicU64 = AtomicU64::new(0);
-/// One command queue. MAPC, MAPTI, MOVI and DISCARD all push here.
-static ITS_CMDS: SpinMutex<()> = SpinMutex::with_rank((), RANK_DEVICE);
-/// Bit `cpu` is set once that CPU's collection has a MAPC.
-static COLLECTIONS: AtomicU64 = AtomicU64::new(0);
-/// RDbase passed to that CPU's MAPC. Read only after its `COLLECTIONS` bit.
-static COLLECTION_RD: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
-
-/// Allocate ITS tables, the command queue, and enable the ITS.
-///
-/// # Safety
-/// `its` is the mapped ITS; paging and the buddy are up.
-unsafe fn init_its(g: &Gic, its: u64) {
-    let Some(cmd) = alloc_pages(1) else {
-        crate::klog!(Level::Error, "vibeOS: gic: its cmdq");
-        return;
-    };
-    // Relaxed: command-queue PA; pairs with nothing.
-    CMDQ.store(cmd, Ordering::Relaxed);
-    // SAFETY: ITS tables and command queue, never freed. established here.
-    unsafe {
-        init_its_basers(its);
-        // Valid + Inner Shareable + write-back. Size 0 = one 4 KiB page (IHI 0069G).
-        mmio64w(
-            its,
-            GITS_CBASER,
-            (cmd & ITS_PA_MASK) | (1u64 << 63) | (0b111u64 << 59) | (0b111u64 << 53) | (1u64 << 10),
-        );
-        mmio64w(its, GITS_CWRITER, 0);
-        mmio32w(its, GITS_CTLR, GITS_CTLR_ENABLED);
-    }
-    // BSP collection. APs map theirs in `enable_ap`.
-    map_collection(g, its, this_redist(g));
-}
-
-/// Program each implemented GITS_BASER (Devices and Collections).
-///
-/// # Safety
-/// `its` is the mapped ITS; the buddy is up.
-unsafe fn init_its_basers(its: u64) {
-    let mut n = 0u64;
-    while n < 8 {
-        // SAFETY: GITS_BASER<n> is an ITS table register. established here.
-        let b = unsafe { mmio64(its, GITS_BASER + n * 8) };
-        let ty = (b >> 56) & 7;
-        if ty == GITS_BASER_TYPE_DEVICE || ty == GITS_BASER_TYPE_COLLECTION {
-            let Some(pa) = alloc_pages(1) else {
-                n += 1;
-                continue;
-            };
-            // Keep Type and Entry_Size (RO). 4 KiB pages, Size=0, Inner Shareable, Valid.
-            let keep = b & ((0x7u64 << 56) | (0x1Fu64 << 48));
-            let val = keep | (pa & ITS_PA_MASK) | (1u64 << 63) | (1u64 << 10);
-            // SAFETY: as `init_its_basers`. established here.
-            unsafe { mmio64w(its, GITS_BASER + n * 8, val) };
-        }
-        n += 1;
-    }
-}
-
-/// One ITT page per DeviceID. EventIDs are per-device (ITS MSI data).
-fn claim_its_dev(device_id: u32) -> Option<&'static ItsDev> {
-    let mut i = 0usize;
-    while i < ITS_DEV_MAX {
-        let Some(d) = ITS_DEVS.get(i) else {
-            break;
-        };
-        // Relaxed: pairs with nothing; DeviceID is written once.
-        if d.id.load(Ordering::Relaxed) == device_id {
-            return Some(d);
-        }
-        i = i.saturating_add(1);
-    }
-    let itt = alloc_pages(1)?;
-    i = 0;
-    while i < ITS_DEV_MAX {
-        let Some(d) = ITS_DEVS.get(i) else {
-            break;
-        };
-        // AcqRel: publishes DeviceID; Acquire failure pairs with another claimer's AcqRel.
-        if d.id
-            .compare_exchange(
-                ITS_DEV_EMPTY,
-                device_id,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            // Release: pairs with the Acquire ITT load in `map_its_event`.
-            d.itt.store(itt, Ordering::Release);
-            return Some(d);
-        }
-        // Relaxed: pairs with nothing; another CPU claimed this DeviceID.
-        if d.id.load(Ordering::Relaxed) == device_id {
-            return Some(d);
-        }
-        i = i.saturating_add(1);
-    }
-    None
-}
-
-fn lpi_slot(hwirq: u32) -> Option<usize> {
-    let slot = hwirq.checked_sub(LPI_BASE)? as usize;
-    if slot >= LPI_SLOTS { None } else { Some(slot) }
-}
-
-/// Bind `hwirq` as the next EventID on `device_id`. No ITS is `Ok`:
-/// GICv2 still has a v2m SPI. Past the MAPD size is [`IrqError::Exhausted`].
-pub fn map_its_event(device_id: u32, hwirq: u32) -> Result<(), IrqError> {
-    let Some(g) = gic() else { return Ok(()) };
-    let Some(its) = g.its else { return Ok(()) };
-    let Some(slot) = lpi_slot(hwirq) else {
-        return Err(IrqError::BadVector);
-    };
-    let Some(dev) = claim_its_dev(device_id) else {
-        crate::klog!(Level::Error, "vibeOS: gic: its itt");
-        return Err(IrqError::Exhausted);
-    };
-    // Acquire: pairs with the Release store of `itt` in `claim_its_dev`.
-    let itt = dev.itt.load(Ordering::Acquire);
-    if itt == 0 {
-        crate::klog!(Level::Error, "vibeOS: gic: its itt");
-        return Err(IrqError::Exhausted);
-    }
-    let Some(rd0) = collection_rd(0) else {
-        crate::klog!(Level::Error, "vibeOS: gic: its no collection 0");
-        return Err(IrqError::NoRoute);
-    };
-    let Some(limit) = its_event_limit(ITS_MAPD_SIZE) else {
-        return Err(IrqError::Exhausted);
-    };
-    // EventID stays put until MAPTI and SYNC both retire, under `ITS_CMDS`.
-    let _hold = ITS_CMDS.lock();
-    // Relaxed: per-device EventID under `ITS_CMDS`; pairs with nothing.
-    let event = dev.next_event.load(Ordering::Relaxed);
-    if event >= limit {
-        crate::klog!(Level::Error, "vibeOS: gic: its events");
-        return Err(IrqError::Exhausted);
-    }
-    // SAFETY: ITS command queue; `ITS_CMDS` is held. established here.
-    let ok = unsafe {
-        let mut ok = true;
-        if event == 0 {
-            match ItsCommand::mapd(device_id, itt, ITS_MAPD_SIZE, true) {
-                Ok(mapd) => {
-                    ok = push_cmds(its, &[mapd]);
-                    if ok {
-                        // Release: pairs with the Acquire load in `remove_its_device`.
-                        dev.mapped.store(true, Ordering::Release);
-                    }
-                }
-                Err(_) => ok = false,
-            }
-        }
-        ok && push_cmds(
-            its,
-            &[
-                ItsCommand::mapti(device_id, event, hwirq, 0),
-                ItsCommand::sync(rd0),
-            ],
-        )
-    };
-    if !ok {
-        crate::klog!(
-            Level::Error,
-            "vibeOS: gic: its map dev {device_id:#x} ev {event}"
-        );
-        return Err(IrqError::Busy);
-    }
-    if let Some(e) = LPI_EVENT.get(slot) {
-        // Release: pairs with the Acquire load in `compose_msi` and `movi_lpi`.
-        e.store(event, Ordering::Release);
-    }
-    if let Some(c) = LPI_COL.get(slot) {
-        // Release: pairs with the Acquire load in `discard_lpi`.
-        c.store(0, Ordering::Release);
-    }
-    if let Some(d) = LPI_DEV.get(slot) {
-        // Release: pairs with the Acquire loads in `movi_lpi` and `discard_lpi`.
-        d.store(device_id, Ordering::Release);
-    }
-    if let Some(next) = event.checked_add(1) {
-        // Relaxed: next EventID under `ITS_CMDS`; pairs with nothing.
-        dev.next_event.store(next, Ordering::Relaxed);
-    }
-    Ok(())
-}
-
-/// MAPC this CPU's collection to `rd_va`, then SYNC. The BSP calls it from
-/// `init_its`; each AP from `enable_ap`, after its redistributor has LPIs on.
-fn map_collection(g: &Gic, its: u64, rd_va: u64) {
-    let cpu = crate::per_cpu_init::current().cpu_id;
-    if cpu >= 64 {
-        crate::klog!(Level::Error, "vibeOS: gic: its mapc cpu {cpu}");
-        return;
-    }
-    let rd = collection_rdbase(g, its, rd_va);
-    if !submit_its(
-        its,
-        &[ItsCommand::mapc(cpu as u16, rd, true), ItsCommand::sync(rd)],
-    ) {
-        crate::klog!(Level::Error, "vibeOS: gic: its mapc cpu {cpu} rd {rd:#x}");
-        return;
-    }
-    if let Some(slot) = COLLECTION_RD.get(cpu as usize) {
-        // Relaxed: pairs with the Release or of `COLLECTIONS` below, which publishes it.
-        slot.store(rd, Ordering::Relaxed);
-    }
-    // Release: pairs with the Acquire load in `collection_rd`.
-    COLLECTIONS.fetch_or(1u64 << cpu, Ordering::Release);
-}
-
-/// RDbase for MAPC/SYNC (IHI 0069G): processor number, or PA[51:16] when PTA=1.
-fn collection_rdbase(g: &Gic, its: u64, rd_va: u64) -> u64 {
-    // SAFETY: GITS_TYPER and this redistributor's GICR_TYPER. established here.
-    unsafe {
-        let typer = mmio64(its, GITS_TYPER);
-        if typer & GITS_TYPER_PTA != 0 {
-            let off = rd_va.wrapping_sub(g.cpu_or_redist);
-            let pa = g.redist_pa.wrapping_add(off);
-            return (pa >> 16) & ((1u64 << 35) - 1);
-        }
-        let rd_typer = mmio64(rd_va, GICR_TYPER);
-        (rd_typer >> 8) & 0xFFFF
-    }
-}
-
-/// RDbase of a collection `map_collection` published, if it has.
-fn collection_rd(cpu: u32) -> Option<u64> {
-    if cpu >= 64 {
-        return None;
-    }
-    // Acquire: pairs with the Release or in `map_collection`.
-    if COLLECTIONS.load(Ordering::Acquire) & (1u64 << cpu) == 0 {
-        return None;
-    }
-    // Relaxed: pairs with the Release or of `COLLECTIONS` in `map_collection`.
-    COLLECTION_RD
-        .get(cpu as usize)
-        .map(|s| s.load(Ordering::Relaxed))
-}
-
-/// MOVI an already-mapped LPI onto `cpu`'s collection. An LPI with no
-/// DeviceID yet can only stay on CPU 0, which is where MAPTI puts it.
-fn movi_lpi(its: u64, hwirq: u32, cpu: u32) -> Result<(), IrqError> {
-    let Some(rd) = collection_rd(cpu) else {
-        return Err(IrqError::BadCpu);
-    };
-    let slot = (hwirq - LPI_BASE) as usize;
-    // Acquire: pairs with the Release store in `map_its_event`.
-    let dev = LPI_DEV
-        .get(slot)
-        .map(|d| d.load(Ordering::Acquire))
-        .unwrap_or(LPI_NO_DEV);
-    if dev == LPI_NO_DEV {
-        if cpu != 0 {
-            return Err(IrqError::BadCpu);
-        }
-        return Ok(());
-    }
-    // Acquire: pairs with the Release store in `map_its_event`.
-    let event = LPI_EVENT
-        .get(slot)
-        .map(|e| e.load(Ordering::Acquire))
-        .unwrap_or(0);
-    let icid = u16::try_from(cpu).map_err(|_| IrqError::BadCpu)?;
-    if !submit_its(
-        its,
-        &[ItsCommand::movi(dev, event, icid), ItsCommand::sync(rd)],
-    ) {
-        return Err(IrqError::NoRoute);
-    }
-    if let Some(c) = LPI_COL.get(slot) {
-        // Release: pairs with the Acquire load in `discard_lpi`.
-        c.store(cpu, Ordering::Release);
-    }
-    Ok(())
-}
-
-/// DISCARD one mapped event and SYNC. A failed command leaves `LPI_DEV` set.
-fn discard_lpi(hwirq: u32) {
-    let Some(g) = gic() else { return };
-    let Some(its) = g.its else { return };
-    let Some(slot) = lpi_slot(hwirq) else { return };
-    let Some(dev_slot) = LPI_DEV.get(slot) else {
-        return;
-    };
-    let _hold = ITS_CMDS.lock();
-    // Acquire: pairs with the Release store in `map_its_event`.
-    let dev = dev_slot.load(Ordering::Acquire);
-    if dev == LPI_NO_DEV {
-        return;
-    }
-    // Acquire: pairs with the Release stores in `map_its_event` and `movi_lpi`.
-    let event = LPI_EVENT
-        .get(slot)
-        .map(|e| e.load(Ordering::Acquire))
-        .unwrap_or(0);
-    // Acquire: pairs with the Release stores in `map_its_event` and `movi_lpi`.
-    let col = LPI_COL
-        .get(slot)
-        .map(|c| c.load(Ordering::Acquire))
-        .unwrap_or(0);
-    let rd = collection_rd(col).unwrap_or(0);
-    // SAFETY: ITS command queue; `ITS_CMDS` is held here.
-    let ok = unsafe { push_cmds(its, &encode_lpi_free(dev, event, rd)) };
-    if !ok {
-        crate::klog!(
-            Level::Error,
-            "vibeOS: gic: its discard dev {dev:#x} ev {event}"
-        );
-        return;
-    }
-    // Release: pairs with the Acquire loads in `movi_lpi` and `remove_its_device`.
-    dev_slot.store(LPI_NO_DEV, Ordering::Release);
-}
-
-/// MAPD V=0 once none of `device_id`'s LPIs are mapped. The ITT stays.
-pub fn remove_its_device(device_id: u32) {
-    let Some(g) = gic() else { return };
-    let Some(its) = g.its else { return };
-    let Some(rd) = collection_rd(0) else {
-        crate::klog!(Level::Error, "vibeOS: gic: its no collection 0");
-        return;
-    };
-    let _hold = ITS_CMDS.lock();
-    let dev = ITS_DEVS.iter().find(|d| {
-        // Relaxed: DeviceID is written once; pairs with nothing.
-        d.id.load(Ordering::Relaxed) == device_id
-    });
-    let Some(dev) = dev else { return };
-    // Acquire: pairs with the Release store in `map_its_event`.
-    if !dev.mapped.load(Ordering::Acquire) {
-        return;
-    }
-    let live = LPI_DEV.iter().any(|slot| {
-        // Acquire: pairs with the Release stores in `map_its_event` and `discard_lpi`.
-        slot.load(Ordering::Acquire) == device_id
-    });
-    if live {
-        crate::klog!(
-            Level::Error,
-            "vibeOS: gic: its remove live dev={device_id:#x}"
-        );
-        return;
-    }
-    let Ok(cmds) = encode_device_unmap(device_id, rd) else {
-        crate::klog!(Level::Error, "vibeOS: gic: its unmap");
-        return;
-    };
-    // SAFETY: ITS command queue; `ITS_CMDS` is held here.
-    if unsafe { !push_cmds(its, &cmds) } {
-        return;
-    }
-    // Release: pairs with the Acquire load in `remove_its_device`.
-    dev.mapped.store(false, Ordering::Release);
-    // Relaxed: EventID reset under `ITS_CMDS`; pairs with nothing.
-    dev.next_event.store(0, Ordering::Relaxed);
-}
-
-/// Push `cmds` in order. False when the ITS stalls or does not catch up.
-fn submit_its(its: u64, cmds: &[ItsCommand]) -> bool {
-    let _hold = ITS_CMDS.lock();
-    // SAFETY: `its` is the mapped ITS; `ITS_CMDS` is held, so this is
-    // the only writer of the command queue. established here.
-    unsafe { push_cmds(its, cmds) }
-}
-
-/// Push `cmds` with [`ITS_CMDS`] already held.
-///
-/// # Safety
-/// `its` is the mapped ITS and the caller holds [`ITS_CMDS`].
-unsafe fn push_cmds(its: u64, cmds: &[ItsCommand]) -> bool {
-    for c in cmds {
-        // SAFETY: this fn's `# Safety`. established here.
-        if unsafe { !its_push(its, *c) } {
-            return false;
-        }
-    }
-    true
-}
-
-/// Push one ITS command and wait for CREADR.
-///
-/// # Safety
-/// `its` is the mapped ITS, the command queue page is live, and the caller
-/// holds [`ITS_CMDS`].
-unsafe fn its_push(its: u64, cmd: ItsCommand) -> bool {
-    // SAFETY: this fn's `# Safety`. established here.
-    unsafe {
-        let rd0 = mmio64(its, GITS_CREADR);
-        if rd0 & GITS_CREADR_STALLED != 0 {
-            crate::klog!(Level::Error, "vibeOS: gic: its stalled rd={rd0:#x}");
-            return false;
-        }
-        let wr = mmio64(its, GITS_CWRITER) & !GITS_CREADR_STALLED;
-        // Relaxed: pairs with nothing.
-        let base = CMDQ.load(Ordering::Relaxed);
-        let va = crate::paging_init::hhdm_offset()
-            .wrapping_add(base)
-            .wrapping_add(wr);
-        core::ptr::copy_nonoverlapping(cmd.dw.as_ptr(), va as *mut u64, 4);
-        let next = (wr + 32) & 0xFFF;
-        core::arch::asm!("dsb oshst", options(nostack, preserves_flags));
-        mmio64w(its, GITS_CWRITER, next);
-        let mut n = 100_000u32;
-        while n > 0 {
-            let rd = mmio64(its, GITS_CREADR);
-            if rd & GITS_CREADR_STALLED != 0 {
-                crate::klog!(Level::Error, "vibeOS: gic: its stalled rd={rd:#x}");
-                return false;
-            }
-            if (rd & !GITS_CREADR_STALLED) == next {
-                return true;
-            }
-            n -= 1;
-            core::hint::spin_loop();
-        }
-        crate::klog!(
-            Level::Error,
-            "vibeOS: gic: its creadr timeout wr={next:#x} rd={:#x}",
-            mmio64(its, GITS_CREADR)
-        );
-        false
     }
 }
 
@@ -997,6 +487,13 @@ unsafe fn icc_enable() {
             "mrs {0}, ICC_SRE_EL1",
             "orr {0}, {0}, #1",
             "msr ICC_SRE_EL1, {0}",
+            "isb",
+            // EOImode (bit 1) clear: one ICC_EOIR1_EL1 write also deactivates
+            // the interrupt, and nothing here writes ICC_DIR_EL1 (ARM ARM).
+            // Firmware may have left it set.
+            "mrs {0}, ICC_CTLR_EL1",
+            "bic {0}, {0}, #2",
+            "msr ICC_CTLR_EL1, {0}",
             "isb",
             "mov {0}, #0xff",
             "msr ICC_PMR_EL1, {0}",
@@ -1187,19 +684,28 @@ pub fn send_sgi_others(intid: u32) {
     }
 }
 
-/// Per-CPU redistributor / CPU interface on a secondary.
+/// Per-CPU redistributor / CPU interface on a secondary. `false` when this
+/// CPU has no redistributor frame; the caller must park it before it reports
+/// ready, so the boot CPU sees a timed-out AP.
 ///
 /// # Safety
 /// This CPU's GIC interface is unused; IRQs masked.
-pub unsafe fn enable_ap() {
+pub unsafe fn enable_ap() -> bool {
     let Some(g) = gic() else {
-        return;
+        return true;
     };
     // SAFETY: this fn's `# Safety`; established here.
     unsafe {
         match g.kind {
             Kind::V3 => {
-                let rd = this_redist(g);
+                let Some(rd) = this_redist(g) else {
+                    crate::klog!(
+                        Level::Error,
+                        "vibeOS: gic: no redistributor for AP aff {:#x}",
+                        mpidr_aff32()
+                    );
+                    return false;
+                };
                 wake_redist(rd);
                 program_sgi_ppi(rd);
                 enable_lpi(g, rd);
@@ -1223,6 +729,7 @@ pub unsafe fn enable_ap() {
             }
         }
     }
+    true
 }
 
 fn enable_intid(g: &Gic, intid: u32, on: bool) {
@@ -1235,8 +742,16 @@ fn enable_intid(g: &Gic, intid: u32, on: bool) {
     let off = if on { GICD_ISENABLER } else { GICD_ICENABLER };
     if g.kind == Kind::V3 && intid < 32 {
         let o = if on { GICR_ISENABLER0 } else { GICR_ICENABLER0 };
+        let Some(rd) = this_redist(g) else {
+            crate::klog_ratelimited!(
+                1000,
+                Level::Error,
+                "vibeOS: gic: no redistributor for SGI/PPI {intid}"
+            );
+            return;
+        };
         // SAFETY: this CPU's redistributor SGI/PPI enable. established here.
-        unsafe { mmio32w(this_redist(g), o, bit) };
+        unsafe { mmio32w(rd, o, bit) };
         return;
     }
     // SAFETY: distributor enable bit. established here.
@@ -1359,8 +874,13 @@ impl IrqChip for GicChip {
                 if slot >= u32::from(count) {
                     return Err(IrqError::Exhausted);
                 }
+                // `init` checked that every SPI in the range is an SPI, so
+                // this only refuses an overflow that cannot come from there.
+                let Some(intid) = base.checked_add(slot).filter(|&s| gic::is_spi(s)) else {
+                    return Err(IrqError::Exhausted);
+                };
                 if let Some(s) = out.get_mut(i) {
-                    *s = base + slot;
+                    *s = intid;
                 }
                 i += 1;
             }
