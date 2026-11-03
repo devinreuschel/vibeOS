@@ -61,6 +61,15 @@ impl KvaError {
     }
 }
 
+/// What one [`Kva::place`] search found.
+enum Placed {
+    At(u64),
+    /// No free range holds the placement.
+    NoFit,
+    /// The placement splits a range, and no node is spare for the split.
+    NoNode,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Range {
     start: u64,
@@ -212,7 +221,9 @@ impl Kva {
         self.alloc_placed(len, PAGE_SIZE, 0)
     }
 
-    /// First-fit of `len` bytes at `start ≡ offset (mod align)`.
+    /// First-fit of `len` bytes at `start ≡ offset (mod align)`. A placement
+    /// that splits a range with no spare node coalesces the list first, as
+    /// [`Kva::free`] does, and searches once more.
     pub fn alloc_placed(&mut self, len: u64, align: u64, offset: u64) -> Option<u64> {
         if len == 0
             || !len.is_multiple_of(PAGE_SIZE)
@@ -224,6 +235,21 @@ impl Kva {
         {
             return None;
         }
+        match self.place(len, align, offset) {
+            Placed::At(start) => Some(start),
+            Placed::NoFit => None,
+            Placed::NoNode => {
+                self.coalesce_all();
+                match self.place(len, align, offset) {
+                    Placed::At(start) => Some(start),
+                    Placed::NoFit | Placed::NoNode => None,
+                }
+            }
+        }
+    }
+
+    /// One first-fit search of [`Kva::alloc_placed`], with its split.
+    fn place(&mut self, len: u64, align: u64, offset: u64) -> Placed {
         let mut prev: Option<u16> = None;
         let mut cur = self.head;
         while let Some(i) = cur {
@@ -238,14 +264,13 @@ impl Kva {
                 let suffix_start = start + len;
                 let suffix = (r.start + r.len) - suffix_start;
                 if prefix > 0 && suffix > 0 {
-                    if self.nslots == 0 {
-                        return None;
-                    }
+                    let Some(j) = self.alloc_slot() else {
+                        return Placed::NoNode;
+                    };
                     self.nodes[i as usize] = Range {
                         start: r.start,
                         len: prefix,
                     };
-                    let j = self.alloc_slot()?;
                     self.nodes[j as usize] = Range {
                         start: suffix_start,
                         len: suffix,
@@ -271,12 +296,12 @@ impl Kva {
                 }
                 self.used += len;
                 self.live += 1;
-                return Some(start);
+                return Placed::At(start);
             }
             prev = cur;
             cur = self.next[i as usize];
         }
-        None
+        Placed::NoFit
     }
 
     /// Reserve `2S` VA for a power-of-two stack of `pages` pages (`S`).
@@ -611,6 +636,29 @@ mod tests {
         k.coalesce_all();
         assert_eq!(k.free_list(), std::vec![(KVA_START, 64 * PAGE_SIZE)]);
         assert_eq!(k.stats().used, 0);
+    }
+
+    #[test]
+    fn placed_split_coalesces_when_no_node_is_spare() {
+        let mut k = window(4 * MAX_RANGES as u64);
+        // Each placement at an odd page splits a range and so takes a node:
+        // after LIVE_CAP of them one node is spare.
+        let mut live = std::vec::Vec::new();
+        for _ in 0..LIVE_CAP {
+            live.push(k.alloc_placed(PAGE_SIZE, 2 * PAGE_SIZE, PAGE_SIZE).unwrap());
+        }
+        assert_eq!(k.nslots, 1);
+        // The free takes the last spare node.
+        k.free(live[0], PAGE_SIZE);
+        assert_eq!(k.nslots, 0);
+        // Only the large remainder holds a page at 3 pages mod 4 with room on
+        // both sides, so this placement needs a split and no node is spare.
+        let va = k
+            .alloc_placed(PAGE_SIZE, 4 * PAGE_SIZE, 3 * PAGE_SIZE)
+            .expect("a split with no spare node coalesces and places");
+        assert_eq!((va - KVA_START) % (4 * PAGE_SIZE), 3 * PAGE_SIZE);
+        assert_eq!(k.live, LIVE_CAP);
+        assert!(k.nslots > 0, "the coalesce left a spare node");
     }
 
     #[test]
