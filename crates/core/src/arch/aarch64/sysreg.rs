@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn dcache_line_from_dminline() {
-        // DminLine 4 is 64-byte lines, the size this stride used before.
+        // DminLine 4 is 64-byte lines.
         assert_eq!(dcache_line_bytes(4 << 16), 64);
         assert_eq!(dcache_line_bytes(0), 4);
         assert_eq!(dcache_line_bytes(0xF << 16), 4 << 15);

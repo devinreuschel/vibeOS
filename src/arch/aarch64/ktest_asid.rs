@@ -1,5 +1,5 @@
 //! aarch64 ASID proof: a 4-bit generation allocator's rollovers, checked
-//! through real TTBR0 switches (ROADMAP §11.4, PORTABILITY §11.2).
+//! through real TTBR0 switches (ROADMAP §11.2, PORTABILITY §11.2).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -29,15 +29,6 @@ fn free_pa(pa: u64) {
     }
 }
 
-fn alloc_zeroed() -> Option<u64> {
-    let f = crate::pmm_init::with_buddy(|b| b.alloc(0))?;
-    let pa = f.into_entry();
-    let va = crate::paging_init::hhdm_offset().wrapping_add(pa);
-    // SAFETY: buddy page, HHDM maps it (I14). established here.
-    unsafe { core::ptr::write_bytes(va as *mut u8, 0, 4096) };
-    Some(pa)
-}
-
 pub(crate) fn test_asid_4bit() -> Outcome {
     let ncpus = crate::per_cpu_init::cpu_count().max(2) as u32;
     let Some(alloc) = AsidAlloc::try_boxed(4, ncpus) else {
@@ -59,10 +50,10 @@ pub(crate) fn test_asid_4bit() -> Outcome {
             unsafe { crate::arch::aarch64::cpu::write_ttbr0(saved) };
             return Outcome::Fail("asid deadline");
         }
-        let Some(l0) = alloc_zeroed() else {
+        let Some(l0) = crate::arch::aarch64::secondary::alloc_zeroed_page() else {
             return Outcome::Fail("asid l0");
         };
-        let Some(data) = alloc_zeroed() else {
+        let Some(data) = crate::arch::aarch64::secondary::alloc_zeroed_page() else {
             free_pa(l0);
             return Outcome::Fail("asid data");
         };
@@ -109,6 +100,9 @@ pub(crate) fn test_asid_4bit() -> Outcome {
             return Outcome::Fail("asid alloc");
         }
         // Only a rollover sets flush-pending, so only a rollover flushes.
+        // Deleting this flush left the test green under TCG, where every switch
+        // here changes the ASID. HVF did not reach the test with or without the
+        // flush, so no accel here is shown to catch a missing flush.
         if alloc.flush_pending(cpu) {
             crate::arch::aarch64::cpu::tlbi_all();
             alloc.clear_flush(cpu);

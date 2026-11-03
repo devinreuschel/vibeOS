@@ -89,8 +89,14 @@ pub const ROLLOVER_LOCAL: [TlbOp; 3] = [TlbOp::TlbiVmalle1, TlbOp::DsbNsh, TlbOp
 /// user root is ASID 0 until ASIDs are wired, and a CPU's TLB holds user
 /// entries only from roots it loaded, each flushed when it switched away.
 /// The broadcast `vmalle1is` would also drop global kernel entries on every
-/// CPU. The kernel's `tlbi_asid0_local` runs this.
-pub const TTBR0_SWITCH: [TlbOp; 3] = [TlbOp::TlbiAside1, TlbOp::DsbNsh, TlbOp::Isb];
+/// CPU. The leading `dsb ishst` orders the PTE stores made before the switch
+/// ahead of the local invalidate. The kernel's `tlbi_asid0_local` runs this.
+pub const TTBR0_SWITCH: [TlbOp; 4] = [
+    TlbOp::DsbIshst,
+    TlbOp::TlbiAside1,
+    TlbOp::DsbNsh,
+    TlbOp::Isb,
+];
 
 /// Break-before-make, after the invalid store and before the new one.
 /// The kernel's `bbm_break` runs this.
@@ -222,7 +228,7 @@ mod tests {
     fn ttbr0_switch_is_local_asid0() {
         assert_eq!(
             TTBR0_SWITCH.map(TlbOp::mnemonic),
-            ["tlbi aside1", "dsb nsh", "isb"]
+            ["dsb ishst", "tlbi aside1", "dsb nsh", "isb"]
         );
         // ASID 0 is the operand's bits 63:48, with no VA.
         assert_eq!(tlbi_va_operand(0, 0), 0);
