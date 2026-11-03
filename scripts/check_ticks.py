@@ -895,9 +895,9 @@ class Checker:
             for parent in gatelib.git(self.repo, "rev-list", "--parents", "-n", "1",
                                       m).split()[1:]:
                 held.update(b.text for b in self._ticked_boxes(parent))
-            later = gatelib.git(self.repo, "rev-list", "--no-merges",
+            after = gatelib.git(self.repo, "rev-list", "--no-merges",
                                 f"{m}..{self.head}").split()
-            withdrawn = {t for s in later for t in parsed.get(s, ([], []))[1]}
+            withdrawn = {t for s in after for t in parsed.get(s, ([], []))[1]}
             for b in self._ticked_boxes(m):
                 if b.text in held:
                     continue
