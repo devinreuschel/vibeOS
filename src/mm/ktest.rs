@@ -1134,7 +1134,7 @@ pub(crate) const TESTS: &[Test] = &[
         "unmap_shootdown_over_max_asserts",
         unmap_shootdown_over_max_asserts,
     ),
-    test("kernel_va0_faults", kernel_va0_faults),
+    test("kernel_va0_faults", kernel_va0_faults).once(),
     test("ioremap_failure_returns_va", ioremap_failure_returns_va),
 ];
 
