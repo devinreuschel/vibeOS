@@ -25,7 +25,25 @@ with comments and literals blanked, and fails on:
   - a `use` that imports an ordering by its bare name (`Ordering::*`,
     `Ordering::{Acquire, ..}`) or renames atomic `Ordering` to a name not
     ending in `Ordering`, either of which would hide an ordering from the
-    first rule.
+    first rule. The rename is read in any `use` that names `Ordering`: as
+    `Ordering as O`, as `Ordering::{self as O}`, in a brace group
+    (`atomic::{AtomicU32, Ordering as O}`), or through a module alias
+    (`use core::sync::atomic as a; use a::Ordering as O;`). A module's own
+    `{self as a}` is no ordering and is not read.
+  - a `type` alias of `Ordering` to a name not ending in `Ordering`
+    (`type X = core::sync::atomic::Ordering;`), since the name hides the
+    ordering from the first rule.
+  - a `const` or `static` of type `Ordering` (`const ACQ: Ordering =
+    Ordering::Acquire;`), since a name bound to an ordering hides it the same
+    way; each access writes `Ordering::<name>`.
+  - a macro metavariable in an ordering path (`Ordering::$o`), since the
+    ordering arrives from the call site, where the first rule cannot read it.
+
+`cmp::Ordering` (`core::cmp::Ordering`, `std::cmp::Ordering`) is not atomic,
+so the rename, type alias and const rules skip any name whose path contains
+`cmp::`. A bare `cmp::Ordering` imported by `use core::cmp::Ordering;` and
+named as `Ordering` afterwards is not told apart from atomic `Ordering`, so a
+file that imports it that way is flagged by the type and const rules.
 
 Test code is not read: a `ktest.rs` file or a file under a `ktest/`
 directory (`check_test_hooks.is_test_source`), a file vibeos-core declares
@@ -60,7 +78,11 @@ SITE = re.compile(rf"\b\w*Ordering::({NAMES})\b")
 PAIRS = re.compile(r"\bpairs with\s+\S")
 USE = re.compile(r"\buse\b[^;]*;")
 BARE = re.compile(rf"\bOrdering::(?:\*|\{{[^}}]*\b(?:{NAMES})\b|(?:{NAMES})\b)")
-RENAME = re.compile(r"\batomic::(?:Ordering::\{[^}]*?\bself|(?:\{[^}]*?)?\bOrdering)\s+as\s+(\w+)")
+SELF_ALIAS = re.compile(r"\bOrdering::\{[^}]*?\bself\s+as\s+(\w+)")
+ORDERING_AS = re.compile(r"\bOrdering\s+as\s+(\w+)")
+# The path before a name ends in `cmp::`, so the name is `core::cmp::Ordering`.
+CMP_PATH = re.compile(r"\bcmp::(?:\w+::)*$")
+CMP = re.compile(r"\bcmp::")
 TYPE_ALIAS = re.compile(r"\btype\s+(\w+)\s*=\s*(?:[\w:]*::)?\w*Ordering\s*;")
 ORDERING_ITEM = re.compile(
     r"\b(?:const|static)\s+(?:mut\s+)?(\w+)\s*:\s*(?:[\w:]*::)?\w*Ordering\b"
@@ -179,23 +201,31 @@ def file_errors(rel: str, text: str) -> tuple[list[str], int]:
         line = line_of(code, m.start())
         if line - 1 in skip:
             continue
-        alias = RENAME.search(m.group(0))
-        if BARE.search(m.group(0)):
+        stmt = m.group(0)
+        if BARE.search(stmt):
             errs.append(f"{rel}:{line}: imports an ordering by its bare name; write "
                         "`Ordering::<name>` (ROADMAP §11.7)")
-        elif alias and not alias.group(1).endswith("Ordering"):
-            errs.append(f"{rel}:{line}: renames `Ordering` to `{alias.group(1)}`; keep a name "
+        # A grouped `use` may rename either form in any position: `Ordering::{self as O}`
+        # or `Ordering as O`, reached through a module alias or a brace group. A
+        # module's own `self as` is no ordering and is not read.
+        for alias in [*SELF_ALIAS.finditer(stmt), *ORDERING_AS.finditer(stmt)]:
+            name = alias.group(1)
+            if name.endswith("Ordering") or CMP_PATH.search(stmt, 0, alias.start()):
+                continue
+            errs.append(f"{rel}:{line}: renames `Ordering` to `{name}`; keep a name "
                         "ending in `Ordering` (ROADMAP §11.7)")
     # A name bound to an ordering, or a macro metavariable, hides the ordering
-    # from the site rule, so each is an error rather than a site.
+    # from the site rule, so each is an error rather than a site. `cmp::Ordering`
+    # is not atomic and is read by none of these rules.
     for m in TYPE_ALIAS.finditer(code):
         line = line_of(code, m.start())
-        if line - 1 not in skip and not m.group(1).endswith("Ordering"):
-            errs.append(f"{rel}:{line}: renames `Ordering` to `{m.group(1)}`; keep a name "
-                        "ending in `Ordering` (ROADMAP §11.7)")
+        if line - 1 in skip or CMP.search(m.group(0)) or m.group(1).endswith("Ordering"):
+            continue
+        errs.append(f"{rel}:{line}: renames `Ordering` to `{m.group(1)}`; keep a name "
+                    "ending in `Ordering` (ROADMAP §11.7)")
     for m in ORDERING_ITEM.finditer(code):
         line = line_of(code, m.start())
-        if line - 1 not in skip:
+        if line - 1 not in skip and not CMP.search(m.group(0)):
             errs.append(f"{rel}:{line}: binds an ordering to `{m.group(1)}`; write "
                         "`Ordering::<name>` at each access (ROADMAP §11.7)")
     for m in METAVAR_ORDERING.finditer(code):

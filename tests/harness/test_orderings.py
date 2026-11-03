@@ -180,6 +180,53 @@ class TestFileErrors(unittest.TestCase):
         )
         self.assertEqual(errs(text), [])
 
+    def test_grouped_self_alias_must_end_in_ordering(self) -> None:
+        for head in (
+            "use core::sync::atomic::{AtomicU32, Ordering::{self as O}};\n",
+            "use core::sync::atomic::{Ordering::{self as O}, AtomicU32};\n",
+        ):
+            text = head + "fn f(x: &AtomicU32) -> u32 {\n    x.load(O::Relaxed)\n}\n"
+            e = errs(text)
+            self.assertEqual(len(e), 1, e)
+            self.assertIn("renames `Ordering` to `O`", e[0])
+
+    def test_module_alias_then_rename_must_end_in_ordering(self) -> None:
+        text = (
+            "use core::sync::atomic as a;\n"
+            "use a::Ordering as O;\n"
+            "fn f(x: &a::AtomicU32) -> u32 {\n"
+            "    x.load(O::Relaxed)\n"
+            "}\n"
+        )
+        e = errs(text)
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("renames `Ordering` to `O`", e[0])
+
+    def test_grouped_ordering_alias_ending_in_ordering_is_a_site(self) -> None:
+        text = (
+            "use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};\n"
+            "fn f(x: &AtomicU32) -> u32 {\n"
+            "    x.load(AtomicOrdering::Relaxed)\n"
+            "}\n"
+        )
+        e, n = file_errors("src/a.rs", text)
+        self.assertEqual(n, 1, e)
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("Relaxed without a comment", e[0])
+
+    def test_cmp_ordering_is_not_atomic(self) -> None:
+        self.assertEqual(errs("type Sign = core::cmp::Ordering;\n"), [])
+        self.assertEqual(
+            errs("const D: core::cmp::Ordering = core::cmp::Ordering::Less;\n"),
+            [],
+        )
+        self.assertEqual(errs("use core::cmp::Ordering as Cmp;\n"), [])
+        e = errs(
+            "use core::{cmp::Ordering as Cmp, sync::atomic::{AtomicU32, Ordering as O}};\n"
+        )
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("renames `Ordering` to `O`", e[0])
+
     def test_type_alias_must_end_in_ordering(self) -> None:
         e = errs("type X = core::sync::atomic::Ordering;\n")
         self.assertEqual(len(e), 1, e)
