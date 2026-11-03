@@ -802,19 +802,26 @@ pub(crate) fn test_rtc_offset() -> Outcome {
     if !(lo..hi).contains(&a) {
         return Outcome::Fail("rtc year");
     }
-    // PL031 counts whole seconds, so 1.1 s between the reads must show a tick.
+    // The boot origin is read once, so only the device's own register shows
+    // the clock running: read it live, before and after 1.1 s of monotonic
+    // time. PL031 counts whole seconds, so that wait must show a tick.
+    let Some(la) = time_init::pl031_live_s() else {
+        return Outcome::Fail("rtc window");
+    };
+    if !(lo..hi).contains(&la) {
+        return Outcome::Fail("rtc live year");
+    }
     let t0 = time_init::now_ns();
-    crate::ktest::spin_until_ns(
+    if !crate::ktest::spin_until_ns(
         || time_init::now_ns().saturating_sub(t0) >= 1_100_000_000,
         2_000_000_000,
-    );
-    let Some(b) = time_init::unix_time_s() else {
+    ) {
+        return Outcome::Fail("monotonic clock did not reach 1.1 s");
+    }
+    let Some(lb) = time_init::pl031_live_s() else {
         return Outcome::Fail("rtc lost");
     };
-    if b < a {
-        return Outcome::Fail("wall clock went backwards");
-    }
-    if b.saturating_sub(a) < 1 {
+    if lb.saturating_sub(la) < 1 {
         return Outcome::Fail("rtc did not advance in 1.1 s");
     }
     Outcome::Ok
