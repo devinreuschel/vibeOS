@@ -650,6 +650,72 @@ class TestAarch64ArmAxis(unittest.TestCase):
     def test_axis_not_passed_to_the_guest_passes(self) -> None:
         self.assertEqual(self.problems(self.job("ubuntu-26.04", env=False)), [])
 
+    def test_axis_with_an_include_on_x86_runner_fails(self) -> None:
+        text = self.job("ubuntu-26.04").replace(
+            "    env:\n", "        include:\n          - foo: bar\n    env:\n", 1
+        )
+        self.assertEqual(self.problems(text), ["aarch64_arm"])
+
+    def test_axis_with_an_include_naming_arm_runner_passes(self) -> None:
+        text = (
+            "jobs:\n  boot:\n    runs-on: ${{ matrix.runner }}\n"
+            "    strategy:\n      matrix:\n        arch: [x86_64, aarch64]\n"
+            "        include:\n"
+            "          - {arch: x86_64, runner: ubuntu-26.04}\n"
+            "          - {arch: aarch64, runner: ubuntu-26.04-arm}\n"
+            "    env:\n      ARCH: ${{ matrix.arch }}\n"
+            "    steps:\n      - run: make test-kernel\n"
+        )
+        self.assertEqual(self.problems(text), [])
+
+    def test_fromjson_matrix_passing_an_arch_fails(self) -> None:
+        text = (
+            "jobs:\n  boot:\n    runs-on: ubuntu-26.04-arm\n"
+            "    strategy:\n      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}\n"
+            "    env:\n      ARCH: ${{ matrix.arch }}\n"
+            "    steps:\n      - run: make test-kernel\n"
+        )
+        self.assertEqual(self.problems(text), ["aarch64_arm"])
+
+
+class TestAarch64ArmReusable(unittest.TestCase):
+    """A reusable workflow takes its arch as an input the rule cannot bind to the
+    caller's matrix, so both the caller's `with:` and the callee's boot are flagged."""
+
+    CALLEE = "/".join(CI.split("/")[:-1]) + "/boot.yml"
+
+    def problems(self, files: dict[str, str]) -> list[tuple[str, str]]:
+        t = Tree(workflows={p: parse(s, p) for p, s in files.items()})
+        return [(p.path.rsplit("/", 1)[-1], p.rule) for p in rule_aarch64_arm(t)]
+
+    def test_caller_passing_matrix_arch_fails(self) -> None:
+        caller = (
+            "jobs:\n  boot:\n    strategy:\n      matrix:\n        arch: [x86_64, aarch64]\n"
+            "    uses: ./.github/workflows/boot.yml\n"
+            "    with:\n      arch: ${{ matrix.arch }}\n"
+        )
+        got = self.problems({CI: caller})
+        self.assertEqual(got, [("ci.yml", "aarch64_arm")], got)
+
+    def test_callee_reading_an_input_fails(self) -> None:
+        callee = (
+            "on:\n  workflow_call:\n    inputs:\n      arch:\n        type: string\n"
+            "jobs:\n  boot:\n    runs-on: ubuntu-26.04\n"
+            "    env:\n      ARCH: ${{ inputs.arch }}\n"
+            "    steps:\n      - run: make test-kernel\n"
+        )
+        got = self.problems({self.CALLEE: callee})
+        self.assertEqual(got, [("boot.yml", "aarch64_arm")], got)
+
+    def test_dispatch_input_in_a_boot_passes(self) -> None:
+        dispatch = (
+            "on:\n  workflow_dispatch:\n    inputs:\n      arch:\n        type: string\n"
+            "jobs:\n  boot:\n    runs-on: ubuntu-26.04-arm\n"
+            "    env:\n      ARCH: ${{ inputs.arch }}\n"
+            "    steps:\n      - run: make test-kernel\n"
+        )
+        self.assertEqual(self.problems({CI: dispatch}), [])
+
 
 class TestBudgetDoc(unittest.TestCase):
     ROWS = (
