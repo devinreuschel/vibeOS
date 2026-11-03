@@ -642,4 +642,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(results.run_main(main))
+    raise SystemExit(results.run_main(lambda: main(sys.argv[1:])))
