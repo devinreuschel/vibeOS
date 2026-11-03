@@ -1084,12 +1084,24 @@ pub(crate) fn test_el0_munmap_touch() -> Outcome {
 
 /// A saved ELR of 2^48 kills the process with SIGSEGV; the kernel runs.
 pub(crate) fn test_el0_bad_elr() -> Outcome {
+    // Armed before the spawn. The child is pinned to this CPU and made
+    // ready inside `spawn`, so a tick can run it before an arm after the
+    // spawn would land. The hook is one-shot, taken by the next return to
+    // EL0 on any CPU, which here is the child's first.
+    syscall_init::testing::arm_bad_elr();
     let pid = match user::spawn(&Image::Code(EL0_EXIT0, DEFAULT), &["el0_bad_elr"]) {
         Ok(p) => p,
-        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+        Err(e) => {
+            syscall_init::testing::take_bad_elr();
+            return crate::fail_fmt!("spawn: {}", e.as_str());
+        }
     };
-    syscall_init::testing::arm_bad_elr();
     let st = user::wait(pid);
+    // The child's return to EL0 took the hook before it exited. A hook still
+    // armed here never fired, and is taken so a later test does not get it.
+    if syscall_init::testing::take_bad_elr() {
+        return Outcome::Fail("bad elr hook not taken");
+    }
     if signaled(st, vibeos::proc::SIGSEGV) {
         Outcome::Ok
     } else {
