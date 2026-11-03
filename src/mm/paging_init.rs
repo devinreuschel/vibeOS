@@ -691,12 +691,14 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         let uart = crate::machine_init::info()
             .and_then(|d| d.console_uart())
             .unwrap_or(0x0900_0000);
-        crate::serial::raw::set_mmio(hhdm_offset().wrapping_add(uart & !0xFFF));
+        // The mapped page starts at `uart & !0xFFF`; the registers sit at
+        // `uart`, so the in-page offset is kept.
+        crate::serial::raw::set_mmio(hhdm_offset().wrapping_add(uart));
         let fw = crate::machine_init::info()
             .and_then(|d| d.fw_cfg)
             .map(|d| d.base)
             .unwrap_or(0x0902_0000);
-        crate::boot::fw_cfg_init::set_mmio_va(hhdm_offset().wrapping_add(fw & !0xFFF));
+        crate::boot::fw_cfg_init::set_mmio_va(hhdm_offset().wrapping_add(fw));
     }
     // Release: pairs with the Acquire load in `identity_covers`.
     #[cfg(target_arch = "x86_64")]
