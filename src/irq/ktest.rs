@@ -370,6 +370,7 @@ pub(crate) fn test_msix_cpu() -> Outcome {
         mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
         irq_init::disable_msix(&dev);
         let _ = irq_init::free_vector(vec);
+        irq_init::release_its_device(&dev);
         IRQ_MMIO.store(0, Ordering::SeqCst);
         restore_cmd();
         Outcome::Fail(why)
@@ -385,6 +386,7 @@ pub(crate) fn test_msix_cpu() -> Outcome {
         restore_cmd();
         mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
         let _ = irq_init::free_vector(vec);
+        irq_init::release_its_device(&dev);
         return Outcome::Fail(e.as_str());
     }
     if pci_init::cfg_read16(dev.addr, CFG_COMMAND) != before {
@@ -423,6 +425,9 @@ pub(crate) fn test_msix_cpu() -> Outcome {
     mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
     irq_init::disable_msix(&dev);
     let _ = irq_init::free_vector(vec);
+    // The EventID `alloc_msi` mapped stays allocated until its device is
+    // unmapped; the next run needs one free.
+    irq_init::release_its_device(&dev);
     IRQ_MMIO.store(0, Ordering::SeqCst);
     restore_cmd();
     if !second {

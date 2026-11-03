@@ -187,34 +187,40 @@ pub(crate) fn test_its_doorbell() -> Outcome {
     };
     let irq = match irq_init::map_wired(IrqSpecifier::Gic { intid: hwirq }) {
         Ok(i) => i,
-        Err(e) => return Outcome::Fail(e.as_str()),
-    };
-    if irq_init::set_handler(irq, on_msi).is_err() {
-        return Outcome::Fail("handler");
-    }
-    chip.unmask(hwirq);
-    if let Err(e) = crate::arch::aarch64::gic::map_its_event(0, hwirq) {
-        return Outcome::Fail(e.as_str());
-    }
-    let msg = match chip.compose_msi(hwirq, 0) {
-        Ok(m) => m,
-        Err(e) => return Outcome::Fail(e.as_str()),
-    };
-    if msg.addr == 0 {
-        return Outcome::Fail("compose addr 0");
-    }
-    MSI_HITS.store(0, Ordering::Release);
-    if !fire_msi(msg) {
-        return Outcome::Fail("doorbell map");
-    }
-    let t0 = time_init::now_ns();
-    while MSI_HITS.load(Ordering::Acquire) == 0 {
-        if time_init::now_ns().saturating_sub(t0) > 500_000_000 {
-            return Outcome::Fail("no doorbell");
+        Err(e) => {
+            chip.free(hwirq);
+            return Outcome::Fail(e.as_str());
         }
-        core::hint::spin_loop();
+    };
+    let res = (|| -> Result<(), &'static str> {
+        irq_init::set_handler(irq, on_msi).map_err(|_| "handler")?;
+        chip.unmask(hwirq);
+        crate::arch::aarch64::gic::map_its_event(0, hwirq).map_err(|e| e.as_str())?;
+        let msg = chip.compose_msi(hwirq, 0).map_err(|e| e.as_str())?;
+        if msg.addr == 0 {
+            return Err("compose addr 0");
+        }
+        MSI_HITS.store(0, Ordering::Release);
+        if !fire_msi(msg) {
+            return Err("doorbell map");
+        }
+        let t0 = time_init::now_ns();
+        while MSI_HITS.load(Ordering::Acquire) == 0 {
+            if time_init::now_ns().saturating_sub(t0) > 500_000_000 {
+                return Err("no doorbell");
+            }
+            core::hint::spin_loop();
+        }
+        Ok(())
+    })();
+    // The IrqId's free runs the chip's `free` (DISCARD and mask). Then the
+    // device's EventIDs go back, so the next run maps one.
+    let _ = irq_init::free_vector(irq);
+    crate::arch::aarch64::gic::remove_its_device(0);
+    match res {
+        Ok(()) => Outcome::Ok,
+        Err(why) => Outcome::Fail(why),
     }
-    Outcome::Ok
 }
 
 fn fire_msi(msg: vibeos::irq::MsiMessage) -> bool {
@@ -229,6 +235,9 @@ fn fire_msi(msg: vibeos::irq::MsiMessage) -> bool {
         core::ptr::write_volatile((va.as_u64().wrapping_add(off)) as *mut u32, msg.data);
         core::arch::asm!("dsb oshst", options(nostack, preserves_flags));
     }
+    // SAFETY: the write above is the last touch of `va`, and the page is
+    // an ioremap VA of one page; established here.
+    unsafe { crate::pci_init::unmap_mmio(va.as_u64(), PAGE_SIZE_4K) };
     true
 }
 
