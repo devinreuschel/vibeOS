@@ -1,6 +1,9 @@
 //! In-guest tests for smp (kernel_tests only). Rows: [`TESTS`].
 
 #[cfg(target_arch = "x86_64")]
+pub(crate) mod stall;
+
+#[cfg(target_arch = "x86_64")]
 use vibeos::acpi::MAX_CPUS;
 #[cfg(target_arch = "x86_64")]
 use vibeos::apic::TimerMode;
@@ -325,11 +328,16 @@ pub(crate) fn test_stalled_ap_leak() -> Outcome {
         return crate::fail_fmt!("online {online} of {n}, want one hole");
     }
     // The frames its allocation recorded are still allocated: none is on a
-    // buddy free list or in a stack cache, so its stall path freed nothing
-    // of its own (ROADMAP §11.4, F032).
-    let (recorded, free) = smp_init::stalled_ap_frames();
+    // buddy free list or in a stack cache, when its stall path ended and
+    // now, so its stall path freed nothing of its own (ROADMAP §11.4, F032).
+    let (recorded, free, free_at_stall) = stall::stalled_ap_frames();
     if recorded == 0 {
         return Outcome::Fail("stalled AP's allocation recorded no frames");
+    }
+    if free_at_stall != 0 {
+        return crate::fail_fmt!(
+            "stalled AP's stall path left {free_at_stall} of its {recorded} frames free"
+        );
     }
     if let Some(base) = free {
         return crate::fail_fmt!("stalled AP's frame {base:#x} is free");

@@ -27,6 +27,8 @@ use vibeos::smp::{
 };
 use vibeos::thread::ThreadId;
 
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+use super::ktest::stall;
 use crate::apic_init;
 use crate::arch;
 #[cfg(target_arch = "x86_64")]
@@ -326,14 +328,14 @@ const AP_FRAMES: usize = 4 * gdt::IST_PAGES + gdt::RSP0_PAGES + 2 * DEFAULT_STAC
 /// x86_64).
 #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 #[derive(Clone, Copy)]
-struct ApFrames {
+pub(crate) struct ApFrames {
     list: [(u64, u8); AP_FRAMES],
-    len: usize,
+    pub(crate) len: usize,
 }
 
 #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 impl ApFrames {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             list: [(0, 0); AP_FRAMES],
             len: 0,
@@ -348,7 +350,7 @@ impl ApFrames {
         }
     }
 
-    fn recorded(&self) -> impl Iterator<Item = (u64, u8)> + '_ {
+    pub(crate) fn recorded(&self) -> impl Iterator<Item = (u64, u8)> + '_ {
         self.list.get(..self.len).unwrap_or(&[]).iter().copied()
     }
 }
@@ -634,7 +636,7 @@ fn start_one(a: ApAlloc, page: u64) {
         time_init::busy_wait_ms(INIT_WAIT_MS);
         per_cpu_init::mark_offline(cpu_id);
         #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
-        record_stalled_frames(&frames);
+        stall::record_stalled_frames(&frames);
         note_stalled_leak();
         // F032: the AP may still run on these; do not abandon them.
         // CpuWorkers is ThreadId-only and has no Drop.
@@ -828,11 +830,6 @@ static STALL_GO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool
 static STALL_PARKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "kernel_tests")]
 static STALL_LEAKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-/// The frames the stalled AP's bring-up allocated, written on the boot CPU
-/// at its timeout (kernel_tests, x86_64; ROADMAP §11.4, F032).
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
-static STALL_FRAMES: IrqCell<ApFrames> = IrqCell::new(ApFrames::new());
-
 #[cfg(feature = "kernel_tests")]
 fn arm_stall_from_cmdline() {
     let sel = vibeos::ktest::Selection::parse(crate::boot::cmdline().get("vibeos.ktest"));
@@ -961,32 +958,6 @@ fn note_stalled_leak() {
 pub fn stalled_ap_leaked() -> bool {
     // Acquire: pairs with the Release store in `note_stalled_leak`.
     STALL_LEAKED.load(Ordering::Acquire)
-}
-
-/// Record the stalled AP's frames for the stalled-AP test (kernel_tests,
-/// x86_64). Runs before `note_stalled_leak`, whose Release store publishes
-/// it.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
-fn record_stalled_frames(frames: &ApFrames) {
-    STALL_FRAMES.with(|s| *s = *frames);
-}
-
-/// How many frames the stalled AP's bring-up recorded, and the first of
-/// them that is free now: on a buddy free list, or in a stack cache. Each
-/// CPU's stack cache is its own, so only the calling CPU's is read
-/// (kernel_tests, x86_64). Call after `stalled_ap_leaked` returns true.
-#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
-pub fn stalled_ap_frames() -> (usize, Option<u64>) {
-    STALL_FRAMES.with(|s| {
-        let free = s
-            .recorded()
-            .find(|&(base, order)| {
-                crate::pmm_init::with_buddy(|b| b.block_is_free(base, order))
-                    || per_cpu_init::with_current(|c| c.stack_cache.holds_frame(base))
-            })
-            .map(|(base, _)| base);
-        (s.len, free)
-    })
 }
 
 #[cfg(feature = "kernel_tests")]
