@@ -2,53 +2,77 @@
 
 use core::arch::asm;
 
-use vibeos::arch::aarch64::psci;
-use vibeos::machine::EnableMethod;
+use vibeos::arch::aarch64::psci::{self, Conduit};
 
-fn conduit_hvc() -> bool {
-    crate::machine_init::info()
-        .map(|d| matches!(d.enable, EnableMethod::Psci { hvc: true }))
-        .unwrap_or(true)
+/// The conduit from the device tree. With no machine description at all,
+/// `hvc`, as before the `/psci` check: nothing in early boot calls into
+/// PSCI, and the ktest exit needs its `SYSTEM_OFF` attempt.
+fn conduit() -> Option<Conduit> {
+    match crate::machine_init::info() {
+        Some(d) => psci::conduit(d.enable),
+        None => Some(Conduit::Hvc),
+    }
 }
 
-/// One PSCI call. `fid` is the function id in `x0`.
+/// Whether PSCI calls have a conduit. False when the device tree has no
+/// `/psci` node, and then no call is made.
+pub fn psci_available() -> bool {
+    conduit().is_some()
+}
+
+/// The conduit a PSCI call takes, for the secondary stub's `CPU_OFF` path.
+pub fn conduit_is_hvc() -> bool {
+    conduit() == Some(Conduit::Hvc)
+}
+
+/// One PSCI call. `fid` is the function id in `x0`. Without a conduit the
+/// call is not made and returns `NOT_SUPPORTED`.
 ///
 /// # Safety
 /// The firmware implements PSCI on this conduit; a `SYSTEM_*` call may
 /// not return.
 unsafe fn psci_call(fid: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let hvc = conduit_hvc();
+    let Some(conduit) = conduit() else {
+        return psci::NOT_SUPPORTED;
+    };
     let mut ret: i64;
     // SAFETY: this fn's `# Safety`; established here.
     unsafe {
-        if hvc {
-            asm!(
+        match conduit {
+            Conduit::Hvc => asm!(
                 "hvc #0",
                 inout("x0") fid as i64 => ret,
                 in("x1") a1,
                 in("x2") a2,
                 in("x3") a3,
                 options(nostack, preserves_flags),
-            );
-        } else {
-            asm!(
+            ),
+            Conduit::Smc => asm!(
                 "smc #0",
                 inout("x0") fid as i64 => ret,
                 in("x1") a1,
                 in("x2") a2,
                 in("x3") a3,
                 options(nostack, preserves_flags),
-            );
+            ),
         }
     }
     ret
 }
 
 fn psci_halt(fid: u32) -> ! {
-    // SAFETY: SYSTEM_OFF / SYSTEM_RESET; halt if firmware returns.
-    // established here.
+    if psci_available() {
+        // SAFETY: SYSTEM_OFF / SYSTEM_RESET; halt if firmware returns.
+        // established here.
+        let _ = unsafe { psci_call(u64::from(fid), 0, 0, 0) };
+    } else {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "vibeOS: psci: no /psci node, halting"
+        );
+    }
+    // SAFETY: `wfi` touches no memory; established here.
     unsafe {
-        let _ = psci_call(u64::from(fid), 0, 0, 0);
         loop {
             asm!("wfi", options(nomem, nostack, preserves_flags));
         }

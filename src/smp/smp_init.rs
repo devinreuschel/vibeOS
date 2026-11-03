@@ -1052,6 +1052,13 @@ fn init_aarch64() {
     let Some(desc) = machine_init::info() else {
         return;
     };
+    if !crate::arch::aarch64::power::psci_available() {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "vibeOS: smp: no /psci node, boot cpu only"
+        );
+        return;
+    }
     let bsp = per_cpu_init::cpu(0)
         .map(|c| {
             // Relaxed: the BSP's MPIDR is fixed after `init_bsp`; pairs with nothing.
@@ -1214,10 +1221,7 @@ fn start_one_aarch64(
     param.entry_va = ap_entry_aarch64 as *const () as u64;
     param.continue_va = arch::aarch64::secondary::continue_va();
     param.param_va = param_va;
-    param.conduit_hvc =
-        u64::from(crate::machine_init::info().is_some_and(|d| {
-            matches!(d.enable, vibeos::machine::EnableMethod::Psci { hvc: true })
-        }));
+    param.conduit_hvc = u64::from(crate::arch::aarch64::power::conduit_is_hvc());
     // SAFETY: `param_va` is the HHDM alias of a page we own. established here.
     unsafe { (param_va as *mut vibeos::arch::aarch64::psci::SecondaryParam).write_volatile(param) };
     arch::aarch64::secondary::clean_poc(

@@ -4,6 +4,8 @@
 
 use core::mem::offset_of;
 
+use crate::machine::EnableMethod;
+
 /// 64-bit `CPU_ON` (PSCI 0.2 / 1.0).
 pub const CPU_ON: u64 = 0xC400_0003;
 /// 32-bit `CPU_OFF`.
@@ -17,6 +19,28 @@ pub const SYSTEM_RESET: u64 = 0x8400_0009;
 
 /// `CPU_ON` returned this core already running.
 pub const ALREADY_ON: i64 = -4;
+
+/// PSCI `NOT_SUPPORTED` (DEN0022): returned without a call when the device
+/// tree names no PSCI conduit.
+pub const NOT_SUPPORTED: i64 = -1;
+
+/// The SMCCC conduit a PSCI call takes (DEN0028).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Conduit {
+    Hvc,
+    Smc,
+}
+
+/// The conduit `method` names, or `None` when the firmware description has no
+/// PSCI. Without a `/psci` node there is no EL2 or EL3 handler, so `hvc` or
+/// `smc` would be UNDEFINED and no call may be made (DT spec, `/psci`).
+pub const fn conduit(method: EnableMethod) -> Option<Conduit> {
+    match method {
+        EnableMethod::None => None,
+        EnableMethod::Psci { hvc: true } => Some(Conduit::Hvc),
+        EnableMethod::Psci { hvc: false } => Some(Conduit::Smc),
+    }
+}
 
 /// `AFFINITY_INFO`: the core is on.
 pub const AFF_ON: i64 = 0;
@@ -164,6 +188,20 @@ mod tests {
         assert_eq!(AFF_ON, 0);
         assert_eq!(AFF_OFF, 1);
         assert_eq!(AFF_ON_PENDING, 2);
+        assert_eq!(NOT_SUPPORTED, -1);
+    }
+
+    #[test]
+    fn conduit_follows_the_firmware_description() {
+        assert_eq!(conduit(EnableMethod::None), None);
+        assert_eq!(
+            conduit(EnableMethod::Psci { hvc: true }),
+            Some(Conduit::Hvc)
+        );
+        assert_eq!(
+            conduit(EnableMethod::Psci { hvc: false }),
+            Some(Conduit::Smc)
+        );
     }
 
     #[test]
