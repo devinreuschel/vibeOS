@@ -212,7 +212,8 @@ pub struct MachineDesc {
     pub dropped_interrupt_rows: u32,
     /// CPUs past [`MAX_CPUS`], which [`push_cpu`] drops. Those CPUs do not boot.
     pub dropped_cpus: u32,
-    /// Interrupt controllers past [`MAX_IRQ_CONTROLLERS`], which [`push_irq`] drops.
+    /// Interrupt controllers past [`MAX_IRQ_CONTROLLERS`], which [`push_irq`]
+    /// drops, and IOAPIC records past the MADT's cap.
     pub dropped_irq_controllers: u32,
     /// Timers past [`MAX_TIMERS`], which [`push_timer`] drops.
     pub dropped_timers: u32,
@@ -222,6 +223,9 @@ pub struct MachineDesc {
     pub dropped_virtio_mmio: u32,
     /// `msi-map` rows past [`MAX_MSI_MAP`] in an accepted host map.
     pub dropped_msi_rows: u32,
+    /// MADT interrupt source overrides past [`acpi::MAX_ISOS`], which the
+    /// MADT parse drops.
+    pub dropped_isos: u32,
 }
 
 const EMPTY_IRQ: IrqController = IrqController::Lapic { base: 0 };
@@ -268,6 +272,7 @@ impl Default for MachineDesc {
             dropped_consoles: 0,
             dropped_virtio_mmio: 0,
             dropped_msi_rows: 0,
+            dropped_isos: 0,
         }
     }
 }
@@ -452,6 +457,9 @@ impl MachineDesc {
 
 fn fill_madt(d: &mut MachineDesc, m: &MadtInfo) {
     d.pcat_compat = m.pcat_compat;
+    d.dropped_cpus = d.dropped_cpus.saturating_add(m.dropped_cpus);
+    d.dropped_irq_controllers = d.dropped_irq_controllers.saturating_add(m.dropped_ioapics);
+    d.dropped_isos = d.dropped_isos.saturating_add(m.dropped_isos);
     for id in m.apic_ids.iter().take(m.cpu_count) {
         push_cpu(
             d,
@@ -834,6 +842,21 @@ mod tests {
         }
         assert_eq!(d.cpu_count, MAX_CPUS);
         assert_eq!(d.dropped_cpus, 1);
+    }
+
+    #[test]
+    fn madt_drops_are_carried_into_the_desc() {
+        let m = MadtInfo {
+            dropped_cpus: 32,
+            dropped_ioapics: 1,
+            dropped_isos: 2,
+            ..MadtInfo::default()
+        };
+        let mut d = MachineDesc::default();
+        fill_madt(&mut d, &m);
+        assert_eq!(d.dropped_cpus, 32);
+        assert_eq!(d.dropped_irq_controllers, 1);
+        assert_eq!(d.dropped_isos, 2);
     }
 
     #[test]

@@ -109,6 +109,7 @@ fn warn_dropped(d: &MachineDesc) {
         (d.dropped_interrupt_rows, "dropped", "interrupt-map rows"),
         (d.dropped_msi_rows, "dropped", "msi-map rows"),
         (d.dropped_irq_controllers, "dropped", "irq controllers"),
+        (d.dropped_isos, "dropped", "interrupt overrides"),
         (d.dropped_timers, "dropped", "timers"),
         (d.dropped_consoles, "dropped", "consoles"),
         (d.dropped_virtio_mmio, "dropped", "virtio-mmio devices"),
