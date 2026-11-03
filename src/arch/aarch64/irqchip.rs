@@ -44,6 +44,16 @@ pub fn route_gsi(
     Ok(())
 }
 
+pub fn retarget_gsi(
+    gsi: u32,
+    vec: u8,
+    dest: u8,
+    trig: Trigger,
+    pol: Polarity,
+) -> Result<(), IpiError> {
+    route_gsi(gsi, vec, dest, trig, pol)
+}
+
 pub fn mask_gsi(_gsi: u32) {}
 pub fn unmask_gsi(_gsi: u32) {}
 

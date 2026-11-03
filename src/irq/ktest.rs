@@ -238,6 +238,7 @@ pub(crate) fn test_irq_pool() -> Outcome {
 
 /// A rejected `set_affinity` leaves the pool, the table and the RTE alone,
 /// and a good one keeps the RTE's mask bit.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_ioapic_affinity_state() -> Outcome {
     // ISA line 13 (FPU): nothing in the guest raises it.
     const GSI: u32 = 13;
@@ -257,6 +258,7 @@ pub(crate) fn test_ioapic_affinity_state() -> Outcome {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn ioapic_affinity_checks(irq: IrqId) -> Result<(), &'static str> {
     let vec = irq_init::vector(irq).ok_or("no vector")?;
     let pool_cpu = || irq_init::with_pool(|p| p.cpu_of(vec));
@@ -1389,6 +1391,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("reschedule_hook_installed", test_reschedule_hook_installed),
     test("irq_pool", test_irq_pool),
     test("irq_free_threaded", test_irq_free_threaded),
+    #[cfg(target_arch = "x86_64")]
     test("ioapic_affinity_state", test_ioapic_affinity_state),
     test("msix_cpu", test_msix_cpu),
     test("intx_fallback", test_intx_fallback),
