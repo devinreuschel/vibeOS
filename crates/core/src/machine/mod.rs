@@ -196,6 +196,15 @@ pub struct MachineDesc {
     pub virtio_mmio_count: usize,
     /// Structure-block nodes. The `dt: <n> nodes` marker prints this.
     pub node_count: u32,
+    /// Device-tree properties past the per-node cap, which the walk drops.
+    pub dropped_props: u32,
+    /// `arm,pl011` nodes past the console cap, which the pick drops.
+    pub dropped_uarts: u32,
+    /// `interrupt-map` properties whose length is not a whole number of
+    /// rows; the host's map is left empty.
+    pub refused_interrupt_maps: u32,
+    /// MCFG allocations whose base overflows once moved to the start bus.
+    pub dropped_mcfg: u32,
 }
 
 const EMPTY_IRQ: IrqController = IrqController::Lapic { base: 0 };
@@ -230,6 +239,10 @@ impl Default for MachineDesc {
             virtio_mmio: [MmioDev::default(); MAX_VIRTIO_MMIO],
             virtio_mmio_count: 0,
             node_count: 0,
+            dropped_props: 0,
+            dropped_uarts: 0,
+            refused_interrupt_maps: 0,
+            dropped_mcfg: 0,
         }
     }
 }
@@ -443,15 +456,20 @@ fn fill_madt(d: &mut MachineDesc, m: &MadtInfo) {
 }
 
 fn fill_mcfg(d: &mut MachineDesc, m: McfgInfo) {
-    // MCFG Base Address is already the first bus's config space
-    // (ACPI 6.5 §5.2.27.5). `pci::ecam_phys` adds `(bus - first) << 20`.
+    // The MCFG Base Address is bus 0's config space whatever the start bus
+    // (PCI Firmware Spec 3.2 §4.1.2), so the first bus's config space sits
+    // `start_bus` buses up. `pci::ecam_phys` adds `(bus - first) << 20`.
+    let Some(ecam_base) = m.ecam_base.checked_add(u64::from(m.start_bus) << 20) else {
+        d.dropped_mcfg = d.dropped_mcfg.saturating_add(1);
+        return;
+    };
     push_pci(
         d,
         PciHost {
             segment: m.segment,
             first_bus: m.start_bus,
             last_bus: m.end_bus,
-            ecam_base: m.ecam_base,
+            ecam_base,
             ecam_size: crate::pci::ecam_bytes(m.start_bus, m.end_bus),
             dma_coherent: true,
             ..PciHost::default()
@@ -648,30 +666,77 @@ mod tests {
         assert_eq!(d.reserved_count, 0);
     }
 
-    #[test]
-    fn mcfg_stores_first_bus_config_base() {
+    /// An MCFG with one allocation: `base` is bus 0's config space.
+    fn mcfg_table(base: u64, start: u8, end: u8) -> Vec<u8> {
         let mut extra = vec![0u8; 8 + 16];
-        extra[8..16].copy_from_slice(&0xE000_0000u64.to_le_bytes());
+        extra[8..16].copy_from_slice(&base.to_le_bytes());
         extra[16..18].copy_from_slice(&0u16.to_le_bytes());
-        extra[18] = 0x10;
-        extra[19] = 0x1F;
-        let bytes = sdt(SIG_MCFG, &extra);
-        let m = parse_mcfg(&bytes).unwrap();
+        extra[18] = start;
+        extra[19] = end;
+        sdt(SIG_MCFG, &extra)
+    }
+
+    fn from_mcfg(bytes: &[u8]) -> MachineDesc {
         let info = AcpiInfo {
             used_xsdt: true,
             table_count: 1,
             madt: None,
             hpet: None,
             fadt: None,
-            mcfg: Some(m),
+            mcfg: Some(parse_mcfg(bytes).unwrap()),
         };
-        let d = MachineDesc::from_acpi(&info);
+        MachineDesc::from_acpi(&info)
+    }
+
+    #[test]
+    fn mcfg_stores_first_bus_config_base() {
+        // Bus 0 is at 0xE000_0000, so bus 0x10 is at 0xE000_0000 + (0x10 << 20)
+        // = 0xE100_0000, and bus 0x1F at 0xE1F0_0000.
+        let d = from_mcfg(&mcfg_table(0xE000_0000, 0x10, 0x1F));
         let pci = d.pci_hosts();
         assert_eq!(pci.len(), 1);
         assert_eq!(pci[0].first_bus, 0x10);
         assert_eq!(pci[0].last_bus, 0x1F);
-        assert_eq!(pci[0].ecam_base, 0xE000_0000);
+        assert_eq!(pci[0].ecam_base, 0xE100_0000);
         assert_eq!(pci[0].ecam_size, 0x0100_0000);
+        assert_eq!(
+            crate::pci::ecam_phys(pci[0].ecam_base, 0x10, 0x1F, 0x10, 0, 0, 0),
+            Some(0xE100_0000)
+        );
+        assert_eq!(
+            crate::pci::ecam_phys(pci[0].ecam_base, 0x10, 0x1F, 0x1F, 0, 0, 0),
+            Some(0xE1F0_0000)
+        );
+    }
+
+    #[test]
+    fn mcfg_start_bus_one_is_reached_at_base_plus_one_bus() {
+        let d = from_mcfg(&mcfg_table(0xE000_0000, 1, 0xFF));
+        let pci = d.pci_hosts();
+        assert_eq!(pci.len(), 1);
+        assert_eq!(pci[0].ecam_base, 0xE010_0000);
+        assert_eq!(pci[0].ecam_size, 0x0FF0_0000);
+        assert_eq!(
+            crate::pci::ecam_phys(pci[0].ecam_base, 1, 0xFF, 1, 0, 0, 0),
+            Some(0xE010_0000)
+        );
+        assert_eq!(
+            crate::pci::ecam_phys(pci[0].ecam_base, 1, 0xFF, 2, 0, 0, 0),
+            Some(0xE020_0000)
+        );
+        assert_eq!(d.dropped_mcfg, 0);
+    }
+
+    #[test]
+    fn mcfg_base_that_overflows_with_start_bus_is_dropped_and_counted() {
+        // 0xFFFF_FFFF_FF00_0000 + (0x10 << 20) = 2^64 wraps to zero.
+        let d = from_mcfg(&mcfg_table(0xFFFF_FFFF_FF00_0000, 0x10, 0x1F));
+        assert_eq!(d.pci_hosts().len(), 0);
+        assert_eq!(d.dropped_mcfg, 1);
+        // The same base at start bus 0 needs no addition and is kept as it is.
+        let ok = from_mcfg(&mcfg_table(0xFFFF_FFFF_FF00_0000, 0, 0x0F));
+        assert_eq!(ok.pci_hosts()[0].ecam_base, 0xFFFF_FFFF_FF00_0000);
+        assert_eq!(ok.dropped_mcfg, 0);
     }
 
     #[test]

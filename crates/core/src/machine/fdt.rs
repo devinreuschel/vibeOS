@@ -4,6 +4,15 @@
 //! [`pick_pl011`] is the one console chooser: `/aliases` `serial0`, else the
 //! first okay `arm,pl011` in tree order. [`parse`] fills [`MachineDesc`]
 //! and calls it. `/chosen` is ignored. `memory@` is not RAM.
+//!
+//! Limits. `reg` is read with the parent's cell counts, keeping the low 64
+//! bits, and no `ranges` translation is applied. Each `interrupt-map` row is
+//! read as two parent address cells and three parent interrupt cells, without
+//! resolving the parent; a map whose length is not a whole number of rows is
+//! left empty and counted (`refused_interrupt_maps`). A node keeps its first
+//! 32 properties and the first four `arm,pl011` nodes; the rest are counted
+//! (`dropped_props`, `dropped_uarts`). A `/reserved-memory` past its table, or
+//! a walk past its caps, refuses the tree.
 
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
@@ -347,10 +356,12 @@ fn path_starts(path: &[u8], prefix: &[u8]) -> bool {
 
 /// The one UART chooser. `/aliases` `serial0`, else the first okay `arm,pl011`.
 pub fn pick_pl011(dtb: &[u8]) -> Option<u64> {
-    pick_pl011_full(dtb).map(|c| c.base)
+    let mut dropped = 0u32;
+    pick_pl011_full(dtb, &mut dropped).map(|c| c.base)
 }
 
-fn pick_pl011_full(dtb: &[u8]) -> Option<UartCand> {
+/// `dropped` counts the `arm,pl011` nodes past [`UART_CAP`].
+fn pick_pl011_full(dtb: &[u8], dropped: &mut u32) -> Option<UartCand> {
     let mut alias = [0u8; PATH_CAP];
     let mut alias_len = 0usize;
     let mut cands = [UartCand {
@@ -375,17 +386,21 @@ fn pick_pl011_full(dtb: &[u8]) -> Option<UartCand> {
         if compatible_has(props, b"arm,pl011")
             && let Some(r) =
                 prop_named(props, b"reg").and_then(|v| first_reg(v, inh.addr_cells, inh.size_cells))
-            && let Some(slot) = cands.get_mut(n)
         {
-            let plen = path.len().min(PATH_CAP);
-            if let Some(dst) = slot.path.get_mut(..plen) {
-                dst.copy_from_slice(path.get(..plen).unwrap_or(&[]));
+            match cands.get_mut(n) {
+                Some(slot) => {
+                    let plen = path.len().min(PATH_CAP);
+                    if let Some(dst) = slot.path.get_mut(..plen) {
+                        dst.copy_from_slice(path.get(..plen).unwrap_or(&[]));
+                    }
+                    slot.path_len = plen;
+                    slot.base = r.start;
+                    slot.size = r.size;
+                    slot.okay = status_okay(props);
+                    n = n.saturating_add(1);
+                }
+                None => *dropped = dropped.saturating_add(1),
             }
-            slot.path_len = plen;
-            slot.base = r.start;
-            slot.size = r.size;
-            slot.okay = status_okay(props);
-            n = n.saturating_add(1);
         }
         Ok(())
     })
@@ -432,9 +447,10 @@ pub fn parse_dtb(dtb: &[u8]) -> Result<Parsed, FdtError> {
         fill_node(&mut d, path, props, inh);
         Ok(())
     }) {
-        Ok(nodes) => {
-            d.node_count = nodes;
-            if let Some(c) = pick_pl011_full(dtb) {
+        Ok(walked) => {
+            d.node_count = walked.nodes;
+            d.dropped_props = walked.dropped_props;
+            if let Some(c) = pick_pl011_full(dtb, &mut d.dropped_uarts) {
                 push_console(
                     &mut d,
                     ConsoleDesc {
@@ -681,7 +697,9 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
             ..PciHost::default()
         };
         fill_msi_map(&mut host, props);
-        fill_interrupt_map(&mut host, props);
+        if fill_interrupt_map(&mut host, props) {
+            d.refused_interrupt_maps = d.refused_interrupt_maps.saturating_add(1);
+        }
         push_pci(d, host);
     }
 }
@@ -718,20 +736,28 @@ fn fill_msi_map(host: &mut PciHost, props: &[Prop<'_>]) {
     }
 }
 
-fn fill_interrupt_map(host: &mut PciHost, props: &[Prop<'_>]) {
+/// `true` when the map is refused: its length is not a whole number of rows.
+fn fill_interrupt_map(host: &mut PciHost, props: &[Prop<'_>]) -> bool {
     let Some(v) = prop_named(props, b"interrupt-map") else {
-        return;
+        return false;
     };
     // Child unit address + interrupt + phandle + parent address + parent
     // interrupt. PCI virt: 3 + 1 + 1. GICv2/v3: 2 + 3 parent cells.
     let child_addr = u32_prop(props, b"#address-cells").unwrap_or(3);
     let child_irq = u32_prop(props, b"#interrupt-cells").unwrap_or(1);
     let Some(child_span) = child_addr.checked_add(child_irq) else {
-        return;
+        return true;
     };
     let Some(stride) = child_span.checked_add(6) else {
-        return;
+        return true;
     };
+    // Any other length is not a whole number of rows of this shape.
+    let Some(row_bytes) = (stride as usize).checked_mul(4) else {
+        return true;
+    };
+    if v.len().checked_rem(row_bytes) != Some(0) {
+        return true;
+    }
     let mut i = 0usize;
     while host.interrupt_map_len < host.interrupt_map.len() {
         let Some(child_hi) = cell(v, i) else { break };
@@ -773,13 +799,21 @@ fn fill_interrupt_map(host: &mut PciHost, props: &[Prop<'_>]) {
             None => break,
         };
     }
+    false
+}
+
+#[derive(Clone, Copy)]
+struct WalkTotals {
+    nodes: u32,
+    /// Properties past [`PROP_CAP`] on the nodes visited, not passed on.
+    dropped_props: u32,
 }
 
 fn walk(
     dtb: &[u8],
     skip_unrelated: bool,
     mut visit: impl FnMut(&[u8], &[Prop<'_>], Inherit) -> Result<(), FdtError>,
-) -> Result<u32, FdtError> {
+) -> Result<WalkTotals, FdtError> {
     let h = parse_header(dtb)?;
     let st = struct_blob(dtb, &h)?;
     let strings = strings_blob(dtb, &h)?;
@@ -794,6 +828,7 @@ fn walk(
     let mut depth = 0usize;
     let mut reserved_depth: Option<usize> = None;
     let mut nodes = 0u32;
+    let mut dropped_props = 0u32;
     let mut props_buf = [Prop {
         name: &[],
         value: &[],
@@ -804,7 +839,12 @@ fn walk(
         off = off.checked_add(4).ok_or(FdtError::Truncated)?;
         match tok {
             FDT_NOP => {}
-            FDT_END => return Ok(nodes),
+            FDT_END => {
+                return Ok(WalkTotals {
+                    nodes,
+                    dropped_props,
+                });
+            }
             FDT_BEGIN_NODE => {
                 let name = cstr(st.get(off..).ok_or(FdtError::Truncated)?);
                 let raw = name.len().checked_add(1).ok_or(FdtError::Truncated)?;
@@ -851,6 +891,8 @@ fn walk(
                     if let Some(slot) = props_buf.get_mut(np) {
                         *slot = Prop { name: pname, value };
                         np = np.saturating_add(1);
+                    } else {
+                        dropped_props = dropped_props.saturating_add(1);
                     }
                 }
                 let props = props_buf.get(..np).unwrap_or(&[]);
@@ -1276,5 +1318,183 @@ mod tests {
         } else {
             include_bytes!("testdata/two-uarts.dtb").to_vec()
         }
+    }
+
+    /// A DTB built in memory, for the shapes the checked-in fixtures do not
+    /// reach. Every property name gets its own strings entry.
+    #[derive(Default)]
+    struct Dtb {
+        st: Vec<u8>,
+        strings: Vec<u8>,
+    }
+
+    impl Dtb {
+        fn token(&mut self, t: u32) {
+            self.st.extend_from_slice(&t.to_be_bytes());
+        }
+
+        fn pad(&mut self) {
+            while !self.st.len().is_multiple_of(4) {
+                self.st.push(0);
+            }
+        }
+
+        fn begin(&mut self, name: &str) {
+            self.token(FDT_BEGIN_NODE);
+            self.st.extend_from_slice(format!("{name}\0").as_bytes());
+            self.pad();
+        }
+
+        fn end(&mut self) {
+            self.token(FDT_END_NODE);
+        }
+
+        fn prop(&mut self, name: &str, value: &[u8]) {
+            let nameoff = self.strings.len() as u32;
+            self.strings
+                .extend_from_slice(format!("{name}\0").as_bytes());
+            self.token(FDT_PROP);
+            self.token(value.len() as u32);
+            self.token(nameoff);
+            self.st.extend_from_slice(value);
+            self.pad();
+        }
+
+        /// A version 17 header, an empty memreserve block, then the blocks.
+        fn finish(mut self) -> Vec<u8> {
+            self.token(FDT_END);
+            let off_st = HDR_LEN + 16;
+            let off_str = off_st + self.st.len();
+            let total = off_str + self.strings.len();
+            let words = [
+                FDT_MAGIC,
+                total as u32,
+                off_st as u32,
+                off_str as u32,
+                HDR_LEN as u32,
+                17,
+                16,
+                0,
+                self.strings.len() as u32,
+                self.st.len() as u32,
+            ];
+            let mut out = Vec::with_capacity(total);
+            for w in words {
+                out.extend_from_slice(&w.to_be_bytes());
+            }
+            out.extend_from_slice(&[0u8; 16]);
+            out.extend_from_slice(&self.st);
+            out.extend_from_slice(&self.strings);
+            out
+        }
+    }
+
+    /// A root with two-cell addresses and sizes, as QEMU `virt` has. The
+    /// caller closes it.
+    fn root_2_2() -> Dtb {
+        let mut t = Dtb::default();
+        t.begin("");
+        t.prop("#address-cells", &be(&[2]));
+        t.prop("#size-cells", &be(&[2]));
+        t
+    }
+
+    fn pl011(t: &mut Dtb, name: &str, base: u32) {
+        t.begin(name);
+        t.prop("compatible", b"arm,pl011\0");
+        t.prop("reg", &be(&[0, base, 0, 0x1000]));
+        t.end();
+    }
+
+    #[test]
+    fn properties_past_the_cap_are_counted() {
+        // Two cell properties, then PROP_CAP + 3 more: 5 past the cap.
+        let mut t = root_2_2();
+        for i in 0..PROP_CAP + 3 {
+            t.prop(&format!("p{i}"), &be(&[i as u32]));
+        }
+        pl011(&mut t, "serial@9000000", 0x900_0000);
+        t.end();
+        let d = parse(&t.finish()).unwrap();
+        assert_eq!((d.dropped_props, d.dropped_uarts), (5, 0));
+        assert_eq!(d.console_uart(), Some(0x900_0000));
+    }
+
+    #[test]
+    fn uarts_past_the_cap_are_counted() {
+        let mut t = root_2_2();
+        for i in 0..UART_CAP + 2 {
+            let base = 0x900_0000 + (i as u32) * 0x1_0000;
+            pl011(&mut t, &format!("serial@{i:x}"), base);
+        }
+        t.end();
+        let dtb = t.finish();
+        let d = parse(&dtb).unwrap();
+        assert_eq!(d.dropped_uarts, 2);
+        // The first okay UART in tree order stays the console.
+        assert_eq!(d.console_uart(), Some(0x900_0000));
+        assert_eq!(pick_pl011(&dtb), Some(0x900_0000));
+    }
+
+    /// One `interrupt-map` row of the shape `fill_interrupt_map` reads.
+    fn map_row(pin: u32) -> [u32; 10] {
+        [0, 0, 0, pin, 0x8001, 0, 0, 0, 3, 4]
+    }
+
+    fn host_with_map(map: &[u32]) -> Vec<u8> {
+        let mut t = root_2_2();
+        t.begin("pcie@10000000");
+        t.prop("compatible", b"pci-host-ecam-generic\0");
+        t.prop("reg", &be(&[0, 0x1000_0000, 0, 0x1000_0000]));
+        t.prop("bus-range", &be(&[0, 0xff]));
+        t.prop("#address-cells", &be(&[3]));
+        t.prop("#interrupt-cells", &be(&[1]));
+        t.prop("interrupt-map", &be(map));
+        t.end();
+        t.end();
+        t.finish()
+    }
+
+    #[test]
+    fn interrupt_map_rows_of_the_wrong_length_are_refused() {
+        let two: Vec<u32> = [map_row(1), map_row(2)].concat();
+        let d = parse(&host_with_map(&two)).unwrap();
+        assert_eq!(d.pci_hosts()[0].interrupt_map_len, 2);
+        assert_eq!(d.refused_interrupt_maps, 0);
+        // One stray cell: the map does not split into rows, so none is read.
+        let mut stray = two.clone();
+        stray.push(0);
+        let d = parse(&host_with_map(&stray)).unwrap();
+        assert_eq!(
+            (d.pci_hosts()[0].interrupt_map_len, d.refused_interrupt_maps),
+            (0, 1)
+        );
+        // Eleven cells is not a row either.
+        let d = parse(&host_with_map(&[0; 11])).unwrap();
+        assert_eq!(
+            (d.pci_hosts()[0].interrupt_map_len, d.refused_interrupt_maps),
+            (0, 1)
+        );
+    }
+
+    #[test]
+    fn checked_in_trees_drop_and_refuse_nothing() {
+        for blob in [
+            VIRT_82,
+            VIRT_82_SEC,
+            VIRT_CUR,
+            RESERVED,
+            TWO_REG,
+            TIMER5,
+            ECAM_RANGE,
+        ] {
+            let d = parse(blob).unwrap();
+            assert_eq!(
+                (d.dropped_props, d.dropped_uarts, d.refused_interrupt_maps),
+                (0, 0, 0)
+            );
+        }
+        // QEMU virt's PCI map is 16 rows of ten cells, as the fixture holds.
+        assert_eq!(parse(VIRT_82).unwrap().pci_hosts()[0].interrupt_map_len, 16);
     }
 }

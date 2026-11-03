@@ -44,6 +44,7 @@ pub fn init_from_dtb(boot: &BootInfo) {
         }
         Err(e) => refuse_dt(e),
     };
+    warn_dropped(&d);
     if boot.rsdp_phys == 0 {
         let n = d.node_count;
         // SAFETY: invariant I22, established at `cell::BootCell::set`: this
@@ -91,15 +92,36 @@ fn refuse_dt(e: vibeos::machine::fdt::FdtError) -> ! {
     crate::boot::halt_with("vibeOS: dt: refused");
 }
 
+/// One warning line when a cap or a row check dropped something from `d`.
+fn warn_dropped(d: &MachineDesc) {
+    if d.dropped_props == 0
+        && d.dropped_uarts == 0
+        && d.refused_interrupt_maps == 0
+        && d.dropped_mcfg == 0
+    {
+        return;
+    }
+    crate::klog!(
+        vibeos::log::Level::Warn,
+        "vibeOS: machine: dropped {} props, {} uarts, {} mcfg; refused {} interrupt maps",
+        d.dropped_props,
+        d.dropped_uarts,
+        d.dropped_mcfg,
+        d.refused_interrupt_maps
+    );
+}
+
 /// MADT / HPET / MCFG. No-op when a DTB already filled the cell.
 pub fn set_from_acpi(info: &AcpiInfo) {
     if DESC.try_get().is_some() {
         return;
     }
+    let d = MachineDesc::from_acpi(info);
+    warn_dropped(&d);
     // SAFETY: invariant I22, established at `cell::BootCell::set`: this is
     // the one write, on the BSP in `acpi::acpi_init::init` before SMP, and
     // no reader of `DESC` runs until it returns.
-    unsafe { DESC.set(MachineDesc::from_acpi(info)) };
+    unsafe { DESC.set(d) };
 }
 
 /// DTB reserved ranges, from `DESC` or the early stash when ACPI owns the cell.

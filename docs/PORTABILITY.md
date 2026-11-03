@@ -90,6 +90,16 @@ by compatible string or `_HID`, whose resources ROADMAP §20.2's `_CRS` and `_PR
 hot removal can take away. The ACPI parser (MADT, HPET, MCFG) and the device-tree parser each fill it;
 x86_64's consumers of those tables read `MachineDesc`.
 
+The device-tree reader is bounded, not general. QEMU `virt` needs a root with two address and two size
+cells, GIC `reg` pairs, three-cell `interrupts` specifiers, and a PCI `interrupt-map` of sixteen ten-cell
+rows (child address and pin, parent phandle, two parent address cells, three parent interrupt cells); the
+reader reads exactly that shape. It applies no `ranges` translation to `reg`, and it does not resolve the
+parent phandle, so a map whose length is not a whole number of such rows is left empty and counted. It
+ignores `/chosen` and `memory@`, keeps the first 32 properties of a node and the first four `arm,pl011`
+nodes, and counts what it drops. A `/reserved-memory` past its table, or a walk past its depth cap, refuses
+the whole tree. An MCFG whose base overflows once moved to its start bus is dropped and counted. Each count
+is logged as one warning line at boot.
+
 The mechanism:
 
 - A concern whose Seam is a trait is a trait in `vibeos-core` (`PageTable`, `Barriers`,
