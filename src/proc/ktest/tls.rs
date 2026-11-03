@@ -35,19 +35,33 @@ x86_user_code!(
     "
 );
 
+// A TP=0 process has `FS_BASE` 0, so `fs:[rip + 2f]` reads the quad at
+// label 2 (the constant) at its own address. A leaked base V reads V + that
+// address instead: a fault, or a word other than the constant. `rdfsbase`
+// needs CR4.FSGSBASE, which the kernel does not set.
 x86_user_code!(
-    YIELD_LOOP,
+    TLS_ZERO,
     "
     mov ebx, 80
+    mov r12, 0x1122334455667788
 1:
     mov eax, 24
     syscall
+    mov rax, qword ptr fs:[rip + 2f]
+    cmp rax, r12
+    jne 9f
     dec ebx
     jnz 1b
     xor edi, edi
     mov eax, 60
     syscall
+9:
+    mov edi, 2
+    mov eax, 60
+    syscall
     ud2
+2:
+    .quad 0x1122334455667788
     "
 );
 
@@ -204,7 +218,7 @@ pub(crate) fn test_tls_yield() -> Outcome {
         Ok(p) => p,
         Err(e) => return crate::fail_fmt!("spawn p: {}", e.as_str()),
     };
-    let r = match user::spawn(&Image::Code(YIELD_LOOP, DEFAULT), &["tls_y_r"]) {
+    let r = match user::spawn(&Image::Code(TLS_ZERO, DEFAULT), &["tls_y_r"]) {
         Ok(p) => p,
         Err(e) => {
             let _ = user::wait(p);
