@@ -27,6 +27,15 @@ pub fn pixel_offset(x: u32, y: u32, width: u32, height: u32, pitch: u64) -> Opti
     row.checked_add(col)
 }
 
+/// Whether `[phys, phys + len)` lies inside the span `[base, base + span)`.
+/// `false` when either end overflows.
+pub fn span_contains(base: u64, span: u64, phys: u64, len: u64) -> bool {
+    match (base.checked_add(span), phys.checked_add(len)) {
+        (Some(span_end), Some(end)) => phys >= base && end <= span_end,
+        _ => false,
+    }
+}
+
 /// Bytes a console write hands the grid per console-lock hold.
 pub const CHUNK: usize = 256;
 /// Framebuffer bytes one redraw piece writes at most, per console-lock hold.
@@ -541,6 +550,22 @@ mod tests {
     #[test]
     fn glyph_origin_is_8x8() {
         assert_eq!(glyph_origin(3, 2), (24, 16));
+    }
+
+    #[test]
+    fn span_contains_only_whole_ranges() {
+        // The span [0x1000, 0x3000).
+        assert!(span_contains(0x1000, 0x2000, 0x1000, 0x2000));
+        assert!(span_contains(0x1000, 0x2000, 0x2000, 0x1000));
+        assert!(span_contains(0x1000, 0x2000, 0x2FFF, 1));
+        // A range that starts before the span or ends after it.
+        assert!(!span_contains(0x1000, 0x2000, 0xFFF, 0x10));
+        assert!(!span_contains(0x1000, 0x2000, 0x2000, 0x1001));
+        // A range longer than the span, which a BAR may be.
+        assert!(!span_contains(0x1000, 0x2000, 0x1000, 0x10_0000));
+        // An end that overflows u64 is outside the span, not a wrap to inside.
+        assert!(!span_contains(0x1000, 0x2000, u64::MAX - 0x10, 0x20));
+        assert!(!span_contains(u64::MAX - 0x10, 0x20, 0x1000, 0x10));
     }
 
     #[test]

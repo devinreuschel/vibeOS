@@ -12,7 +12,9 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use vibeos::fb::{CHUNK, MAX_CELLS, TextGrid, glyph_origin, pack_bgrx, pixel_offset};
+use vibeos::fb::{
+    CHUNK, MAX_CELLS, TextGrid, glyph_origin, pack_bgrx, pixel_offset, span_contains,
+};
 use vibeos::font::{self, FONT_H, FONT_W};
 use vibeos::lock::RANK_DEVICE;
 
@@ -85,8 +87,10 @@ pub fn overlaps_phys(phys: u64, len: u64) -> bool {
     phys < base.saturating_add(span) && base < phys.saturating_add(len)
 }
 
-/// Kernel VA of `phys` inside the console framebuffer mapping, if any.
-pub fn va_for_phys(phys: u64) -> Option<u64> {
+/// Kernel VA of `[phys, phys + len)` inside the console framebuffer
+/// mapping, if the whole range lies in the framebuffer's span. A range that
+/// runs past the span gets `None`: the mapping ends there.
+pub fn va_for_phys(phys: u64, len: u64) -> Option<u64> {
     // Acquire: pairs with the Release store in `init`.
     let span = FB_LEN.load(Ordering::Acquire);
     if span == 0 {
@@ -94,12 +98,12 @@ pub fn va_for_phys(phys: u64) -> Option<u64> {
     }
     // Acquire: pairs with the Release store in `init`.
     let base = FB_PHYS.load(Ordering::Acquire);
-    if phys < base || phys >= base.saturating_add(span) {
+    if !span_contains(base, span, phys, len) {
         return None;
     }
     // Acquire: pairs with the Release store in `init`.
     let virt = FB_VIRT.load(Ordering::Acquire);
-    Some(virt.saturating_add(phys - base))
+    virt.checked_add(phys.checked_sub(base)?)
 }
 
 /// Attach the first framebuffer [`Fb::new`] accepts.

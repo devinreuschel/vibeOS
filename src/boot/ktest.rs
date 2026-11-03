@@ -27,8 +27,9 @@ pub(crate) fn test_bootinfo_consistent() -> Outcome {
         let end = fb.phys.saturating_add(fb.size);
         while p < end {
             let hhdm = VirtAddr(paging_init::hhdm_offset().wrapping_add(p));
+            let n = end.saturating_sub(p).min(0x1000);
             let mapped = paging_init::translate(hhdm).is_some()
-                || crate::fb_init::va_for_phys(p)
+                || crate::fb_init::va_for_phys(p, n)
                     .is_some_and(|v| paging_init::translate(VirtAddr(v)).is_some());
             if !mapped {
                 return Outcome::Fail("fb page unmapped");
