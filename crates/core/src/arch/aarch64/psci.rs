@@ -228,9 +228,8 @@ mod tests {
     #[test]
     fn computed_sysregs_are_the_202_values() {
         assert_eq!(sysreg::sctlr_el1() & 1, 1);
+        // VHE writes `cntkctl_el1` into CNTHCTL_EL2, so this is the value.
         assert_eq!(sysreg::cntkctl_el1(), 1 << 1);
-        // E2H=0 encoding. VHE writes `cntkctl_el1` into CNTHCTL_EL2.
-        assert_eq!(sysreg::cnthctl_el2(), 0b11);
         assert_eq!(sysreg::pmuserenr_el0(), 0);
         assert_eq!(sysreg::cpacr_el1() >> 20 & 0b11, 0b11);
     }

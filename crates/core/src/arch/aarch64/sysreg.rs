@@ -96,23 +96,11 @@ pub const fn feat_gic_sysreg(pfr0: u64) -> bool {
 ///
 /// Bit 1 is `EL0VCTEN`: EL0 reads `CNTVCT_EL0`. Bit 0 is `EL0PCTEN` and
 /// stays clear, so an EL0 read of `CNTPCT_EL0` traps (DESIGN §11.4).
-/// With E2H=1 those are the names of `CNTHCTL_EL2` bits 0 and 1. The
-/// E2H=0 names, `EL1PCTEN` and `EL1PCEN`, are [`cnthctl_el2`]; writing
-/// that `0b11` under VHE sets `EL0PCTEN`.
+/// With E2H=1 those are the names of `CNTHCTL_EL2` bits 0 and 1, so this
+/// one value is what the kernel writes to `CNTHCTL_EL2` under VHE.
 pub const fn cntkctl_el1() -> u64 {
     const EL0VCTEN: u64 = 1 << 1;
     EL0VCTEN
-}
-
-/// `CNTHCTL_EL2` when `HCR_EL2.E2H` is 0 (Arm ARM CNTHCTL_EL2).
-///
-/// Bit 0 is `EL1PCTEN` and bit 1 is `EL1PCEN`: EL1 accesses the physical
-/// counter and timer. With E2H=1 those bits are `EL0PCTEN` and `EL0VCTEN`;
-/// that regime writes [`cntkctl_el1`] instead.
-pub const fn cnthctl_el2() -> u64 {
-    const EL1PCTEN: u64 = 1 << 0;
-    const EL1PCEN: u64 = 1 << 1;
-    EL1PCTEN | EL1PCEN
 }
 
 /// Smallest data-cache line in bytes, from `CTR_EL0.DminLine` (bits 19:16;
@@ -247,12 +235,6 @@ mod tests {
         const EL0VCTEN: u64 = 1 << 1;
         assert_eq!(cntkctl_el1(), EL0VCTEN);
         assert_eq!(cntkctl_el1() & EL0PCTEN, 0);
-        // CNTHCTL_EL2 when E2H is 0. The same bits under E2H=1 are
-        // EL0PCTEN and EL0VCTEN, so this value must not be written then.
-        const EL1PCTEN: u64 = 1 << 0;
-        const EL1PCEN: u64 = 1 << 1;
-        assert_eq!(cnthctl_el2(), EL1PCTEN | EL1PCEN);
-        assert_ne!(cnthctl_el2(), cntkctl_el1());
     }
 
     #[test]
