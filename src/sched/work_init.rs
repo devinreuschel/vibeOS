@@ -228,6 +228,12 @@ pub(crate) fn spawn_cpu_workers(cpu: u32) -> Result<CpuWorkers, SpawnError> {
     Ok(CpuWorkers { wq: wq.id() })
 }
 
+/// Call `f` with each frame of `w`'s worker stack (kernel_tests, x86_64).
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+pub(crate) fn for_each_stack_frame(w: &CpuWorkers, f: impl FnMut(u64, u8)) {
+    thread_init::for_each_stack_frame(w.wq, f);
+}
+
 /// CPUs whose workers [`start_cpu_workers`] has made runnable. A `kernel_tests`
 /// check that the online mask and this set agree (a late AP must not be
 /// online with no worker).

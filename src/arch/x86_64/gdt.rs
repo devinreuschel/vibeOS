@@ -23,8 +23,8 @@ use crate::x86::{self, DtPtr};
 /// Mapped pages on each IST stack: four, as DESIGN §5.1 gives, so a dump
 /// or a handler prologue cannot eat the IST. Guard page is still
 /// unmapped below.
-const IST_PAGES: usize = 4;
-const RSP0_PAGES: usize = 4;
+pub(crate) const IST_PAGES: usize = 4;
+pub(crate) const RSP0_PAGES: usize = 4;
 
 /// GDT+TSS for one CPU. The TSS sits in an `UnsafeCell`: after `load`
 /// the tables are shared as `&CpuTables`, and [`CpuTables::set_rsp0`] is

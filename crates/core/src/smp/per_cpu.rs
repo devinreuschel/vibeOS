@@ -70,6 +70,14 @@ impl StackCache {
     }
 
     /// The stack put last, if any.
+    /// Whether a cached stack maps the frame at `phys`.
+    pub fn holds_frame(&self, phys: u64) -> bool {
+        self.slots
+            .iter()
+            .flatten()
+            .any(|s| s.frames().iter().flatten().any(|f| f.base() == phys))
+    }
+
     pub fn take(&mut self) -> Option<GuardedStack> {
         self.slots.iter_mut().rev().find_map(Option::take)
     }
