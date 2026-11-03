@@ -71,6 +71,11 @@ fn cache_ops_ok() -> bool {
     unsafe {
         asm!("mrs {0}, dczid_el0", out(reg) dczid, options(nomem, nostack, preserves_flags));
     }
+    // DCZID_EL0.DZP (bit 4) set makes `dc zva` trap, so the op below would
+    // kill this check with SIGILL instead of reporting it (Arm ARM DDI0487).
+    if dczid & (1 << 4) != 0 {
+        return false;
+    }
     // DCZID_EL0.BS is log2 of the block size in words (Arm ARM DDI0487).
     let block = 4usize << (dczid & 0xf);
     if block > CACHE_LEN {
