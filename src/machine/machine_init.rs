@@ -92,27 +92,39 @@ fn refuse_dt(e: vibeos::machine::fdt::FdtError) -> ! {
     crate::boot::halt_with("vibeOS: dt: refused");
 }
 
-/// One warning line when a cap or a row check dropped something from `d`.
+/// One warning line per kind a cap or a row check dropped or refused in
+/// `d`, CPUs first. A record holds `MSG_CAP` bytes, so one line naming every
+/// kind would cut off its tail.
 fn warn_dropped(d: &MachineDesc) {
-    if d.dropped_props == 0
-        && d.dropped_uarts == 0
-        && d.refused_interrupt_maps == 0
-        && d.dropped_mcfg == 0
-        && d.dropped_pci_hosts == 0
-        && d.dropped_interrupt_rows == 0
-    {
-        return;
+    let kinds = [
+        (
+            d.dropped_cpus,
+            "dropped",
+            "CPUs past the cap, which do not boot",
+        ),
+        (d.dropped_props, "dropped", "props"),
+        (d.dropped_uarts, "dropped", "uarts"),
+        (d.dropped_mcfg, "dropped", "mcfg allocations"),
+        (d.dropped_pci_hosts, "dropped", "pci hosts"),
+        (d.dropped_interrupt_rows, "dropped", "interrupt-map rows"),
+        (d.dropped_msi_rows, "dropped", "msi-map rows"),
+        (d.dropped_irq_controllers, "dropped", "irq controllers"),
+        (d.dropped_timers, "dropped", "timers"),
+        (d.dropped_consoles, "dropped", "consoles"),
+        (d.dropped_virtio_mmio, "dropped", "virtio-mmio devices"),
+        (d.refused_interrupt_maps, "refused", "interrupt maps"),
+    ];
+    for (n, verb, what) in kinds {
+        if n != 0 {
+            crate::klog!(
+                vibeos::log::Level::Warn,
+                "vibeOS: machine: {} {} {}",
+                verb,
+                n,
+                what
+            );
+        }
     }
-    crate::klog!(
-        vibeos::log::Level::Warn,
-        "vibeOS: machine: dropped {} props, {} uarts, {} mcfg, {} pci hosts, {} interrupt-map rows; refused {} interrupt maps",
-        d.dropped_props,
-        d.dropped_uarts,
-        d.dropped_mcfg,
-        d.dropped_pci_hosts,
-        d.dropped_interrupt_rows,
-        d.refused_interrupt_maps
-    );
 }
 
 /// MADT / HPET / MCFG. No-op when a DTB already filled the cell.

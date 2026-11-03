@@ -210,6 +210,18 @@ pub struct MachineDesc {
     pub dropped_pci_hosts: u32,
     /// `interrupt-map` rows past [`MAX_INTERRUPT_MAP`] in an accepted map.
     pub dropped_interrupt_rows: u32,
+    /// CPUs past [`MAX_CPUS`], which [`push_cpu`] drops. Those CPUs do not boot.
+    pub dropped_cpus: u32,
+    /// Interrupt controllers past [`MAX_IRQ_CONTROLLERS`], which [`push_irq`] drops.
+    pub dropped_irq_controllers: u32,
+    /// Timers past [`MAX_TIMERS`], which [`push_timer`] drops.
+    pub dropped_timers: u32,
+    /// Consoles past [`MAX_CONSOLES`], which [`push_console`] drops.
+    pub dropped_consoles: u32,
+    /// virtio-mmio devices past [`MAX_VIRTIO_MMIO`], which [`push_virtio`] drops.
+    pub dropped_virtio_mmio: u32,
+    /// `msi-map` rows past [`MAX_MSI_MAP`] in an accepted host map.
+    pub dropped_msi_rows: u32,
 }
 
 const EMPTY_IRQ: IrqController = IrqController::Lapic { base: 0 };
@@ -250,6 +262,12 @@ impl Default for MachineDesc {
             dropped_mcfg: 0,
             dropped_pci_hosts: 0,
             dropped_interrupt_rows: 0,
+            dropped_cpus: 0,
+            dropped_irq_controllers: 0,
+            dropped_timers: 0,
+            dropped_consoles: 0,
+            dropped_virtio_mmio: 0,
+            dropped_msi_rows: 0,
         }
     }
 }
@@ -502,6 +520,8 @@ pub(crate) fn push_cpu(d: &mut MachineDesc, c: CpuDesc) {
     if let Some(slot) = d.cpus.get_mut(d.cpu_count) {
         *slot = c;
         d.cpu_count = d.cpu_count.saturating_add(1);
+    } else {
+        d.dropped_cpus = d.dropped_cpus.saturating_add(1);
     }
 }
 
@@ -509,6 +529,8 @@ pub(crate) fn push_irq(d: &mut MachineDesc, c: IrqController) {
     if let Some(slot) = d.irq_controllers.get_mut(d.irq_controller_count) {
         *slot = c;
         d.irq_controller_count = d.irq_controller_count.saturating_add(1);
+    } else {
+        d.dropped_irq_controllers = d.dropped_irq_controllers.saturating_add(1);
     }
 }
 
@@ -516,6 +538,8 @@ pub(crate) fn push_timer(d: &mut MachineDesc, t: TimerDesc) {
     if let Some(slot) = d.timers.get_mut(d.timer_count) {
         *slot = t;
         d.timer_count = d.timer_count.saturating_add(1);
+    } else {
+        d.dropped_timers = d.dropped_timers.saturating_add(1);
     }
 }
 
@@ -523,6 +547,8 @@ pub(crate) fn push_console(d: &mut MachineDesc, c: ConsoleDesc) {
     if let Some(slot) = d.consoles.get_mut(d.console_count) {
         *slot = c;
         d.console_count = d.console_count.saturating_add(1);
+    } else {
+        d.dropped_consoles = d.dropped_consoles.saturating_add(1);
     }
 }
 
@@ -575,6 +601,8 @@ pub(crate) fn push_virtio(d: &mut MachineDesc, m: MmioDev) {
     if let Some(slot) = d.virtio_mmio.get_mut(d.virtio_mmio_count) {
         *slot = m;
         d.virtio_mmio_count = d.virtio_mmio_count.saturating_add(1);
+    } else {
+        d.dropped_virtio_mmio = d.dropped_virtio_mmio.saturating_add(1);
     }
 }
 
@@ -796,6 +824,76 @@ mod tests {
         }
         assert_eq!(d.pci_host_count, MAX_PCI_HOSTS);
         assert_eq!(d.dropped_pci_hosts, 1);
+    }
+
+    #[test]
+    fn cpu_past_the_cap_is_counted() {
+        let mut d = MachineDesc::default();
+        for i in 0..MAX_CPUS as u64 + 1 {
+            push_cpu(&mut d, CpuDesc { hw_id: i });
+        }
+        assert_eq!(d.cpu_count, MAX_CPUS);
+        assert_eq!(d.dropped_cpus, 1);
+    }
+
+    #[test]
+    fn irq_controller_past_the_cap_is_counted() {
+        let mut d = MachineDesc::default();
+        for i in 0..MAX_IRQ_CONTROLLERS as u64 + 1 {
+            push_irq(&mut d, IrqController::Lapic { base: i });
+        }
+        assert_eq!(d.irq_controller_count, MAX_IRQ_CONTROLLERS);
+        assert_eq!(d.dropped_irq_controllers, 1);
+    }
+
+    #[test]
+    fn timer_past_the_cap_is_counted() {
+        let mut d = MachineDesc::default();
+        for _ in 0..MAX_TIMERS + 1 {
+            push_timer(
+                &mut d,
+                TimerDesc::Hpet {
+                    base: 0,
+                    minimum_tick: 0,
+                    period_fs: 0,
+                },
+            );
+        }
+        assert_eq!(d.timer_count, MAX_TIMERS);
+        assert_eq!(d.dropped_timers, 1);
+    }
+
+    #[test]
+    fn console_past_the_cap_is_counted() {
+        let mut d = MachineDesc::default();
+        for i in 0..MAX_CONSOLES as u64 + 1 {
+            push_console(
+                &mut d,
+                ConsoleDesc {
+                    base: 0x900_0000 + i * 0x1000,
+                    size: 0x1000,
+                },
+            );
+        }
+        assert_eq!(d.console_count, MAX_CONSOLES);
+        assert_eq!(d.dropped_consoles, 1);
+    }
+
+    #[test]
+    fn virtio_mmio_past_the_cap_is_counted() {
+        let mut d = MachineDesc::default();
+        for i in 0..MAX_VIRTIO_MMIO as u64 + 1 {
+            push_virtio(
+                &mut d,
+                MmioDev {
+                    base: 0x0a00_0000 + i * 0x200,
+                    size: 0x200,
+                    ..MmioDev::default()
+                },
+            );
+        }
+        assert_eq!(d.virtio_mmio_count, MAX_VIRTIO_MMIO);
+        assert_eq!(d.dropped_virtio_mmio, 1);
     }
 
     #[test]

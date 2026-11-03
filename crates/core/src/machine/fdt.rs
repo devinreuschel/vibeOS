@@ -9,11 +9,12 @@
 //! bits, and no `ranges` translation is applied. Each `interrupt-map` row is
 //! read as two parent address cells and three parent interrupt cells, without
 //! resolving the parent; a map whose length is not a whole number of rows is
-//! left empty and counted (`refused_interrupt_maps`), and rows past the host's
-//! cap are counted (`dropped_interrupt_rows`). A node keeps its first 32
-//! properties and the first four `arm,pl011` nodes; the rest are counted
-//! (`dropped_props`, `dropped_uarts`). A `/reserved-memory` past its table, or
-//! a walk past its caps, refuses the tree.
+//! left empty and counted (`refused_interrupt_maps`). Rows past the host's
+//! cap are counted (`dropped_interrupt_rows` for `interrupt-map`,
+//! `dropped_msi_rows` for `msi-map`). A node keeps its first 32 properties
+//! and the first four `arm,pl011` nodes; the rest are counted (`dropped_props`,
+//! `dropped_uarts`). A `/reserved-memory` past its table, or a walk past its
+//! caps, refuses the tree.
 
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
@@ -697,7 +698,7 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
             msi_parent,
             ..PciHost::default()
         };
-        fill_msi_map(&mut host, props);
+        fill_msi_map(&mut host, props, &mut d.dropped_msi_rows);
         if fill_interrupt_map(&mut host, props, &mut d.dropped_interrupt_rows) {
             d.refused_interrupt_maps = d.refused_interrupt_maps.saturating_add(1);
         }
@@ -705,7 +706,8 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
     }
 }
 
-fn fill_msi_map(host: &mut PciHost, props: &[Prop<'_>]) {
+/// Rows past [`MAX_MSI_MAP`] are added to `dropped`.
+fn fill_msi_map(host: &mut PciHost, props: &[Prop<'_>], dropped: &mut u32) {
     let Some(v) = prop_named(props, b"msi-map") else {
         return;
     };
@@ -735,6 +737,10 @@ fn fill_msi_map(host: &mut PciHost, props: &[Prop<'_>]) {
             None => break,
         };
     }
+    // Each row is four 32-bit cells; the rows less the ones the cap let in.
+    let rows = v.len().checked_div(4 * 4).unwrap_or(0);
+    let past_cap = rows.saturating_sub(host.msi_map_len);
+    *dropped = dropped.saturating_add(u32::try_from(past_cap).unwrap_or(u32::MAX));
 }
 
 /// `true` when the map is refused: its length is not a whole number of rows.

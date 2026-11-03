@@ -1,7 +1,7 @@
 //! Host tests for the device-tree reader in `fdt.rs` (ROADMAP §11.5).
 
 use super::*;
-use crate::machine::{IrqController, MAX_INTERRUPT_MAP};
+use crate::machine::{IrqController, MAX_INTERRUPT_MAP, MAX_MSI_MAP};
 use crate::pmm::clip_usable;
 
 const VIRT_82: &[u8] = include_bytes!("testdata/virt-8.2.dtb");
@@ -575,6 +575,34 @@ fn interrupt_map_rows_past_the_cap_are_counted() {
     assert_eq!(host.interrupt_map[MAX_INTERRUPT_MAP - 1].pin, 15);
 }
 
+/// A PCI host whose `msi-map` is `map`, four cells per row.
+fn host_with_msi_map(map: &[u32]) -> Vec<u8> {
+    let mut t = root_2_2();
+    t.begin("pcie@10000000");
+    t.prop("compatible", b"pci-host-ecam-generic\0");
+    t.prop("reg", &be(&[0, 0x1000_0000, 0, 0x1000_0000]));
+    t.prop("bus-range", &be(&[0, 0xff]));
+    t.prop("msi-map", &be(map));
+    t.end();
+    t.end();
+    t.finish()
+}
+
+#[test]
+fn msi_map_rows_past_the_cap_are_counted() {
+    // One row more than the host keeps: rid, phandle, device id, length.
+    let rows: Vec<u32> = (0..MAX_MSI_MAP as u32 + 1)
+        .flat_map(|i| [i << 3, 1, i << 3, 0x8])
+        .collect();
+    let d = parse(&host_with_msi_map(&rows)).unwrap();
+    let host = &d.pci_hosts()[0];
+    assert_eq!((host.msi_map_len, d.dropped_msi_rows), (MAX_MSI_MAP, 1));
+    assert_eq!(
+        host.msi_map[MAX_MSI_MAP - 1].rid_base,
+        ((MAX_MSI_MAP as u32) - 1) << 3
+    );
+}
+
 #[test]
 fn checked_in_trees_drop_and_refuse_nothing() {
     for blob in [
@@ -594,8 +622,9 @@ fn checked_in_trees_drop_and_refuse_nothing() {
                 d.refused_interrupt_maps,
                 d.dropped_interrupt_rows,
                 d.dropped_pci_hosts,
+                d.dropped_msi_rows,
             ),
-            (0, 0, 0, 0, 0)
+            (0, 0, 0, 0, 0, 0)
         );
     }
     // QEMU virt's PCI map is 16 rows of ten cells, as the fixture holds.
