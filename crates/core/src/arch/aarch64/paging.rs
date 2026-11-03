@@ -387,7 +387,7 @@ mod tests {
         let raw = m.leaf_raw(user).unwrap();
         assert_eq!(raw & DESC_UXN, 0);
         assert_eq!(raw & DESC_AF, DESC_AF);
-        assert_eq!(raw, raw);
+        assert_eq!(pte_phys(raw), PhysAddr(0x2000));
         let _ = PAGE_SIZE_4K;
     }
 }
