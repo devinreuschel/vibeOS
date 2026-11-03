@@ -5,8 +5,8 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::irq::{
-    ITS_MAPD_SIZE, IrqError, ItsCommand, baser_entry_bytes, encode_device_unmap, encode_lpi_free,
-    gits_devbits, its_device_fits, its_event_limit, rdbase_field,
+    ITS_MAPD_SIZE, IrqError, ItsCommand, baser_entry_bytes, baser_indirect, encode_device_unmap,
+    encode_lpi_free, gits_devbits, its_device_fits, its_event_limit, rdbase_field,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::log::Level;
@@ -151,8 +151,17 @@ unsafe fn init_its_basers(its: u64) -> DevTable {
             note_shareability(val, read);
             clean_table_if_needed(pa, 4096);
             if ty == GITS_BASER_TYPE_DEVICE && dev.bytes == 0 {
-                dev.bytes = 4096;
-                dev.entry = baser_entry_bytes(read);
+                if baser_indirect(read) {
+                    // The ITS kept Indirect set, so it does not read this page as
+                    // a device table. Leave `bytes` 0 and `map_its_event` refuses.
+                    crate::klog!(
+                        Level::Error,
+                        "vibeOS: gic: its device table is indirect; no device table"
+                    );
+                } else {
+                    dev.bytes = 4096;
+                    dev.entry = baser_entry_bytes(read);
+                }
             }
         }
         n += 1;

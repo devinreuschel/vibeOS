@@ -49,6 +49,13 @@ pub const fn baser_entry_bytes(baser: u64) -> u64 {
     ((baser >> 48) & 0x1F) + 1
 }
 
+/// GITS_BASER.Indirect (bit 62) as read back: the ITS keeps a two-level table,
+/// whose first level holds pointers, where the kernel wrote one level of
+/// entries (IHI 0069G). A set bit means the table written is not the one used.
+pub const fn baser_indirect(baser: u64) -> bool {
+    baser & (1u64 << 62) != 0
+}
+
 /// DeviceID bits the ITS implements: GITS_TYPER.Devbits (bits [17:13]) plus
 /// one (IHI 0069G).
 pub const fn gits_devbits(typer: u64) -> u32 {
@@ -371,6 +378,17 @@ mod tests {
         // Devbits (bits [17:13]) is minus one: 0x0F is 16 bits.
         assert_eq!(gits_devbits(0x0F << 13), 16);
         assert_eq!(gits_devbits(0), 1);
+    }
+
+    #[test]
+    fn baser_indirect_is_bit_62() {
+        // Indirect is bit 62; Valid (63) and the type field (58:56) do not set it.
+        assert!(baser_indirect(1u64 << 62));
+        assert!(baser_indirect((1u64 << 62) | (1u64 << 63) | (1u64 << 56)));
+        assert!(!baser_indirect(0));
+        assert!(!baser_indirect(1u64 << 63));
+        assert!(!baser_indirect((0x7u64 << 56) | (0x7u64 << 48)));
+        assert!(!baser_indirect((1u64 << 61) - 1));
     }
 
     #[test]

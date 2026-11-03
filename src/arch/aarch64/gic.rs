@@ -46,6 +46,8 @@ const GICC_EOIR: u64 = 0x0010;
 
 const GICR_CTLR: u64 = 0x0000;
 const GICR_TYPER_LAST: u64 = 1 << 4;
+/// GICR_TYPER.PLPIS (bit 0): the redistributor implements physical LPIs (IHI 0069).
+const GICR_TYPER_PLPIS: u64 = 1;
 /// Smallest redistributor frame; a frame with VLPIS is 0x40000 (`gic::gicr_frame_stride`).
 const GICR_STRIDE: u64 = 0x2_0000;
 const GICR_WAKER: u64 = 0x0014;
@@ -129,10 +131,13 @@ pub unsafe fn init() {
     let v2m = desc.gic_v2m().next().and_then(|(r, base, n)| {
         let va = map_mmio(r)?;
         let (base, n) = v2m_spi_range(va, base, n);
-        if !gic::v2m_range_ok(base, u32::from(n)) {
+        // SAFETY: `dist_va` is the GICD mapped above; GICD_TYPER is read-only,
+        // read here before `init_v2`/`init_v3` program the distributor. established here.
+        let lines = gic::gicd_lines(unsafe { mmio32(dist_va, GICD_TYPER) });
+        if !gic::v2m_range_ok(base, u32::from(n), lines) {
             crate::klog!(
                 Level::Error,
-                "vibeOS: gic: v2m SPIs {base} + {n} are not all SPIs; v2m absent"
+                "vibeOS: gic: v2m SPIs {base} + {n} are not all SPIs below {lines}; v2m absent"
             );
             return None;
         }
@@ -174,8 +179,7 @@ pub unsafe fn init() {
 fn init_v2(g: &Gic) {
     // SAFETY: `g.dist` / `g.cpu_or_redist` are the mapped GICD/GICC. established here.
     unsafe {
-        let typer = mmio32(g.dist, GICD_TYPER);
-        let lines = ((typer & 0x1F) + 1) * 32;
+        let lines = gic::gicd_lines(mmio32(g.dist, GICD_TYPER));
         mmio32w(g.dist, GICD_CTLR, 0);
         let mut i = 0u32;
         while i < lines {
@@ -303,8 +307,7 @@ fn init_v3(g: &Gic) {
             crate::boot::halt_with("vibeOS: gic: no redistributor");
         };
         wake_redist(rd);
-        let typer = mmio32(g.dist, GICD_TYPER);
-        let lines = ((typer & 0x1F) + 1) * 32;
+        let lines = gic::gicd_lines(mmio32(g.dist, GICD_TYPER));
         mmio32w(g.dist, GICD_CTLR, 0);
         wait_rwp(g.dist, GICD_CTLR, GICD_CTLR_RWP, "gicd");
         let mut i = 32u32;
@@ -330,7 +333,12 @@ fn init_v3(g: &Gic) {
         mmio32w(g.dist, GICD_CTLR, GICD_CTLR_ENABLE_G1A | GICD_CTLR_ARE_NS);
         wait_rwp(g.dist, GICD_CTLR, GICD_CTLR_RWP, "gicd");
         program_sgi_ppi(rd);
-        enable_lpi(g, rd);
+        // Fail closed: without its LPI tables the boot CPU cannot take an MSI,
+        // and an ITS would map LPIs into nothing. A machine with no physical
+        // LPIs returns true from `enable_lpi` and skips this.
+        if !enable_lpi(g, rd) {
+            crate::boot::halt_with("vibeOS: gic: lpi tables");
+        }
         icc_enable();
         if let Some(its) = g.its {
             init_its(g, its, rd);
@@ -406,11 +414,17 @@ unsafe fn program_sgi_ppi(rd: u64) {
 }
 
 /// Program redistributor LPI tables; never clear EnableLPIs. Shared
-/// property table, per-CPU pending table.
+/// property table, per-CPU pending table. `false` when a table could not be
+/// allocated. A redistributor without physical LPIs has no tables to program,
+/// so that is `true` and nothing is written.
 ///
 /// # Safety
 /// `g` is the live GIC; `rd` is this CPU's redistributor.
-unsafe fn enable_lpi(g: &Gic, rd: u64) {
+unsafe fn enable_lpi(g: &Gic, rd: u64) -> bool {
+    // SAFETY: `rd` is this CPU's redistributor, mapped by `init`/`enable_ap`. established here.
+    if unsafe { mmio64(rd, GICR_TYPER) } & GICR_TYPER_PLPIS == 0 {
+        return true;
+    }
     // Acquire: pairs with the Release/AcqRel store of `lpi_prop` here.
     let existing = g.lpi_prop.load(Ordering::Acquire);
     let prop = if existing != 0 {
@@ -418,7 +432,7 @@ unsafe fn enable_lpi(g: &Gic, rd: u64) {
     } else {
         let Some(prop) = alloc_pages(16) else {
             crate::klog!(Level::Error, "vibeOS: gic: lpi prop table");
-            return;
+            return false;
         };
         let va = crate::paging_init::hhdm_offset().wrapping_add(prop);
         // Enable the LPIs this chip will allocate as Group 1 (DESIGN §5.4).
@@ -448,7 +462,7 @@ unsafe fn enable_lpi(g: &Gic, rd: u64) {
     // GICR_PENDBASER is 64 KiB-aligned (IHI 0069); 16 pages gives that.
     let Some(pend) = alloc_pages(16) else {
         crate::klog!(Level::Error, "vibeOS: gic: lpi pend table");
-        return;
+        return false;
     };
     // SAFETY: `rd` is this CPU's redistributor. established here.
     unsafe {
@@ -474,6 +488,7 @@ unsafe fn enable_lpi(g: &Gic, rd: u64) {
             core::hint::spin_loop();
         }
     }
+    true
 }
 
 /// Enable the GICv3 system-register CPU interface.
@@ -685,8 +700,9 @@ pub fn send_sgi_others(intid: u32) {
 }
 
 /// Per-CPU redistributor / CPU interface on a secondary. `false` when this
-/// CPU has no redistributor frame; the caller must park it before it reports
-/// ready, so the boot CPU sees a timed-out AP.
+/// CPU has no redistributor frame or its LPI tables could not be allocated;
+/// the caller must park it before it reports ready, so the boot CPU sees a
+/// timed-out AP.
 ///
 /// # Safety
 /// This CPU's GIC interface is unused; IRQs masked.
@@ -708,7 +724,9 @@ pub unsafe fn enable_ap() -> bool {
                 };
                 wake_redist(rd);
                 program_sgi_ppi(rd);
-                enable_lpi(g, rd);
+                if !enable_lpi(g, rd) {
+                    return false;
+                }
                 icc_enable();
                 if let Some(its) = g.its {
                     map_collection(g, its, rd);
@@ -775,6 +793,21 @@ pub fn set_spi_edge(intid: u32, edge: bool) {
     unsafe {
         let cur = mmio32(g.dist, off);
         mmio32w(g.dist, off, (cur & !(3 << shift)) | (bits << shift));
+    }
+}
+
+/// Reserve `want` slots below `limit` from `counter`, and return the first.
+/// The counter moves only when all of them fit (`gic::slots_reserve`).
+fn reserve_slots(counter: &AtomicU32, want: u32, limit: u32) -> Option<u32> {
+    // Relaxed: slot counter; the exchange below retries on a change, and pairs with nothing.
+    let mut cur = counter.load(Ordering::Relaxed);
+    loop {
+        let end = gic::slots_reserve(cur, want, limit)?;
+        // Relaxed: slot counter; the failure value is the next try, and pairs with nothing.
+        match counter.compare_exchange_weak(cur, end, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Some(cur),
+            Err(seen) => cur = seen,
+        }
     }
 }
 
@@ -851,29 +884,31 @@ impl IrqChip for GicChip {
         if out.len() < want {
             return Err(IrqError::BadVector);
         }
+        // The whole range is reserved before any slot is handed out, so a
+        // refused request leaves the counter where it was.
         if g.kind == Kind::V3 && g.its.is_some() {
+            let limit = u32::try_from(LPI_SLOTS).unwrap_or(0);
+            let Some(first) = reserve_slots(&g.next_lpi, u32::from(n), limit) else {
+                return Err(IrqError::Exhausted);
+            };
             let mut i = 0;
             while i < want {
-                // Relaxed: LPI bump; pairs with nothing.
-                let slot = g.next_lpi.fetch_add(1, Ordering::Relaxed);
-                if slot as usize >= LPI_SLOTS {
-                    return Err(IrqError::Exhausted);
-                }
+                let slot = first.checked_add(i as u32).ok_or(IrqError::Exhausted)?;
+                let intid = LPI_BASE.checked_add(slot).ok_or(IrqError::Exhausted)?;
                 if let Some(s) = out.get_mut(i) {
-                    *s = LPI_BASE + slot;
+                    *s = intid;
                 }
                 i += 1;
             }
             return Ok(want);
         }
         if let Some((_, base, count)) = g.v2m {
+            let Some(first) = reserve_slots(&g.next_v2m, u32::from(n), u32::from(count)) else {
+                return Err(IrqError::Exhausted);
+            };
             let mut i = 0;
             while i < want {
-                // Relaxed: v2m bump; pairs with nothing.
-                let slot = g.next_v2m.fetch_add(1, Ordering::Relaxed);
-                if slot >= u32::from(count) {
-                    return Err(IrqError::Exhausted);
-                }
+                let slot = first.checked_add(i as u32).ok_or(IrqError::Exhausted)?;
                 // `init` checked that every SPI in the range is an SPI, so
                 // this only refuses an overflow that cannot come from there.
                 let Some(intid) = base.checked_add(slot).filter(|&s| gic::is_spi(s)) else {
