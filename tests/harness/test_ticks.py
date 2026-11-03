@@ -962,6 +962,32 @@ class TestMergeTicks(RepoCase):
         self.commit("reopen")
         self.assertEqual(self.run_check().errors, [])
 
+    def test_tick_inherited_from_before_the_base_fails(self) -> None:
+        # C0 ticks delta below the base, and a feature branch from C0 keeps that
+        # tick. Main reopens delta as the base, so the merge's tick of delta is new.
+        c0 = self.commit("old tick", "delta box")
+        self.repo.git("checkout", "-q", "-b", "inherit", c0)
+        self.repo.commit("inherit work", {"src/inherit.rs": "fn inherit() {}\n"})
+        self.repo.git("checkout", "-q", "main")
+        self.roadmap = ROADMAP
+        self.base = self.commit("reopen")
+        self.repo.git("merge", "-q", "--no-ff", "--no-commit", "inherit")
+        self.roadmap = tick(ROADMAP, "delta box")
+        sha = self.commit("merge inherit")
+        self.assertErrors(self.run_check(), f"{sha[:7]} L8: merge ticks a box neither parent "
+                          "ticks: delta box names")
+
+    def test_merge_of_a_merge_that_ticked_the_box_passes(self) -> None:
+        # The first merge is proved by an erratum. A later merge of it keeps the
+        # tick, which that accepted merge added, so it needs no proof of its own.
+        first = self.merge(tick(ROADMAP, "delta box"))
+        self.repo.commit("errata", self.errata(first, self.PROOF))
+        self.repo.git("checkout", "-q", "-b", "side2", f"{first}^1")
+        self.repo.commit("side2 work", {"src/side2.rs": "fn side2() {}\n"})
+        self.repo.git("checkout", "-q", "main")
+        self.repo.git("merge", "-q", "--no-ff", "-m", "merge side2", "side2")
+        self.assertEqual(self.run_check().errors, [])
+
 
 class TestBareMode(unittest.TestCase):
     def setUp(self) -> None:

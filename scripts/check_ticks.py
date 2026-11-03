@@ -887,25 +887,39 @@ class Checker:
                     c.dropped.append(tick)
                 else:
                     c.ticks.append(tick)
-        # A merge's ticks are the `- [x]` texts its ROADMAP holds that neither
-        # parent ticks, so a resolution that ticks or rewords a box shows up here.
-        for m in self.merges:
+        # A merge's ticks are the `- [x]` texts its ROADMAP holds that no parent
+        # holds, so a resolution that ticks or rewords a box shows up here. A parent
+        # holds a text it ticks only if a pull request commit or an earlier merge
+        # that is its ancestor within the pull request added that text. A tick the
+        # parent inherited from before the base proves nothing, and a text the base
+        # already ticks is not new.
+        pr = set(self.pr)
+        added_by: dict[str, set[str]] = {s: {t for _, t in a}
+                                         for s, (a, _) in parsed.items() if s in pr}
+        order = gatelib.git(self.repo, "rev-list", "--merges", "--topo-order", "--reverse",
+                            f"{self.base}..{self.head}").split()
+        for m in order:
             c = commits[m]
+            added_by[m] = set()
             held: set[str] = set()
             for parent in gatelib.git(self.repo, "rev-list", "--parents", "-n", "1",
                                       m).split()[1:]:
-                held.update(b.text for b in self._ticked_boxes(parent))
+                vouch: set[str] = set()
+                for s in gatelib.git(self.repo, "rev-list", f"{self.base}..{parent}").split():
+                    vouch |= added_by.get(s, set())
+                held.update(b.text for b in self._ticked_boxes(parent) if b.text in vouch)
             after = gatelib.git(self.repo, "rev-list", "--no-merges",
                                 f"{m}..{self.head}").split()
             withdrawn = {t for s in after for t in parsed.get(s, ([], []))[1]}
             for b in self._ticked_boxes(m):
-                if b.text in held:
+                if b.text in held or b.text in at_base:
                     continue
                 tick = Tick(m, b.line, b.text)
                 if b.text in withdrawn:
                     c.dropped.append(tick)
                 else:
                     c.ticks.append(tick)
+                    added_by[m].add(b.text)
         return [commits[s] for s in [*self.pr, *self.merges]]
 
     def changed(self) -> dict[str, list[tuple[int, int]]]:
