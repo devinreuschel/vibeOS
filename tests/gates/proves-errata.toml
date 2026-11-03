@@ -125,3 +125,9 @@ commit = "a45037fa88aab00b12dbba61707ceb7407f082ed"
 was = ""
 proves = "el1_x16_survives_irq -- `make test-kernel ARCH=aarch64` runs the portable in-guest groups"
 why = "#299 squash dropped the Proves line; 4e4fc3b5 carried this trailer for the reworded portable-groups box"
+
+[[erratum]]
+commit = "65a7f150f7633ad9ce8c208e01a5ddfaa4ce0513"
+was = ""
+proves = "tests/harness/test_gen_notices.py::test_missing_3rdparty_entry_reported (existing: with test_missing_crate_reported, test_missing_rust_notice_reported and test_limine_release_mismatch_fails beside it) -- third-party notices on every published binary"
+why = "the merge resolution re-ticked this box with the Limine 3RDPARTY.md list phase-11 had reworded (libfdt, pdgzip), a text neither parent ticks; the proof is the test that fails when a 3RDPARTY.md entry is missing from the file, and the box's list is that entry set"

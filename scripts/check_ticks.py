@@ -139,6 +139,7 @@ class Commit:
     ticks: list[Tick] = field(default_factory=list)
     # Ticks whose `- [x]` text a later commit of the pull request removes.
     dropped: list[Tick] = field(default_factory=list)
+    merge: bool = False
 
 
 @dataclass
@@ -813,6 +814,8 @@ class Checker:
         self.head = gatelib.git(repo, "rev-parse", "--verify", f"{head}^{{commit}}").strip()
         self.merge_base = gatelib.git(repo, "merge-base", base, self.head).strip()
         self.pr = gatelib.pr_commits(base, self.head, repo)
+        self.merges = gatelib.git(repo, "rev-list", "--merges", "--reverse",
+                                  f"{base}..{self.head}").split()
         self.tree = Tree(self.head, repo)
         self.report = Report()
         self.commits = self._read_commits()
@@ -842,13 +845,16 @@ class Checker:
             self.report.error("errata", None, e)
         return rows
 
+    def _ticked_boxes(self, rev: str) -> list[gatelib.Box]:
+        text = gatelib.git(self.repo, "show", f"{rev}:{ROADMAP_PATH}", check=False)
+        return [b for b in gatelib.parse_boxes(text) if b.ticked]
+
     def _read_commits(self) -> list[Commit]:
-        commits = {sha: Commit(sha) for sha in self.pr}
+        commits = {sha: Commit(sha, merge=sha in self.merges) for sha in [*self.pr, *self.merges]}
         if not commits:
             return []
         rng = f"{self.base}..{self.head}"
-        log = gatelib.git(self.repo, "log", "--no-merges", "--reverse", "--format=%x00%H%n%B",
-                          rng)
+        log = gatelib.git(self.repo, "log", "--reverse", "--format=%x00%H%n%B", rng)
         for chunk in log.split("\0")[1:]:
             sha, _, msg = chunk.partition("\n")
             if sha in commits:
@@ -881,7 +887,26 @@ class Checker:
                     c.dropped.append(tick)
                 else:
                     c.ticks.append(tick)
-        return [commits[s] for s in self.pr]
+        # A merge's ticks are the `- [x]` texts its ROADMAP holds that neither
+        # parent ticks, so a resolution that ticks or rewords a box shows up here.
+        for m in self.merges:
+            c = commits[m]
+            held: set[str] = set()
+            for parent in gatelib.git(self.repo, "rev-list", "--parents", "-n", "1",
+                                      m).split()[1:]:
+                held.update(b.text for b in self._ticked_boxes(parent))
+            later = gatelib.git(self.repo, "rev-list", "--no-merges",
+                                f"{m}..{self.head}").split()
+            withdrawn = {t for s in later for t in parsed.get(s, ([], []))[1]}
+            for b in self._ticked_boxes(m):
+                if b.text in held:
+                    continue
+                tick = Tick(m, b.line, b.text)
+                if b.text in withdrawn:
+                    c.dropped.append(tick)
+                else:
+                    c.ticks.append(tick)
+        return [commits[s] for s in [*self.pr, *self.merges]]
 
     def changed(self) -> dict[str, list[tuple[int, int]]]:
         if self._changed is None:
@@ -930,11 +955,12 @@ class Checker:
         paired = {id(t) for _, t in pairs}
         for t in c.ticks:
             if id(t) not in paired:
-                self.report.error(c.sha, t.line, "ticked with no `Proves:` line: "
-                                  + " ".join(t.text.split()[:8]))
+                what = ("merge ticks a box neither parent ticks" if c.merge
+                        else "ticked with no `Proves:` line")
+                self.report.error(c.sha, t.line, f"{what}: " + " ".join(t.text.split()[:8]))
         for p, t in pairs:
             self.check_proof(c, p, t)
-        if self.full:
+        if self.full and not c.merge:
             self.check_fails_before(c)
             self.check_closes(c)
 
