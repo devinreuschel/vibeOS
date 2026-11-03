@@ -530,19 +530,6 @@ pub(crate) fn test_el0_fp_no_leak() -> Outcome {
     }
 }
 
-fn id_aa64pfr0_el1() -> u64 {
-    let v: u64;
-    // SAFETY: ID_AA64PFR0_EL1 is readable at EL1 and at EL2 under VHE; established here.
-    unsafe {
-        asm!(
-            "mrs {0}, ID_AA64PFR0_EL1",
-            out(reg) v,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    v
-}
-
 fn id_aa64pfr1_el1() -> u64 {
     let v: u64;
     // SAFETY: ID_AA64PFR1_EL1 is readable at EL1 and at EL2 under VHE; established here.
@@ -561,7 +548,7 @@ fn id_aa64pfr1_el1() -> u64 {
 /// either way. SME absent does not: `ptrue` is still SVE, and no named
 /// model that has SME boots AAVMF 2025.11.
 pub(crate) fn test_el0_sve_sigill() -> Outcome {
-    let sve = vibeos::arch::aarch64::sysreg::pfr0_sve(id_aa64pfr0_el1());
+    let sve = vibeos::arch::aarch64::sysreg::pfr0_sve(arch::aarch64::cpu::id_aa64pfr0_el1());
     let sme = vibeos::arch::aarch64::sysreg::pfr1_sme(id_aa64pfr1_el1());
     if sve == 0 {
         return Outcome::Skip(if sme == 0 { "no SVE or SME" } else { "no SVE" });

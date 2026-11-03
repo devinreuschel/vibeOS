@@ -84,6 +84,8 @@ pub struct SecondaryParam {
     pub hstr_el2: u64,
     pub mdcr_el2: u64,
     pub icc_sre_el2: u64,
+    /// Nonzero when `ICC_SRE_EL2` exists (`ID_AA64PFR0_EL1.GIC`).
+    pub icc_sre_valid: u64,
     pub sctlr_el2: u64,
     pub hcrx_el2: u64,
     pub hcrx_valid: u64,
@@ -120,6 +122,7 @@ impl SecondaryParam {
     pub const HSTR_EL2: usize = offset_of!(Self, hstr_el2);
     pub const MDCR_EL2: usize = offset_of!(Self, mdcr_el2);
     pub const ICC_SRE_EL2: usize = offset_of!(Self, icc_sre_el2);
+    pub const ICC_SRE_VALID: usize = offset_of!(Self, icc_sre_valid);
     pub const SCTLR_EL2: usize = offset_of!(Self, sctlr_el2);
     pub const HCRX_EL2: usize = offset_of!(Self, hcrx_el2);
     pub const HCRX_VALID: usize = offset_of!(Self, hcrx_valid);
@@ -156,6 +159,7 @@ impl SecondaryParam {
             hstr_el2: 0,
             mdcr_el2: 0,
             icc_sre_el2: 0,
+            icc_sre_valid: 0,
             sctlr_el2: 0,
             hcrx_el2: 0,
             hcrx_valid: 0,
@@ -210,8 +214,8 @@ mod tests {
         assert_eq!(SecondaryParam::TTBR1, 8);
         assert_eq!(SecondaryParam::SCTLR, 24);
         assert_eq!(SecondaryParam::CNTKCTL, 48);
-        assert_eq!(SecondaryParam::STATUS, 32 * 8);
-        assert_eq!(core::mem::size_of::<SecondaryParam>(), 33 * 8);
+        assert_eq!(SecondaryParam::STATUS, 33 * 8);
+        assert_eq!(core::mem::size_of::<SecondaryParam>(), 34 * 8);
         assert!(core::mem::size_of::<SecondaryParam>() <= 4096);
     }
 

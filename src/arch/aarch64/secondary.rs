@@ -53,8 +53,11 @@ global_asm!(
     "    msr hstr_el2, x1",
     "    ldr x1, [x0, #{mdcr}]",
     "    msr mdcr_el2, x1",
+    "    ldr x1, [x0, #{sre_ok}]",
+    "    cbz x1, 23f",
     "    ldr x1, [x0, #{sre}]",
     "    msr icc_sre_el2, x1",
+    "23:",
     "    ldr x1, [x0, #{hcrx_ok}]",
     "    cbz x1, 21f",
     "    ldr x1, [x0, #{hcrx}]",
@@ -157,6 +160,7 @@ global_asm!(
     hstr = const SecondaryParam::HSTR_EL2,
     mdcr = const SecondaryParam::MDCR_EL2,
     sre = const SecondaryParam::ICC_SRE_EL2,
+    sre_ok = const SecondaryParam::ICC_SRE_VALID,
     hcrx = const SecondaryParam::HCRX_EL2,
     hcrx_ok = const SecondaryParam::HCRX_VALID,
     fgt_ok = const SecondaryParam::FGT_VALID,
@@ -378,8 +382,14 @@ pub fn capture_el2(p: &mut SecondaryParam) {
         asm!("mrs {0}, cptr_el2", out(reg) p.cptr_el2, options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, hstr_el2", out(reg) p.hstr_el2, options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, mdcr_el2", out(reg) p.mdcr_el2, options(nomem, nostack, preserves_flags));
-        asm!("mrs {0}, icc_sre_el2", out(reg) p.icc_sre_el2, options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, sctlr_el2", out(reg) sctlr, options(nomem, nostack, preserves_flags));
+    }
+    if sysreg::feat_gic_sysreg(super::cpu::id_aa64pfr0_el1()) {
+        p.icc_sre_valid = 1;
+        // SAFETY: ICC_SRE_EL2 exists (`ID_AA64PFR0_EL1.GIC` is nonzero); established here.
+        unsafe {
+            asm!("mrs {0}, icc_sre_el2", out(reg) p.icc_sre_el2, options(nomem, nostack, preserves_flags));
+        }
     }
     // M, C, and I stay clear until the stub's later SCTLR_EL1 write.
     p.sctlr_el2 = sysreg::sctlr_el2_early(sctlr);
@@ -449,7 +459,9 @@ pub fn snapshot_sysregs() -> [u64; SNAP_LEN] {
             asm!("mrs {0}, cnthctl_el2", out(reg) v[10], options(nomem, nostack, preserves_flags));
             asm!("mrs {0}, hstr_el2", out(reg) v[11], options(nomem, nostack, preserves_flags));
             asm!("mrs {0}, mdcr_el2", out(reg) v[12], options(nomem, nostack, preserves_flags));
-            asm!("mrs {0}, icc_sre_el2", out(reg) v[13], options(nomem, nostack, preserves_flags));
+            if sysreg::feat_gic_sysreg(super::cpu::id_aa64pfr0_el1()) {
+                asm!("mrs {0}, icc_sre_el2", out(reg) v[13], options(nomem, nostack, preserves_flags));
+            }
             asm!("mrs {0}, sctlr_el2", out(reg) v[14], options(nomem, nostack, preserves_flags));
             asm!("mrs {0}, cntvoff_el2", out(reg) v[15], options(nomem, nostack, preserves_flags));
             let (mmfr0, mmfr1) = id_mmfr();

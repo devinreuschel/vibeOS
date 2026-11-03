@@ -86,6 +86,12 @@ pub const fn feat_fgt(mmfr0: u64) -> bool {
     (mmfr0 >> 56) & 0xF != 0
 }
 
+/// `ID_AA64PFR0_EL1.GIC` (bits 27:24) is not zero: the GICv3 system-register
+/// interface exists, so `ICC_SRE_EL2` is implemented (Arm ARM DDI0487).
+pub const fn feat_gic_sysreg(pfr0: u64) -> bool {
+    (pfr0 >> 24) & 0xF != 0
+}
+
 /// `CNTKCTL_EL1` at EL1, and `CNTHCTL_EL2` when `HCR_EL2.E2H` is 1.
 ///
 /// Bit 1 is `EL0VCTEN`: EL0 reads `CNTVCT_EL0`. Bit 0 is `EL0PCTEN` and
@@ -208,6 +214,16 @@ mod tests {
         assert!(!feat_fgt(0));
         assert!(feat_fgt(1 << 56));
         assert!(!feat_fgt(0xF << 52));
+    }
+
+    #[test]
+    fn gic_sysreg_field() {
+        assert!(!feat_gic_sysreg(0));
+        assert!(feat_gic_sysreg(1 << 24));
+        assert!(feat_gic_sysreg(0xF << 24));
+        // AdvSIMD (23:20), RAS (31:28) and SVE (35:32) sit outside the GIC field.
+        assert!(!feat_gic_sysreg(0xF << 20));
+        assert!(!feat_gic_sysreg((0xF << 28) | (0xF << 32)));
     }
 
     #[test]

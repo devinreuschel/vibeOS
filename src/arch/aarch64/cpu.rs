@@ -32,6 +32,20 @@ pub fn current_el() -> u8 {
     ((v >> 2) & 3) as u8
 }
 
+/// `ID_AA64PFR0_EL1`, readable at EL1 and at EL2 under VHE.
+pub fn id_aa64pfr0_el1() -> u64 {
+    let v: u64;
+    // SAFETY: ID_AA64PFR0_EL1 is readable at EL1 and at EL2 under VHE; established here.
+    unsafe {
+        asm!(
+            "mrs {0}, ID_AA64PFR0_EL1",
+            out(reg) v,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    v
+}
+
 fn hcr_el2() -> u64 {
     let v: u64;
     // SAFETY: readable at EL2; callers check `current_el`. established here.
