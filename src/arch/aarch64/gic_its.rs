@@ -396,6 +396,27 @@ pub(super) fn movi_lpi(its: u64, hwirq: u32, cpu: u32) -> Result<(), IrqError> {
     Ok(())
 }
 
+/// DISCARD pushes that failed since boot.
+static DISCARD_FAILS: AtomicU64 = AtomicU64::new(0);
+/// `remove_its_device` calls that refused or failed since boot.
+static REMOVE_FAILS: AtomicU64 = AtomicU64::new(0);
+
+/// `remove_its_device`'s failure path, out of line: the count and the
+/// rate-limited line, as `send_failed` in `ipi_init.rs`.
+#[cold]
+#[inline(never)]
+fn remove_failed(device_id: u32, what: &str) {
+    // Relaxed: a count for the rate-limited line; pairs with nothing.
+    let n = REMOVE_FAILS.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    crate::klog_ratelimited!(
+        1000,
+        Level::Error,
+        "vibeOS: gic: its remove dev={device_id:#x}: {} ({} since boot)",
+        what,
+        n
+    );
+}
+
 /// DISCARD one mapped event and SYNC. A failed command leaves `LPI_DEV` set.
 pub(super) fn discard_lpi(hwirq: u32) {
     let Some(g) = gic() else { return };
@@ -424,9 +445,14 @@ pub(super) fn discard_lpi(hwirq: u32) {
     // SAFETY: ITS command queue; `ITS_CMDS` is held here.
     let ok = unsafe { push_cmds(its, &encode_lpi_free(dev, event, rd)) };
     if !ok {
-        crate::klog!(
+        // Relaxed: a count for the rate-limited line; pairs with nothing.
+        let n = DISCARD_FAILS
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        crate::klog_ratelimited!(
+            1000,
             Level::Error,
-            "vibeOS: gic: its discard dev {dev:#x} ev {event}"
+            "vibeOS: gic: its discard dev {dev:#x} ev {event} ({n} since boot)"
         );
         return;
     }
@@ -439,7 +465,7 @@ pub fn remove_its_device(device_id: u32) {
     let Some(g) = gic() else { return };
     let Some(its) = g.its else { return };
     let Some(rd) = collection_rd(0) else {
-        crate::klog!(Level::Error, "vibeOS: gic: its no collection 0");
+        remove_failed(device_id, "no collection 0");
         return;
     };
     let _hold = ITS_CMDS.lock();
@@ -457,18 +483,16 @@ pub fn remove_its_device(device_id: u32) {
         slot.load(Ordering::Acquire) == device_id
     });
     if live {
-        crate::klog!(
-            Level::Error,
-            "vibeOS: gic: its remove live dev={device_id:#x}"
-        );
+        remove_failed(device_id, "an LPI is still mapped");
         return;
     }
     let Ok(cmds) = encode_device_unmap(device_id, rd) else {
-        crate::klog!(Level::Error, "vibeOS: gic: its unmap");
+        remove_failed(device_id, "unmap encode failed");
         return;
     };
     // SAFETY: ITS command queue; `ITS_CMDS` is held here.
     if unsafe { !push_cmds(its, &cmds) } {
+        remove_failed(device_id, "unmap command failed");
         return;
     }
     // Release: pairs with the Acquire load in `remove_its_device`.
