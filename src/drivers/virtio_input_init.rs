@@ -16,7 +16,7 @@ use vibeos::virtio::{
     OFFER, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK, SplitLayout,
     VENDOR_ID, VirtioError, notify_addr,
 };
-use vibeos::virtio_input::{EVENT_SIZE, EvDecoder, Event};
+use vibeos::virtio_input::{EVENT_SIZE, EvDecoder, Event, is_short_event};
 
 use crate::arch::{self, current::Arch};
 use crate::dev_init;
@@ -126,7 +126,7 @@ fn harvest(st: &mut State) {
         d.data.sync_for_cpu::<Arch>();
         while let Some(u) = d.vq.get_used() {
             let slot = d.desc_slot.get(u.id as usize).copied().unwrap_or(0);
-            if (u.len as usize) < EVENT_SIZE {
+            if is_short_event(u.len as usize) {
                 // A short element holds no whole event: count it, log it at
                 // most once a second, and requeue its buffer below.
                 st.short_used = st.short_used.saturating_add(1);
