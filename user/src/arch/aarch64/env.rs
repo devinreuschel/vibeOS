@@ -55,11 +55,35 @@ fn id_regs_ok() -> bool {
     dczid & (1 << 4) == 0 && cntfrq != 0
 }
 
+/// Sentinel outside the block `dc zva` zeroes.
+const CACHE_SENTINEL: u8 = 0xa5;
+
+const CACHE_LEN: usize = 4096;
+
+/// Page-sized and page-aligned, so every aligned `dc zva` block (at most
+/// 2 KiB, DCZID_EL0.BS) that holds an address in it lies inside it.
+#[repr(C, align(4096))]
+struct CacheBuf([u8; CACHE_LEN]);
+
 fn cache_ops_ok() -> bool {
-    let mut buf = [0u8; 128];
-    let p = buf.as_mut_ptr();
-    // SAFETY: `p` is a live stack buffer; the ops do not fault at EL0;
-    // established here.
+    let dczid: u64;
+    // SAFETY: DCZID_EL0 is readable at EL0 (DESIGN §11.4); established here.
+    unsafe {
+        asm!("mrs {0}, dczid_el0", out(reg) dczid, options(nomem, nostack, preserves_flags));
+    }
+    // DCZID_EL0.BS is log2 of the block size in words (Arm ARM DDI0487).
+    let block = 4usize << (dczid & 0xf);
+    if block > CACHE_LEN {
+        return false;
+    }
+    let mut buf = CacheBuf([CACHE_SENTINEL; CACHE_LEN]);
+    // An address inside the buffer, off any block boundary.
+    let off = 2048 + 37;
+    let start = off & !(block - 1);
+    let p = buf.0.as_mut_ptr().wrapping_add(off);
+    // SAFETY: `p` is inside `buf`, and each op touches only the line or
+    // block containing `p`, which the aligned buffer holds whole; the ops
+    // do not fault at EL0; established here.
     unsafe {
         asm!("dc zva, {0}", in(reg) p, options(nostack));
         asm!("dc cvau, {0}", in(reg) p, options(nostack));
@@ -67,7 +91,11 @@ fn cache_ops_ok() -> bool {
         asm!("wfe", options(nomem, nostack, preserves_flags));
         asm!("wfi", options(nomem, nostack, preserves_flags));
     }
-    true
+    let bytes = &buf.0;
+    let zeroed = bytes[start..start + block].iter().all(|&b| b == 0);
+    let kept = bytes[..start].iter().all(|&b| b == CACHE_SENTINEL)
+        && bytes[start + block..].iter().all(|&b| b == CACHE_SENTINEL);
+    zeroed && kept
 }
 
 fn child_trap(f: fn()) -> Result<u32, ()> {
