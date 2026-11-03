@@ -449,6 +449,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y herdtools7
+          echo "herd7 $(dpkg-query -W -f='${Version}' herdtools7)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: make litmus
         run: make litmus
