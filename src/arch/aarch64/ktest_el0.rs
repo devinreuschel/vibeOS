@@ -276,19 +276,57 @@ user_code!(
     "
 );
 
+// Spill V0-V31 whole (128 bits each) to 512 bytes at sp, then exit 1 if any
+// of its 64 doublewords is P's pattern, and 0 otherwise. The soft-float kernel
+// cannot assemble `str qN`, so each store is its encoding (as in fp_save).
 user_code!(
     FP_PROBE,
     "
-    .inst 0x4e083c00
+    sub sp, sp, #512
+    .inst 0x3d8003e0   // str q0, [sp, #0]
+    .inst 0x3d8007e1   // str q1, [sp, #16]
+    .inst 0x3d800be2   // str q2, [sp, #32]
+    .inst 0x3d800fe3   // str q3, [sp, #48]
+    .inst 0x3d8013e4   // str q4, [sp, #64]
+    .inst 0x3d8017e5   // str q5, [sp, #80]
+    .inst 0x3d801be6   // str q6, [sp, #96]
+    .inst 0x3d801fe7   // str q7, [sp, #112]
+    .inst 0x3d8023e8   // str q8, [sp, #128]
+    .inst 0x3d8027e9   // str q9, [sp, #144]
+    .inst 0x3d802bea   // str q10, [sp, #160]
+    .inst 0x3d802feb   // str q11, [sp, #176]
+    .inst 0x3d8033ec   // str q12, [sp, #192]
+    .inst 0x3d8037ed   // str q13, [sp, #208]
+    .inst 0x3d803bee   // str q14, [sp, #224]
+    .inst 0x3d803fef   // str q15, [sp, #240]
+    .inst 0x3d8043f0   // str q16, [sp, #256]
+    .inst 0x3d8047f1   // str q17, [sp, #272]
+    .inst 0x3d804bf2   // str q18, [sp, #288]
+    .inst 0x3d804ff3   // str q19, [sp, #304]
+    .inst 0x3d8053f4   // str q20, [sp, #320]
+    .inst 0x3d8057f5   // str q21, [sp, #336]
+    .inst 0x3d805bf6   // str q22, [sp, #352]
+    .inst 0x3d805ff7   // str q23, [sp, #368]
+    .inst 0x3d8063f8   // str q24, [sp, #384]
+    .inst 0x3d8067f9   // str q25, [sp, #400]
+    .inst 0x3d806bfa   // str q26, [sp, #416]
+    .inst 0x3d806ffb   // str q27, [sp, #432]
+    .inst 0x3d8073fc   // str q28, [sp, #448]
+    .inst 0x3d8077fd   // str q29, [sp, #464]
+    .inst 0x3d807bfe   // str q30, [sp, #480]
+    .inst 0x3d807fff   // str q31, [sp, #496]
     movz x1, #0x5a5a
     movk x1, #0x5a5a, lsl #16
     movk x1, #0x5a5a, lsl #32
     movk x1, #0x5a5a, lsl #48
-    cmp x0, x1
+    mov x2, sp
+    mov x3, #64
+1:
+    ldr x4, [x2], #8
+    cmp x4, x1
     b.eq 9f
-    .inst 0x4e083fe0
-    cmp x0, x1
-    b.eq 9f
+    subs x3, x3, #1
+    b.ne 1b
     mov x0, xzr
     mov x8, #93
     svc #0
@@ -511,7 +549,8 @@ fn fp_spawner() {
     FP_SPAWNED.store(true, Ordering::Release);
 }
 
-/// Q's first instruction does not hold P's V-register pattern (F069).
+/// No V register Q reads at its first instruction holds P's pattern in any
+/// of its 128 bits (F069); `FP_PROBE` checks every doubleword of V0-V31.
 pub(crate) fn test_el0_fp_no_leak() -> Outcome {
     // Release: pairs with the Acquire load below.
     FP_SPAWNED.store(false, Ordering::Release);
