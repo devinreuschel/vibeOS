@@ -239,6 +239,12 @@ impl Kva {
             Placed::At(start) => Some(start),
             Placed::NoFit => None,
             Placed::NoNode => {
+                // Coalescing changes no used, live, or free bytes, and a
+                // failed retry keeps that. It does move ranges freed before
+                // this call into address order, so one can be handed out
+                // sooner. `free` reads no list order (it appends and checks
+                // counts), and it coalesces the same way when it has no
+                // spare node, as a retry that succeeds does.
                 self.coalesce_all();
                 match self.place(len, align, offset) {
                     Placed::At(start) => Some(start),
