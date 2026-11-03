@@ -253,13 +253,13 @@ fn emit_span<F: FnMut(PhysmapRun)>(
 ) {
     while start < end {
         let rem = end - start;
-        let size = choose_size(start, rem, force_4k, have_1g);
+        let size = choose_size(offset, start, rem, force_4k, have_1g);
         let step = size.bytes();
         let mut len = step;
         while start.saturating_add(len) < end {
             let next = start + len;
             let nrem = end - next;
-            if choose_size(next, nrem, force_4k, have_1g) != size {
+            if choose_size(offset, next, nrem, force_4k, have_1g) != size {
                 break;
             }
             match len.checked_add(step) {
@@ -284,14 +284,22 @@ fn emit_span<F: FnMut(PhysmapRun)>(
     }
 }
 
-fn choose_size(pa: u64, rem: u64, force_4k: bool, have_1g: bool) -> PageSize {
+/// The leaf size for a run at physical `pa`. A leaf needs its VA aligned
+/// as well as its PA: the physmap VA is `offset + pa`, and the mapper
+/// refuses a misaligned VA, so an offset that is only 2 MiB-aligned gets
+/// 2 MiB leaves at most.
+fn choose_size(offset: u64, pa: u64, rem: u64, force_4k: bool, have_1g: bool) -> PageSize {
     if force_4k {
         return PageSize::Size4K;
     }
-    if have_1g && pa & (PAGE_SIZE_1G - 1) == 0 && rem >= PAGE_SIZE_1G {
+    let Some(va) = offset.checked_add(pa) else {
+        return PageSize::Size4K;
+    };
+    let bits = pa | va;
+    if have_1g && bits & (PAGE_SIZE_1G - 1) == 0 && rem >= PAGE_SIZE_1G {
         return PageSize::Size1G;
     }
-    if pa & (PAGE_SIZE_2M - 1) == 0 && rem >= PAGE_SIZE_2M {
+    if bits & (PAGE_SIZE_2M - 1) == 0 && rem >= PAGE_SIZE_2M {
         return PageSize::Size2M;
     }
     PageSize::Size4K
@@ -634,6 +642,36 @@ mod tests {
             let want = usize::from(matches!(page, 0x1000 | 0x2000 | 0x3000 | 0x5000));
             assert_eq!(n, want, "page {page:#x} covered {n} times");
             page += PAGE_SIZE_4K;
+        }
+    }
+
+    /// A leaf's VA is `offset + pa`, so an offset that is only 2 MiB-aligned
+    /// gets no 1 GiB leaf, and one that is only 4 KiB-aligned gets no 2 MiB
+    /// leaf. Each run's VA is aligned to its size.
+    #[test]
+    fn builder_aligns_va_as_well_as_pa() {
+        let ram = 0u64..2 * PAGE_SIZE_1G;
+        let off = PHYSMAP_X86_64.start + PAGE_SIZE_2M;
+        let (w, runs) = collect(
+            PHYSMAP_X86_64,
+            off,
+            core::iter::once(ram.clone()),
+            0..0,
+            true,
+        );
+        assert_eq!(w.mapped, 2 * PAGE_SIZE_1G);
+        assert!(runs.iter().all(|r| r.size == PageSize::Size2M));
+        for r in &runs {
+            assert_eq!(r.va.0 & (r.size.bytes() - 1), 0, "va {:#x}", r.va.0);
+            assert_eq!(r.va.0, off + r.pa.0);
+        }
+
+        let off = PHYSMAP_X86_64.start + PAGE_SIZE_4K;
+        let (w, runs) = collect(PHYSMAP_X86_64, off, core::iter::once(ram), 0..0, true);
+        assert_eq!(w.mapped, 2 * PAGE_SIZE_1G);
+        assert!(runs.iter().all(|r| r.size == PageSize::Size4K));
+        for r in &runs {
+            assert_eq!(r.va.0, off + r.pa.0);
         }
     }
 
