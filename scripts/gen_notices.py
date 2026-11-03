@@ -60,6 +60,10 @@ ROOTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("vibeos", "x86_64-unknown-none"),
         ("vibeos-user", "x86_64-unknown-linux-musl"),
     ),
+    "aarch64": (
+        ("vibeos", "aarch64-unknown-none-softfloat"),
+        ("vibeos-user", "aarch64-unknown-linux-musl"),
+    ),
 }
 # Workspace members that ship in no image.
 HOST_ONLY = frozenset({"vibeos-hostlib-tests"})

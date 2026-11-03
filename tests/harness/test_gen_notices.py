@@ -13,6 +13,7 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from scripts import gen_notices
 from scripts.gen_notices import Crate, NoticeError, Notices
@@ -387,6 +388,37 @@ class TestRealTree(unittest.TestCase):
         self.assertNotIn(str(Path.home()), text)
         for p in (".cargo/registry", ".rustup"):
             self.assertNotIn(p, text)
+
+
+class TestArch(unittest.TestCase):
+    """`--arch` picks the shipped roots and reaches `generate`, and mkiso.sh passes it."""
+
+    def test_aarch64_roots_are_the_shipped_targets(self) -> None:
+        self.assertEqual(gen_notices.ROOTS["aarch64"], (
+            ("vibeos", "aarch64-unknown-none-softfloat"),
+            ("vibeos-user", "aarch64-unknown-linux-musl"),
+        ))
+
+    def test_main_passes_the_arch_to_generate(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "notices.txt"
+            with mock.patch.object(gen_notices, "generate", return_value="text\n") as gen:
+                self.assertEqual(gen_notices.main(["--out", str(out), "--arch", "aarch64"]), 0)
+            self.assertEqual(gen.call_args.args[1], "aarch64")
+            self.assertEqual(out.read_text(encoding="utf-8"), "text\n")
+
+    def test_mkiso_passes_the_arch(self) -> None:
+        lines = (gen_notices.ROOT / "scripts/mkiso.sh").read_text(encoding="utf-8").splitlines()
+        i = next(k for k, ln in enumerate(lines) if "gen_notices.py" in ln)
+        self.assertIn('--arch "${VIBEOS_ARCH:-x86_64}"', " ".join(lines[i:i + 2]))
+
+
+class TestRealTreeArch(unittest.TestCase):
+    def test_aarch64_real_tree_header(self) -> None:
+        root = gen_notices.ROOT
+        text = gen_notices.generate(root, "aarch64", root / "limine")
+        self.assertIn("== Rust crates (aarch64) ==", text)
+        self.assertNotIn("== Rust crates (x86_64) ==", text)
 
 
 if __name__ == "__main__":
