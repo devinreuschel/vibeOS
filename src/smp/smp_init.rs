@@ -691,6 +691,10 @@ pub unsafe fn init() {
                 .is_some_and(|r| r.end <= window.start || r.start >= window.end),
             "smp: bootstrap stack {stack:#x?} not outside the identity window"
         );
+        // Every CPU caches the window's translations first, so the teardown's
+        // flush is what `kernel_va0_faults` checks (DESIGN §4.3).
+        #[cfg(feature = "kernel_tests")]
+        crate::mm::ktest::prime_identity();
         // SAFETY: every AP is up or abandoned (`start_aps` returned), nothing
         // uses an identity address but the trampoline page, which `keep`
         // keeps, and this CPU's stack is outside the window (checked above);

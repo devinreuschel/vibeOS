@@ -918,18 +918,21 @@ pub(crate) mod fail_after {
 #[cfg(target_arch = "x86_64")]
 static VA0_RESULT: AtomicU64 = AtomicU64::new(0);
 
-/// Read VA 0 under `catch_fault` with an asm load (a Rust null
-/// dereference is UB) and classify the result.
+/// Read `va` under `catch_fault` with an asm load (a Rust dereference of
+/// an arbitrary address is UB) and classify the result: 1 `#PF` at CR2 `va`
+/// on a not-present supervisor read, 2 the read did not fault, 3 any other
+/// fault.
 #[cfg(target_arch = "x86_64")]
-fn va0_probe() -> u64 {
+fn fault_class(va: u64) -> u64 {
     let fault = catch_fault(|| {
-        // SAFETY: the load reads VA 0, which the identity teardown leaves
-        // unmapped, and `catch_fault` recovers from the #PF it raises; the
-        // asm writes only its scratch register; established here.
+        // SAFETY: the load reads `va`, which the callers pass only after the
+        // identity teardown has unmapped it, and `catch_fault` recovers from
+        // the #PF it raises; the asm writes only its scratch register;
+        // established here.
         unsafe {
             core::arch::asm!(
                 "mov {tmp}, qword ptr [{va}]",
-                va = in(reg) 0u64,
+                va = in(reg) va,
                 tmp = out(reg) _,
                 options(nostack, readonly, preserves_flags)
             );
@@ -938,9 +941,14 @@ fn va0_probe() -> u64 {
     match fault {
         None => 2,
         // Error code: not present (bit 0), read (bit 1), supervisor (bit 2).
-        Some(f) if f.cr2 == 0 && f.error & 0x7 == 0 => 1,
+        Some(f) if f.cr2 == va && f.error & 0x7 == 0 => 1,
         Some(_) => 3,
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn va0_probe() -> u64 {
+    fault_class(0)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -951,9 +959,114 @@ fn va0_entry() {
     VA0_RESULT.store(cpu << 32 | va0_probe(), Ordering::Release);
 }
 
+/// One page of the identity window's 4 KiB leaves (the last of the first
+/// 2 MiB, above the trampoline page's 1 MiB limit) and one inside its 2 MiB
+/// leaves.
+#[cfg(target_arch = "x86_64")]
+const IDENTITY_4K_VA: u64 = 0x1F_F000;
+#[cfg(target_arch = "x86_64")]
+const IDENTITY_2M_VA: u64 = 0x40_1000;
+
+/// Read both identity probe pages on every online CPU, so their translations
+/// are in each CPU's TLB. `smp_init::init` runs it before
+/// `paging_init::teardown_identity`, so the teardown's flush is what
+/// `identity_flush_probe` sees. The reads are plain asm loads: a call-function
+/// body runs in a lockless section (`ipi_init::service_calls`), where `catch`
+/// is not allowed.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn prime_identity() {
+    crate::ipi_init::call_mask(u64::MAX, prime_identity_entry, core::ptr::null_mut(), true);
+    prime_identity_entry(core::ptr::null_mut());
+}
+
+#[cfg(target_arch = "x86_64")]
+fn prime_identity_entry(_: *mut ()) {
+    for va in [IDENTITY_4K_VA, IDENTITY_2M_VA] {
+        // SAFETY: the window's leaves are mapped until `paging_init::teardown_identity`,
+        // which `smp_init::init` calls after `prime_identity` returns; the load
+        // reads a RAM address below 512 MiB and the asm writes only its scratch
+        // register; established by `smp_init::init`.
+        unsafe {
+            core::arch::asm!(
+                "mov {tmp}, qword ptr [{va}]",
+                va = in(reg) va,
+                tmp = out(reg) _,
+                options(nostack, readonly, preserves_flags)
+            );
+        }
+    }
+}
+
+/// `identity_flush_probe`'s result: the 4 KiB class in bits 0..8 and the
+/// 2 MiB class in bits 8..16 (see `fault_class`); 0 until a probe stores one.
+#[cfg(target_arch = "x86_64")]
+static IDENTITY_RESULT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(target_arch = "x86_64")]
+fn identity_classes() -> u64 {
+    fault_class(IDENTITY_4K_VA) | fault_class(IDENTITY_2M_VA) << 8
+}
+
+#[cfg(target_arch = "x86_64")]
+fn identity_entry() {
+    // Release: publishes the result to `run_pinned`'s Acquire loads.
+    IDENTITY_RESULT.store(identity_classes(), Ordering::Release);
+}
+
+/// Run `entry` in a thread pinned to `cpu`, which stores a nonzero result in
+/// `slot`; `None` when it stores none within two seconds.
+#[cfg(target_arch = "x86_64")]
+fn run_pinned(name: &'static str, slot: &AtomicU64, entry: fn(), cpu: u32) -> Option<u64> {
+    // Relaxed: the thread is spawned after this store, which orders it; pairs with nothing.
+    slot.store(0, Ordering::Relaxed);
+    spawn_thread_on(name, entry, cpu);
+    if !spin_until_ns(|| slot.load(Ordering::Acquire) != 0, 2_000_000_000) {
+        return None;
+    }
+    Some(slot.load(Ordering::Acquire))
+}
+
+/// ROADMAP §10.6, DESIGN §4.3: the identity window's translations are gone
+/// on every online CPU, so a read of each probe page faults there. Each
+/// remote CPU probes in its own pinned thread, one CPU at a time: `catch`
+/// keeps one state per machine.
+#[cfg(target_arch = "x86_64")]
+fn identity_flush_probe() -> Outcome {
+    let me = thread_init::current_cpu();
+    let online = per_cpu_init::online_mask();
+    for cpu in (0..64u32).filter(|c| online & (1u64 << c) != 0) {
+        let r = if cpu == me {
+            identity_classes()
+        } else {
+            match run_pinned("identity", &IDENTITY_RESULT, identity_entry, cpu) {
+                Some(r) => r,
+                None => return crate::fail_fmt!("cpu {cpu}: identity probe did not run"),
+            }
+        };
+        let (four_k, two_m) = (r & 0xFF, (r >> 8) & 0xFF);
+        for (class, what) in [(four_k, "4 KiB"), (two_m, "2 MiB")] {
+            match class {
+                1 => {}
+                2 => {
+                    return crate::fail_fmt!(
+                        "cpu {cpu}: a kernel read of the {what} identity page did not fault"
+                    );
+                }
+                _ => {
+                    return crate::fail_fmt!(
+                        "cpu {cpu}: the {what} identity read took a fault other than #PF at its address"
+                    );
+                }
+            }
+        }
+    }
+    Outcome::Ok
+}
+
 /// ROADMAP §10.6: after `smp: done` the low identity window is gone, so a
 /// kernel read of VA 0 faults on every online CPU. `catch_fault`'s one
-/// jump buffer serves one CPU at a time, so the CPUs probe in turn.
+/// jump buffer serves one CPU at a time, so the CPUs probe in turn. Then
+/// `identity_flush_probe` checks the two pages `prime_identity` cached.
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn kernel_va0_faults() -> Outcome {
     // The registry is pinned, so the hint is its CPU.
@@ -963,12 +1076,10 @@ pub(crate) fn kernel_va0_faults() -> Outcome {
         let r = if cpu == me {
             u64::from(cpu) << 32 | va0_probe()
         } else {
-            VA0_RESULT.store(0, Ordering::Relaxed);
-            spawn_thread_on("va0", va0_entry, cpu);
-            if !spin_until_ns(|| VA0_RESULT.load(Ordering::Acquire) != 0, 2_000_000_000) {
-                return crate::fail_fmt!("cpu {cpu}: probe did not run");
+            match run_pinned("va0", &VA0_RESULT, va0_entry, cpu) {
+                Some(r) => r,
+                None => return crate::fail_fmt!("cpu {cpu}: probe did not run"),
             }
-            VA0_RESULT.load(Ordering::Acquire)
         };
         let (ran, what) = ((r >> 32) as u32, r & 0xFFFF_FFFF);
         if ran != cpu {
@@ -980,7 +1091,7 @@ pub(crate) fn kernel_va0_faults() -> Outcome {
             _ => return crate::fail_fmt!("cpu {cpu}: VA 0 read took a fault other than #PF cr2=0"),
         }
     }
-    Outcome::Ok
+    identity_flush_probe()
 }
 
 #[cfg(target_arch = "aarch64")]
