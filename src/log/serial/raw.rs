@@ -141,6 +141,15 @@ fn write_byte(b: u8) {
     }
 }
 
+/// Write `content` as one framed kernel line with no lock and no atomic
+/// read-modify-write. [`put_line`]'s `swap` is an LSE instruction on the
+/// aarch64 build, so a CPU without LSE cannot use it. The boot CPU calls
+/// this for an ISA-floor refusal, before SMP and before the log path.
+#[cfg(target_arch = "aarch64")]
+pub fn put_boot_line(content: &[u8]) {
+    line::kernel_line(true, content, write_byte);
+}
+
 /// Write `content` as one framed kernel line (`line::kernel_line`). No
 /// lock: the caller holds `serial`'s TX lock, or is the dump's owner.
 pub fn put_line(content: &[u8]) {

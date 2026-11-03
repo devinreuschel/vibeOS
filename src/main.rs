@@ -151,6 +151,10 @@ pub extern "C" fn _start() -> ! {
     }
     serial::Serial::init();
     serial::raw::set_halt_hook(arch::current::halt);
+    // Before the first log line: the log path's compare-and-swap needs
+    // FEAT_LSE, and a refusal prints through `serial::raw` and halts.
+    #[cfg(target_arch = "aarch64")]
+    arch::aarch64::cpu::check_isa_floor();
     log_init::init();
     crate::marker!(marker::SERIAL_ONLINE);
     #[cfg(target_arch = "aarch64")]

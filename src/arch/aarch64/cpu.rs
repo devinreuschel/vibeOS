@@ -69,8 +69,8 @@ pub fn note_exception_level() {
     }
 }
 
-/// ISA floor: FEAT_LSE (`Atomic >= 2`) and FEAT_PAN (`PAN != 0`).
-pub fn check_isa_floor() {
+/// `(ID_AA64ISAR0_EL1, ID_AA64MMFR1_EL1)`, readable at EL1 and EL2.
+fn isa_ids() -> (u64, u64) {
     let isar0: u64;
     let mmfr1: u64;
     // SAFETY: ID registers are readable at EL1/EL2; established here.
@@ -78,13 +78,28 @@ pub fn check_isa_floor() {
         asm!("mrs {0}, ID_AA64ISAR0_EL1", out(reg) isar0, options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, ID_AA64MMFR1_EL1", out(reg) mmfr1, options(nomem, nostack, preserves_flags));
     }
+    (isar0, mmfr1)
+}
+
+/// ISA floor: FEAT_LSE (`Atomic >= 2`) and FEAT_PAN (`PAN != 0`). Runs
+/// before the first log line: the kernel builds with `+lse`, so the log
+/// path's compare-and-swap is an LSE instruction that a CPU without LSE
+/// faults on. A refusal prints through `serial::raw` and halts.
+pub fn check_isa_floor() {
+    let (isar0, mmfr1) = isa_ids();
     let atomic = (isar0 >> 20) & 0xF;
     let pan = (mmfr1 >> 20) & 0xF;
     if atomic < 2 || pan == 0 {
-        crate::boot::halt_with("vibeOS: cpu: isa floor (lse+pan) missing");
+        crate::serial::raw::put_boot_line(b"vibeOS: cpu: isa floor (lse+pan) missing");
+        halt();
     }
     // Release: pairs with the Acquire load in `isa_ok`.
     ISA_OK.store(true, Ordering::Release);
+}
+
+/// The ISA info line, after the log path is up and [`check_isa_floor`] passed.
+pub fn log_isa_floor() {
+    let (isar0, mmfr1) = isa_ids();
     crate::klog!(
         Level::Info,
         "vibeOS: cpu: isar0={isar0:#x} mmfr1={mmfr1:#x} lse=1 pan=1"
