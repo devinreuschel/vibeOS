@@ -1133,21 +1133,54 @@ pub(crate) fn test_el0_bad_elr() -> Outcome {
     }
 }
 
-/// `current_tcb` is `mrs SP_EL0`. Checked against the per-CPU `current`
-/// that `set_current_thread` writes beside SP_EL0. IF=0 keeps this thread
-/// on one CPU for both reads.
-pub(crate) fn test_el0_sp_el0_current() -> Outcome {
+static PROBE_SP_EL0: AtomicU64 = AtomicU64::new(0);
+static PROBE_CURRENT: AtomicU64 = AtomicU64::new(0);
+
+/// Reads SP_EL0 and the per-CPU `current` at IF=0, so both are this
+/// thread's on one CPU, and publishes them for the test.
+fn sp_el0_probe_entry() {
     let _g = InterruptGuard::enter();
     let via: u64;
-    // SAFETY: SP_EL0 holds current at EL1 (ROADMAP §11.6). established here.
+    // SAFETY: SP_EL0 holds current at EL1 (ROADMAP §11.6), and IF=0 keeps
+    // this thread on this CPU. established here.
     unsafe {
         core::arch::asm!("mrs {0}, sp_el0", out(reg) via, options(nomem, nostack, preserves_flags));
     }
-    let sched = crate::per_cpu_init::current().current;
-    if !sched.is_null() && sched as u64 == via {
+    let sched = crate::per_cpu_init::current().current as u64;
+    // Release: pairs with the Acquire loads in `test_el0_sp_el0_current`.
+    PROBE_SP_EL0.store(via, Ordering::Release);
+    // Release: pairs with the Acquire loads in `test_el0_sp_el0_current`.
+    PROBE_CURRENT.store(sched, Ordering::Release);
+}
+
+/// `current_tcb` is `mrs SP_EL0`, and `set_current_thread` writes it beside
+/// the per-CPU `current`. Both are compared with the TCB the thread table
+/// holds for the id `spawn_here` returned, which neither register nor
+/// `set_current_thread` supplies, so a wrong TCB written to both fails.
+pub(crate) fn test_el0_sp_el0_current() -> Outcome {
+    let Ok(h) = thread_init::spawn_here("sp-el0-probe", sp_el0_probe_entry) else {
+        return Outcome::Fail("spawn");
+    };
+    // Taken before the probe runs: a TCB's address is fixed for its life.
+    let want = thread_init::tcb_ptr(h.id()) as u64;
+    if want == 0 {
+        return Outcome::Fail("no tcb for spawned id");
+    }
+    let t0 = time_init::now_ns();
+    while !thread_init::exited(h.id()) {
+        if time_init::now_ns().saturating_sub(t0) > 1_000_000_000 {
+            return Outcome::Fail("probe did not finish");
+        }
+        thread_init::yield_now();
+    }
+    // Acquire: pairs with the Release stores in `sp_el0_probe_entry`.
+    let via = PROBE_SP_EL0.load(Ordering::Acquire);
+    // Acquire: pairs with the Release stores in `sp_el0_probe_entry`.
+    let sched = PROBE_CURRENT.load(Ordering::Acquire);
+    if via == want && sched == want {
         Outcome::Ok
     } else {
-        crate::fail_fmt!("sp_el0 {via:#x} percpu current {sched:p}")
+        crate::fail_fmt!("sp_el0 {via:#x} percpu current {sched:#x}, thread table {want:#x}")
     }
 }
 
