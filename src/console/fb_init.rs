@@ -73,6 +73,21 @@ pub fn ready() -> bool {
     READY.load(Ordering::Acquire)
 }
 
+/// Write `color` at `(x, y)`, read it back, and put the old pixel back,
+/// under the console lock so no console write lands in between. `None`
+/// with no framebuffer or off its edge. `kernel_tests` only (AGENTS.md
+/// rule 9).
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub(crate) fn pixel_round_trip(x: u32, y: u32, color: u32) -> Option<u32> {
+    let c = CONSOLE.lock();
+    let fb = c.fb.as_ref()?;
+    let old = fb.get_pixel(x, y)?;
+    fb.put_pixel(x, y, color);
+    let got = fb.get_pixel(x, y);
+    fb.put_pixel(x, y, old);
+    got
+}
+
 /// Physical `[base, base+len)` of the console framebuffer, if any.
 /// Atomically readable so PCI BAR mapping can skip a UC patch without
 /// taking RANK_DEVICE (ioremap needs PT, which ranks below DEVICE).
@@ -200,7 +215,7 @@ impl Fb {
     }
 
     /// The pixel at `(x, y)`; the in-guest tests' read-back.
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     pub(super) fn get_pixel(&self, x: u32, y: u32) -> Option<u32> {
         let p = self.pixel_ptr(x, y)?;
         // SAFETY: invariant: as in `put_pixel`; established by
