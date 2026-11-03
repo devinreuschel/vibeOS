@@ -82,6 +82,9 @@ const EDU_DMA_RUN: u32 = 1;
 
 const EDU_DMA_TO_PCI: u32 = 2;
 
+/// dma32 buffers on `virt` sit in [1 GiB, 4 GiB) at the harness's 128 MiB
+/// of RAM, which starts at 1 GiB, so the mask and truncation cases cannot
+/// occur there.
 pub(crate) fn test_dma_edu() -> Outcome {
     let Some(dev) = find_edu() else {
         return Outcome::Skip("no edu");

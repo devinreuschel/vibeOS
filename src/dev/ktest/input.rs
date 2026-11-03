@@ -9,7 +9,8 @@ use crate::virtio_input_init;
 
 use super::find_id;
 
-/// Keyboard and pointer both bind (ROADMAP §11.5).
+/// Keyboard and pointer both bind (ROADMAP §11.5). Binding only: the
+/// harness's sendkey e2e covers the input path.
 pub(crate) fn test_virtio_input() -> Outcome {
     let Some(d) = find_id(VENDOR_ID, DEV_INPUT_MODERN) else {
         return Outcome::Skip("no virtio-input");
