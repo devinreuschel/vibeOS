@@ -294,8 +294,9 @@ pub(crate) fn late_ap_agrees() -> Outcome {
 }
 
 /// Opt-in: `vibeos.ktest=stalled_ap_leak` holds the first AP past the ready
-/// timeout, then releases it. It must park, stay offline, and leave the
-/// online mask equal to the worker set (ROADMAP §11.4, F032).
+/// timeout, then releases it. It must park, stay offline, leave the online
+/// mask equal to the worker set, and lose exactly the frames its allocation
+/// took (ROADMAP §11.4, F032).
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn test_stalled_ap_leak() -> Outcome {
     if !smp_init::stalled_ap_leaked() {
@@ -322,6 +323,21 @@ pub(crate) fn test_stalled_ap_leak() -> Outcome {
     }
     if online + 1 != n as u32 {
         return crate::fail_fmt!("online {online} of {n}, want one hole");
+    }
+    // The frames the stalled AP's setup took are the ones its stall leaves
+    // missing: the count lost from before its allocation to its timeout
+    // equals what the setup took, so the stall path freed nothing and took
+    // nothing else (ROADMAP §11.4, F032).
+    let (before, setup, after_stall) = smp_init::stalled_ap_frames();
+    let (Some(taken), Some(lost)) = (before.checked_sub(setup), before.checked_sub(after_stall))
+    else {
+        return Outcome::Fail("stalled AP's frame counts went up");
+    };
+    if taken == 0 {
+        return Outcome::Fail("stalled AP's allocation took no frames");
+    }
+    if lost != taken {
+        return crate::fail_fmt!("stalled AP took {taken} frames, the count lost {lost}");
     }
     let n0 = quiescent_free_frames();
     if !exercise_fail_cleanup() {

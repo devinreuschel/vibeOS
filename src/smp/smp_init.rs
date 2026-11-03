@@ -139,6 +139,10 @@ pub(crate) struct ApAlloc {
     /// The AP's per-CPU workers, parked until it is online.
     workers: CpuWorkers,
     published: bool,
+    /// Free frames before `alloc_ap_resources` took this AP's resources
+    /// (kernel_tests, x86_64), for the stalled-AP test's frame count.
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    frames_before: usize,
 }
 
 /// The trampoline page `page`'s physmap address, through which the BSP
@@ -248,6 +252,8 @@ pub(crate) fn alloc_ap_resources(
     hw_id: u64,
     publish: bool,
 ) -> Result<ApAlloc, Option<SpawnError>> {
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    let frames_before = free_frame_count();
     let apic_id = hw_id as u8;
     let tables = gdt::alloc_ap_tables().ok_or(None)?;
     let stack = match kva_init::alloc_guarded_stack(DEFAULT_STACK_PAGES) {
@@ -306,7 +312,16 @@ pub(crate) fn alloc_ap_resources(
         idle_id,
         workers,
         published: publish,
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+        frames_before,
     })
+}
+
+/// Free frames as the frame-accounting tests count them: the buddy's free
+/// frames and the stacks the per-CPU caches hold (kernel_tests, x86_64).
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+fn free_frame_count() -> usize {
+    crate::pmm_init::with_buddy(|b| b.stats().free_frames) + thread_init::cached_stack_frames()
 }
 
 /// Undo [`alloc_ap_resources`]. `sipi_sent`: a SIPI went to the AP, which
@@ -505,6 +520,9 @@ fn start_one(a: ApAlloc, page: u64) {
         free_ap_resources(a, false);
         return;
     }
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    let frames_before = a.frames_before;
     let ApAlloc {
         tables,
         idle_id,
@@ -534,6 +552,8 @@ fn start_one(a: ApAlloc, page: u64) {
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     x86::mfence();
 
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    let frames_setup = free_frame_count();
     if apic_init::send_ipi(apic_id, 0, IpiMode::Init).is_err() {
         crate::marker!("vibeOS: smp: INIT failed");
         free_live_ap(cpu_id, idle_id, workers, published, false);
@@ -573,6 +593,8 @@ fn start_one(a: ApAlloc, page: u64) {
         time_init::busy_wait_ms(INIT_WAIT_MS);
         per_cpu_init::mark_offline(cpu_id);
         note_stalled_leak();
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+        record_stalled_frames(frames_before, frames_setup);
         // F032: the AP may still run on these; do not abandon them.
         // CpuWorkers is ThreadId-only and has no Drop.
         let _ = (idle_id, workers, published);
@@ -765,6 +787,18 @@ static STALL_GO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool
 static STALL_PARKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "kernel_tests")]
 static STALL_LEAKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// The stalled AP's frame counts, taken on the boot CPU (kernel_tests,
+/// x86_64): free frames before its allocation, before its INIT, and after
+/// its timeout's free path (ROADMAP §11.4, F032).
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+static STALL_FRAMES_BEFORE: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+static STALL_FRAMES_SETUP: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+static STALL_FRAMES_AFTER_STALL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(feature = "kernel_tests")]
 fn arm_stall_from_cmdline() {
@@ -893,6 +927,33 @@ fn note_stalled_leak() {
 pub fn stalled_ap_leaked() -> bool {
     // Acquire: pairs with the Release store in `note_stalled_leak`.
     STALL_LEAKED.load(Ordering::Acquire)
+}
+
+/// Record the stalled AP's frame counts at its timeout: `before` from before
+/// its allocation, `setup` from just before its INIT, and the free count now
+/// (kernel_tests, x86_64).
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+fn record_stalled_frames(before: usize, setup: usize) {
+    // Release: pairs with the Acquire load in `stalled_ap_frames`.
+    STALL_FRAMES_BEFORE.store(before, Ordering::Release);
+    // Release: pairs with the Acquire load in `stalled_ap_frames`.
+    STALL_FRAMES_SETUP.store(setup, Ordering::Release);
+    // Release: pairs with the Acquire load in `stalled_ap_frames`.
+    STALL_FRAMES_AFTER_STALL.store(free_frame_count(), Ordering::Release);
+}
+
+/// The stalled AP's `(before, setup, after_stall)` free-frame counts
+/// (kernel_tests, x86_64).
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+pub fn stalled_ap_frames() -> (usize, usize, usize) {
+    (
+        // Acquire: pairs with the Release store in `record_stalled_frames`.
+        STALL_FRAMES_BEFORE.load(Ordering::Acquire),
+        // Acquire: pairs with the Release store in `record_stalled_frames`.
+        STALL_FRAMES_SETUP.load(Ordering::Acquire),
+        // Acquire: pairs with the Release store in `record_stalled_frames`.
+        STALL_FRAMES_AFTER_STALL.load(Ordering::Acquire),
+    )
 }
 
 #[cfg(feature = "kernel_tests")]
