@@ -802,12 +802,20 @@ pub(crate) fn test_rtc_offset() -> Outcome {
     if !(lo..hi).contains(&a) {
         return Outcome::Fail("rtc year");
     }
-    time_init::busy_wait_ms(20);
+    // PL031 counts whole seconds, so 1.1 s between the reads must show a tick.
+    let t0 = time_init::now_ns();
+    crate::ktest::spin_until_ns(
+        || time_init::now_ns().saturating_sub(t0) >= 1_100_000_000,
+        2_000_000_000,
+    );
     let Some(b) = time_init::unix_time_s() else {
         return Outcome::Fail("rtc lost");
     };
     if b < a {
         return Outcome::Fail("wall clock went backwards");
+    }
+    if b.saturating_sub(a) < 1 {
+        return Outcome::Fail("rtc did not advance in 1.1 s");
     }
     Outcome::Ok
 }
