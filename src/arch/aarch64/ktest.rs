@@ -1436,6 +1436,11 @@ pub(crate) const TESTS: &[Test] = &[
     )
     .deadline(60_000),
     test(
+        "el0_fp_migrate_counter",
+        crate::arch::aarch64::ktest_el0::test_el0_fp_migrate_counter,
+    )
+    .deadline(30_000),
+    test(
         "el0_sve_sigill",
         crate::arch::aarch64::ktest_el0::test_el0_sve_sigill,
     ),

@@ -42,7 +42,6 @@ use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::paging::PAGE_SIZE_4K;
 use vibeos::pmm::{Frames, MAX_ORDER};
 use vibeos::proc::{SIGKILL, wait_exited, wait_signaled};
-use vibeos::syscall::SYS_KILL;
 use vibeos::thread::{ThreadId, ThreadState};
 
 #[cfg(target_arch = "x86_64")]
@@ -1266,9 +1265,15 @@ x86_user_code!(
     "
 );
 
-/// A user thread that the requeue hook moves to the next CPU each time
-/// it is preempted keeps its XMM state across every migration.
 pub(crate) fn test_fp_migrate_counter() -> Outcome {
+    fp_migrate_counter_run(FP_COUNTER)
+}
+
+/// A user thread that the requeue hook moves to the next CPU each time
+/// it is preempted keeps its FP state across every migration. `code` is
+/// the arch's counter image: xmm0 on x86_64, v0 on aarch64, exiting 1 on
+/// a mismatch.
+pub(crate) fn fp_migrate_counter_run(code: &'static [u8]) -> Outcome {
     if crate::ktest::second_cpu().is_none() {
         return Outcome::Skip("needs 2 CPUs");
     }
@@ -1276,7 +1281,7 @@ pub(crate) fn test_fp_migrate_counter() -> Outcome {
     let pid = {
         set_requeue_next_cpu(true);
         let _g = RequeueGuard;
-        let pid = match user::spawn(&Image::Code(FP_COUNTER, DEFAULT), &["fp_counter"]) {
+        let pid = match user::spawn(&Image::Code(code, DEFAULT), &["fp_counter"]) {
             Ok(pid) => pid,
             Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
         };
@@ -1284,12 +1289,15 @@ pub(crate) fn test_fp_migrate_counter() -> Outcome {
         pid
     };
     // A failed kill shows as the status check below.
-    let _ = proc_init::dispatch(SYS_KILL, [u64::from(pid), u64::from(SIGKILL), 0, 0, 0, 0]);
+    let _ = proc_init::dispatch(
+        crate::arch::current::syscall_nr::SYS_KILL,
+        [u64::from(pid), u64::from(SIGKILL), 0, 0, 0, 0],
+    );
     let st = user::wait(pid);
     let moves = requeues().wrapping_sub(before);
     if st != wait_signaled(SIGKILL) {
         if st == 1 << 8 {
-            return crate::fail_fmt!("xmm0 counter mismatch after {moves} moves");
+            return crate::fail_fmt!("FP counter mismatch after {moves} moves");
         }
         return crate::fail_fmt!("status {st:#x}, want SIGKILL");
     }

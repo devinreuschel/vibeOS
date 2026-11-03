@@ -548,7 +548,7 @@ counterpart = "el0_fp_no_leak"
 name = "fp_migrate_counter"
 reason = "x86 XMM user text"
 arch = "aarch64"
-no_counterpart = "the counter is in xmm0"
+counterpart = "el0_fp_migrate_counter"
 
 [[skip]]
 name = "tls_survive"

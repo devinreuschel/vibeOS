@@ -337,6 +337,48 @@ user_code!(
     "
 );
 
+// The aarch64 form of `fp_migrate_counter` (ROADMAP §10.6): the counter is
+// the low doubleword of v0, added to v1 = {1, 0} each iteration, checked
+// against a counter in memory; getpid every 4,096 iterations so a kill lands.
+// The `.inst` words are `movi`, `mov v1.d[0], x1`, `add v0.2d, v0.2d, v1.2d`
+// and `mov x3, v0.d[0]`.
+user_code!(
+    FP_MIGRATE_COUNTER,
+    "
+    sub sp, sp, #16
+    str xzr, [sp]
+    mov x1, #1
+    .inst 0x6f00e400
+    .inst 0x6f00e401
+    .inst 0x4e081c21
+    mov x12, xzr
+1:
+    .inst 0x4ee18400
+    ldr x2, [sp]
+    add x2, x2, #1
+    str x2, [sp]
+    .inst 0x4e083c03
+    cmp x3, x2
+    b.ne 9f
+    add x12, x12, #1
+    tst x12, #0xfff
+    b.ne 1b
+    mov x8, #172
+    svc #0
+    b 1b
+9:
+    mov x0, #1
+    mov x8, #93
+    svc #0
+    "
+);
+
+/// ROADMAP §10.6, aarch64 form: a thread the requeue hook moves each time
+/// it is preempted keeps its V state across every migration (F069).
+pub(crate) fn test_el0_fp_migrate_counter() -> Outcome {
+    crate::sched::ktest::fp_migrate_counter_run(FP_MIGRATE_COUNTER)
+}
+
 user_code!(
     SVE_PTRUE,
     "
