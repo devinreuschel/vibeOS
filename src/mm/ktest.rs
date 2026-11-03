@@ -970,9 +970,9 @@ const IDENTITY_2M_VA: u64 = 0x40_1000;
 /// Read both identity probe pages on every online CPU, so their translations
 /// are in each CPU's TLB. `smp_init::init` runs it before
 /// `paging_init::teardown_identity`, so the teardown's flush is what
-/// `identity_flush_probe` sees. The reads are plain asm loads: a call-function
-/// body runs in a lockless section (`ipi_init::service_calls`), where `catch`
-/// is not allowed.
+/// `probe_boot_identity` and `identity_flush_probe` see. The reads are plain
+/// asm loads: a call-function body runs in a lockless section
+/// (`ipi_init::service_calls`), where `catch` is not allowed.
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn prime_identity() {
     crate::ipi_init::call_mask(u64::MAX, prime_identity_entry, core::ptr::null_mut(), true);
@@ -1013,6 +1013,25 @@ fn identity_entry() {
     IDENTITY_RESULT.store(identity_classes(), Ordering::Release);
 }
 
+/// The boot CPU's identity classes from `probe_boot_identity`, in
+/// `identity_classes`' layout with the CPU in the upper 32 bits; 0 until
+/// that probe stores one. Nonzero once stored, since the 4 KiB class is 1 to 3.
+#[cfg(target_arch = "x86_64")]
+static BOOT_IDENTITY: AtomicU64 = AtomicU64::new(0);
+
+/// Read the identity probe pages on the boot CPU right after
+/// `paging_init::teardown_identity`, before any CR3 write, and keep the
+/// classes for `kernel_va0_faults`. `smp_init::init` calls it there. The
+/// reads run under `catch_fault` with IF=0 and no lock held. Reads made after
+/// `/hello`'s CR3 write do not show a skipped flush under TCG, so this one
+/// runs first.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn probe_boot_identity() {
+    let cpu = thread_init::current_cpu();
+    // Release: publishes the result to `kernel_va0_faults`' Acquire load.
+    BOOT_IDENTITY.store(u64::from(cpu) << 32 | identity_classes(), Ordering::Release);
+}
+
 /// Run `entry` in a thread pinned to `cpu`, which stores a nonzero result in
 /// `slot`; `None` when it stores none within two seconds.
 #[cfg(target_arch = "x86_64")]
@@ -1026,10 +1045,37 @@ fn run_pinned(name: &'static str, slot: &AtomicU64, entry: fn(), cpu: u32) -> Op
     Some(slot.load(Ordering::Acquire))
 }
 
+/// Judge one CPU's identity classes: each probe page must have taken a #PF
+/// at its address.
+#[cfg(target_arch = "x86_64")]
+fn check_identity(cpu: u32, r: u64) -> Outcome {
+    let (four_k, two_m) = (r & 0xFF, (r >> 8) & 0xFF);
+    for (class, what) in [(four_k, "4 KiB"), (two_m, "2 MiB")] {
+        match class {
+            1 => {}
+            2 => {
+                return crate::fail_fmt!(
+                    "cpu {cpu}: a kernel read of the {what} identity page did not fault"
+                );
+            }
+            _ => {
+                return crate::fail_fmt!(
+                    "cpu {cpu}: the {what} identity read took a fault other than #PF at its address"
+                );
+            }
+        }
+    }
+    Outcome::Ok
+}
+
 /// ROADMAP §10.6, DESIGN §4.3: the identity window's translations are gone
 /// on every online CPU, so a read of each probe page faults there. Each
 /// remote CPU probes in its own pinned thread, one CPU at a time: `catch`
-/// keeps one state per machine.
+/// keeps one state per machine. On the boot CPU these reads come after
+/// `/hello`'s CR3 write, so under TCG they cannot show a skipped flush, and
+/// `probe_boot_identity` is the check that can. The other CPUs' reads depend
+/// on hardware keeping global translations across CR3 writes, which is not
+/// verified on hardware.
 #[cfg(target_arch = "x86_64")]
 fn identity_flush_probe() -> Outcome {
     let me = thread_init::current_cpu();
@@ -1043,21 +1089,9 @@ fn identity_flush_probe() -> Outcome {
                 None => return crate::fail_fmt!("cpu {cpu}: identity probe did not run"),
             }
         };
-        let (four_k, two_m) = (r & 0xFF, (r >> 8) & 0xFF);
-        for (class, what) in [(four_k, "4 KiB"), (two_m, "2 MiB")] {
-            match class {
-                1 => {}
-                2 => {
-                    return crate::fail_fmt!(
-                        "cpu {cpu}: a kernel read of the {what} identity page did not fault"
-                    );
-                }
-                _ => {
-                    return crate::fail_fmt!(
-                        "cpu {cpu}: the {what} identity read took a fault other than #PF at its address"
-                    );
-                }
-            }
+        let o = check_identity(cpu, r);
+        if !matches!(o, Outcome::Ok) {
+            return o;
         }
     }
     Outcome::Ok
@@ -1065,10 +1099,20 @@ fn identity_flush_probe() -> Outcome {
 
 /// ROADMAP §10.6: after `smp: done` the low identity window is gone, so a
 /// kernel read of VA 0 faults on every online CPU. `catch_fault`'s one
-/// jump buffer serves one CPU at a time, so the CPUs probe in turn. Then
+/// jump buffer serves one CPU at a time, so the CPUs probe in turn. First
+/// the boot CPU's read from `probe_boot_identity` must have faulted; then
 /// `identity_flush_probe` checks the two pages `prime_identity` cached.
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn kernel_va0_faults() -> Outcome {
+    // Acquire: pairs with the Release store in `probe_boot_identity`.
+    let boot = BOOT_IDENTITY.load(Ordering::Acquire);
+    if boot == 0 {
+        return crate::fail_fmt!("the boot CPU's identity probe did not run");
+    }
+    let o = check_identity((boot >> 32) as u32, boot & 0xFFFF_FFFF);
+    if !matches!(o, Outcome::Ok) {
+        return o;
+    }
     // The registry is pinned, so the hint is its CPU.
     let me = thread_init::current_cpu();
     let online = per_cpu_init::online_mask();

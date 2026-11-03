@@ -692,7 +692,7 @@ pub unsafe fn init() {
             "smp: bootstrap stack {stack:#x?} not outside the identity window"
         );
         // Every CPU caches the window's translations first, so the teardown's
-        // flush is what `kernel_va0_faults` checks (DESIGN §4.3).
+        // flush has something to drop on each CPU (DESIGN §4.3).
         #[cfg(feature = "kernel_tests")]
         crate::mm::ktest::prime_identity();
         // SAFETY: every AP is up or abandoned (`start_aps` returned), nothing
@@ -700,6 +700,10 @@ pub unsafe fn init() {
         // keeps, and this CPU's stack is outside the window (checked above);
         // established here.
         unsafe { crate::paging_init::teardown_identity(keep) };
+        // The boot CPU reads the primed pages before any CR3 write, so a
+        // translation its flush left in place shows as a readable page.
+        #[cfg(feature = "kernel_tests")]
+        crate::mm::ktest::probe_boot_identity();
     }
 }
 
