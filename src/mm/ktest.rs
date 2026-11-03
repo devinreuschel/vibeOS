@@ -1180,6 +1180,7 @@ pub(crate) const TESTS: &[Test] = &[
     ),
     test("kernel_va0_faults", kernel_va0_faults).once(),
     test("ioremap_failure_returns_va", ioremap_failure_returns_va),
+    test("physmap_kernel_span_4k", physmap_kernel_span_4k),
 ];
 
 // ---------------------------------------------------------------------------
@@ -1244,6 +1245,38 @@ pub(crate) fn ioremap_failure_returns_va() -> Outcome {
             va.as_u64(),
             planted.as_u64()
         );
+    }
+    Outcome::Ok
+}
+
+// ---------------------------------------------------------------------------
+// physmap_kernel_span_4k
+
+/// Every whole page of the kernel image's physmap alias is a 4 KiB leaf that
+/// maps its own physical page (ROADMAP §11.2, MEMORY.md §4.1). The builder
+/// emits that span at 4 KiB, so no 2 MiB leaf may cover any of it.
+pub(crate) fn physmap_kernel_span_4k() -> Outcome {
+    let span = crate::boot::info().kernel_phys.clone();
+    let hhdm = paging_init::hhdm_offset();
+    let mut pa = span.start.next_multiple_of(PAGE_SIZE);
+    let end = span.end & !(PAGE_SIZE - 1);
+    let mut checked = 0u64;
+    while pa < end {
+        let Some(va) = hhdm.checked_add(pa) else {
+            return Outcome::Fail("physmap alias overflows");
+        };
+        match paging_init::translate(VirtAddr(va)) {
+            Some((got, PageSize::Size4K, _)) if got.as_u64() == pa => {}
+            Some((_, size, _)) => {
+                return crate::fail_fmt!("kernel span page {pa:#x} maps as {size:?}, not Size4K");
+            }
+            None => return crate::fail_fmt!("kernel span page {pa:#x} unmapped"),
+        }
+        checked += 1;
+        pa += PAGE_SIZE;
+    }
+    if checked == 0 {
+        return Outcome::Fail("kernel span has no whole page");
     }
     Outcome::Ok
 }

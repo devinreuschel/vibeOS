@@ -24,8 +24,8 @@ use vibeos::lock::RANK_PT;
 #[cfg(target_arch = "x86_64")]
 use vibeos::marker;
 use vibeos::paging::{
-    self, FrameAlloc, IoremapWindow, MapError, MapMode, PAGE_SIZE_1G, PAGE_SIZE_2M, PAGE_SIZE_4K,
-    PageFlags, PageSize, PhysAddr, VirtAddr,
+    self, FrameAlloc, IoremapWindow, MapError, MapMode, PAGE_SIZE_2M, PAGE_SIZE_4K, PageFlags,
+    PageSize, PhysAddr, VirtAddr,
 };
 use vibeos::physmap::{PhysmapRun, PhysmapSlot, phys_in_slot, walk_physmap};
 use vibeos::pmm::Frames;
@@ -917,8 +917,9 @@ fn have_1g_pages() -> bool {
     }
 }
 
-/// Map one coalesced physmap run. 1 GiB uses `map_page`; 4 KiB / 2 MiB use
-/// `map_range`.
+/// Map one coalesced physmap run. 1 GiB and 4 KiB use `map_page` at the
+/// run's size, so a 4 KiB span (the kernel image's) is never covered by a
+/// 2 MiB leaf; 2 MiB uses `map_range`.
 ///
 /// # Safety
 /// Same contract as `Mapper::map_page` / `map_range` for `run`.
@@ -928,7 +929,8 @@ unsafe fn map_physmap_run(
     run: PhysmapRun,
 ) -> Result<(), MapError> {
     let flags = paging::physmap_flags();
-    if run.size == PageSize::Size1G {
+    if run.size != PageSize::Size2M {
+        let step = run.size.bytes();
         let mut off = 0u64;
         while off < run.len {
             // SAFETY: this fn's `# Safety` contract, established here.
@@ -937,12 +939,12 @@ unsafe fn map_physmap_run(
                     VirtAddr(run.va.as_u64() + off),
                     PhysAddr(run.pa.as_u64() + off),
                     flags,
-                    PageSize::Size1G,
+                    run.size,
                     MapMode::Fresh,
                     alloc,
                 )?;
             }
-            off = off.saturating_add(PAGE_SIZE_1G);
+            off = off.saturating_add(step);
         }
         mapper.publish_leaves();
         return Ok(());
