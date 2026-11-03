@@ -4,11 +4,8 @@ use core::arch::{asm, global_asm};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use vibeos::irq::IrqSpecifier;
-use vibeos::kalloc::TryBox;
 use vibeos::kva::DEFAULT_STACK_PAGES;
-use vibeos::mm::asid::{self, AsidAlloc};
-use vibeos::paging::{PAGE_SIZE_4K, PageFlags, PhysAddr};
-use vibeos::pmm::Frames;
+use vibeos::paging::{PAGE_SIZE_4K, PhysAddr};
 use vibeos::thread::ThreadId;
 
 use crate::arch;
@@ -317,9 +314,6 @@ static OSLR_SEEN: AtomicU64 = AtomicU64::new(0);
 static IDENTITY_BAD: AtomicU64 = AtomicU64::new(0);
 static IDENTITY_SEEN: AtomicU64 = AtomicU64::new(0);
 
-const USER_VA: u64 = 0x1_0000;
-const ASID_SHIFT: u64 = 48;
-const ASID_SPACES: u32 = 1000;
 const OSLK: u64 = 1 << 1;
 const PERCPU_TICKS_WANT: u64 = 10;
 const PERCPU_TICKS_WAIT_NS: u64 = 2_000_000_000;
@@ -436,120 +430,6 @@ pub(crate) fn test_oslsr_clear() -> Outcome {
     }
     if OSLR_BAD.load(Ordering::Acquire) != 0 {
         return Outcome::Fail("ap oslk set");
-    }
-    Outcome::Ok
-}
-
-fn free_pa(pa: u64) {
-    if pa == 0 {
-        return;
-    }
-    // SAFETY: `pa` is a buddy page this test allocated and no longer maps.
-    // established here.
-    unsafe {
-        crate::pmm_init::with_buddy(|b| b.free(Frames::from_entry(pa, 0)));
-    }
-}
-
-fn alloc_zeroed() -> Option<u64> {
-    let f = crate::pmm_init::with_buddy(|b| b.alloc(0))?;
-    let pa = f.into_entry();
-    let va = crate::paging_init::hhdm_offset().wrapping_add(pa);
-    // SAFETY: buddy page, HHDM maps it (I14). established here.
-    unsafe { core::ptr::write_bytes(va as *mut u8, 0, 4096) };
-    Some(pa)
-}
-
-pub(crate) fn test_asid_4bit() -> Outcome {
-    let ncpus = crate::per_cpu_init::cpu_count().max(2) as u32;
-    let Some(alloc) = AsidAlloc::try_boxed(4, ncpus) else {
-        return Outcome::Fail("4-bit AsidAlloc");
-    };
-    let saved = crate::arch::aarch64::cpu::read_ttbr0();
-    let cpu = 0u32;
-    let flags = PageFlags::empty()
-        .with(PageFlags::PRESENT)
-        .with(PageFlags::WRITABLE)
-        .with(PageFlags::USER);
-    let mut i = 0u32;
-    while i < ASID_SPACES {
-        if crate::ktest::deadline_within(1_000) == Some(true) {
-            // SAFETY: restore the empty TTBR0 this CPU had. established here.
-            unsafe { crate::arch::aarch64::cpu::write_ttbr0(saved) };
-            return Outcome::Fail("asid deadline");
-        }
-        let Some(l0) = alloc_zeroed() else {
-            return Outcome::Fail("asid l0");
-        };
-        let Some(data) = alloc_zeroed() else {
-            free_pa(l0);
-            return Outcome::Fail("asid data");
-        };
-        let Ok(mut tables) = TryBox::try_new([0u64; 8]) else {
-            free_pa(data);
-            free_pa(l0);
-            return Outcome::Fail("asid tables");
-        };
-        let mut n = 0usize;
-        tables[n] = l0;
-        n += 1;
-        if !crate::arch::aarch64::secondary::map_va(
-            l0,
-            USER_VA,
-            data,
-            &mut tables[..],
-            &mut n,
-            flags,
-        ) {
-            let mut t = 0;
-            while t < n {
-                free_pa(tables[t]);
-                t += 1;
-            }
-            free_pa(data);
-            return Outcome::Fail("asid map");
-        }
-        let mut word = 0u64;
-        let packed = asid::switch(&alloc, cpu, &mut word);
-        if packed == 0 {
-            let mut t = 0;
-            while t < n {
-                free_pa(tables[t]);
-                t += 1;
-            }
-            free_pa(data);
-            return Outcome::Fail("asid alloc");
-        }
-        if alloc.flush_pending(cpu) {
-            crate::arch::aarch64::cpu::tlbi_all();
-            alloc.clear_flush(cpu);
-        }
-        let asid = u64::from(alloc.asid_of(packed));
-        // SAFETY: `l0` is this space's TTBR0 root; ASID is the allocator's.
-        // established here.
-        unsafe {
-            crate::arch::aarch64::cpu::write_ttbr0(l0 | (asid << ASID_SHIFT));
-        }
-        let pattern = 0xA5A5_0000u64 | u64::from(i);
-        crate::arch::aarch64::cpu::clear_pan();
-        // SAFETY: USER_VA is mapped in this TTBR0; PAN is clear. established here.
-        unsafe {
-            core::ptr::write_volatile(USER_VA as *mut u64, pattern);
-            let got = core::ptr::read_volatile(USER_VA as *const u64);
-            crate::arch::aarch64::cpu::set_pan();
-            crate::arch::aarch64::cpu::write_ttbr0(saved);
-            crate::arch::aarch64::cpu::tlbi_all();
-            let mut t = 0;
-            while t < n {
-                free_pa(tables[t]);
-                t += 1;
-            }
-            free_pa(data);
-            if got != pattern {
-                return crate::fail_fmt!("asid {i} got {got:#x} want {pattern:#x}");
-            }
-        }
-        i += 1;
     }
     Outcome::Ok
 }
@@ -1390,7 +1270,11 @@ pub(crate) const TESTS: &[Test] = &[
     test("idle_wfi", test_idle_wfi),
     test("sysreg_compare", test_sysreg_compare),
     test("oslsr_clear", test_oslsr_clear),
-    test("asid_4bit", test_asid_4bit).deadline(60_000),
+    test(
+        "asid_4bit",
+        crate::arch::aarch64::ktest_asid::test_asid_4bit,
+    )
+    .deadline(60_000),
     test("tlb_shootdown_remote", test_tlb_shootdown_remote),
     test("per_cpu_identity", test_per_cpu_identity),
     test("percpu_ticks_advance", test_percpu_ticks_advance),
