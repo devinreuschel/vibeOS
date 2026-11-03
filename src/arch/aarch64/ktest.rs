@@ -1097,18 +1097,21 @@ pub(crate) fn test_el0_bad_elr() -> Outcome {
     }
 }
 
-/// `current_tcb` is `mrs SP_EL0`.
+/// `current_tcb` is `mrs SP_EL0`. Checked against the per-CPU `current`
+/// that `set_current_thread` writes beside SP_EL0. IF=0 keeps this thread
+/// on one CPU for both reads.
 pub(crate) fn test_el0_sp_el0_current() -> Outcome {
-    let t = crate::arch::current_tcb();
+    let _g = InterruptGuard::enter();
     let via: u64;
     // SAFETY: SP_EL0 holds current at EL1 (ROADMAP §11.6). established here.
     unsafe {
         core::arch::asm!("mrs {0}, sp_el0", out(reg) via, options(nomem, nostack, preserves_flags));
     }
-    if t as u64 == via && !t.is_null() {
+    let sched = crate::per_cpu_init::current().current;
+    if !sched.is_null() && sched as u64 == via {
         Outcome::Ok
     } else {
-        crate::fail_fmt!("tcb {t:p} sp_el0 {via:#x}")
+        crate::fail_fmt!("sp_el0 {via:#x} percpu current {sched:p}")
     }
 }
 
