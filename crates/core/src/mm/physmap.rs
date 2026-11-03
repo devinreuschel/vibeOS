@@ -425,6 +425,12 @@ mod tests {
         (w, runs)
     }
 
+    /// Bytes the emitted runs map. Unlike `PhysmapWalk::mapped`, which the
+    /// walk takes from its clip, this counts what `emit` was handed.
+    fn total_len(runs: &[PhysmapRun]) -> u64 {
+        runs.iter().map(|r| r.len).sum()
+    }
+
     fn any_pa(runs: &[PhysmapRun], pa: u64) -> bool {
         runs.iter()
             .any(|r| pa >= r.pa.0 && pa < r.pa.0.saturating_add(r.len))
@@ -652,14 +658,14 @@ mod tests {
     fn builder_aligns_va_as_well_as_pa() {
         let ram = 0u64..2 * PAGE_SIZE_1G;
         let off = PHYSMAP_X86_64.start + PAGE_SIZE_2M;
-        let (w, runs) = collect(
+        let (_, runs) = collect(
             PHYSMAP_X86_64,
             off,
             core::iter::once(ram.clone()),
             0..0,
             true,
         );
-        assert_eq!(w.mapped, 2 * PAGE_SIZE_1G);
+        assert_eq!(total_len(&runs), 2 * PAGE_SIZE_1G);
         assert!(runs.iter().all(|r| r.size == PageSize::Size2M));
         for r in &runs {
             assert_eq!(r.va.0 & (r.size.bytes() - 1), 0, "va {:#x}", r.va.0);
@@ -667,8 +673,8 @@ mod tests {
         }
 
         let off = PHYSMAP_X86_64.start + PAGE_SIZE_4K;
-        let (w, runs) = collect(PHYSMAP_X86_64, off, core::iter::once(ram), 0..0, true);
-        assert_eq!(w.mapped, 2 * PAGE_SIZE_1G);
+        let (_, runs) = collect(PHYSMAP_X86_64, off, core::iter::once(ram), 0..0, true);
+        assert_eq!(total_len(&runs), 2 * PAGE_SIZE_1G);
         assert!(runs.iter().all(|r| r.size == PageSize::Size4K));
         for r in &runs {
             assert_eq!(r.va.0, off + r.pa.0);
