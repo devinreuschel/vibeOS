@@ -1512,6 +1512,7 @@ def rule_no_core_upload_with_secrets(tree: Tree) -> list[Problem]:
 
 
 ARM64_LABELS = ("ubuntu-26.04-arm",)
+ARCH_AXIS_RE = re.compile(r"matrix(?:\.arch\b|\[\s*['\"]arch['\"]\s*\])")
 BOOT_CMD = re.compile(
     r"\bmake\b.*\b(test-\S+|run)\b|\brun_(?:ktest|e2e|forensics|interactive|power)\.py\b"
 )
@@ -1595,12 +1596,19 @@ def rule_aarch64_arm(tree: Tree) -> list[Problem]:
                             )
                         )
                 continue
-            if "aarch64" not in run_text and "ARCH=aarch64" not in run_text:
-                continue
             if not boots:
                 continue
             runs_on = job.get("runs-on")
             labels = runs_on.scalars() if runs_on is not None else []
+            # An arch axis the run passes on to the guest boots aarch64 on the runner too,
+            # unless a runs-on label varies with the same axis.
+            arch_axis = (
+                "aarch64" in _matrix_values(job, "arch")
+                and ARCH_AXIS_RE.search(run_text) is not None
+                and not any(ARCH_AXIS_RE.search(lb) for lb in labels)
+            )
+            if "aarch64" not in run_text and "ARCH=aarch64" not in run_text and not arch_axis:
+                continue
             resolved: list[str] = []
             for label in labels:
                 m = MATRIX_REF_RE.fullmatch(label.strip())

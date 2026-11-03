@@ -610,6 +610,47 @@ class TestAarch64Arm(unittest.TestCase):
         self.assertEqual(rule_aarch64_arm(t), [])
 
 
+class TestAarch64ArmAxis(unittest.TestCase):
+    """A matrix `arch` axis that reaches the guest through `ARCH:` boots aarch64 on
+    the job's runner, so the runner must be arm64 unless it varies with the axis."""
+
+    def job(self, runs_on: str, arch: str = "[x86_64, aarch64]", env: bool = True,
+            run: str = "make test-kernel") -> str:
+        text = (
+            f"jobs:\n  boot:\n    runs-on: {runs_on}\n"
+            f"    strategy:\n      matrix:\n        arch: {arch}\n"
+        )
+        if env:
+            text += "    env:\n      ARCH: ${{ matrix.arch }}\n"
+        return text + f"    steps:\n      - run: {run}\n"
+
+    def problems(self, text: str) -> list[str]:
+        t = Tree(workflows={CI: parse(text, CI)})
+        return [p.rule for p in rule_aarch64_arm(t)]
+
+    def test_axis_aarch64_on_x86_runner_fails(self) -> None:
+        self.assertEqual(self.problems(self.job("ubuntu-26.04")), ["aarch64_arm"])
+
+    def test_axis_aarch64_on_arm_runner_passes(self) -> None:
+        self.assertEqual(self.problems(self.job("ubuntu-26.04-arm")), [])
+
+    def test_runner_axis_with_an_x86_value_fails(self) -> None:
+        text = self.job("${{ matrix.runner }}").replace(
+            "        arch: [x86_64, aarch64]\n",
+            "        arch: [x86_64, aarch64]\n        runner: [ubuntu-26.04, ubuntu-26.04-arm]\n",
+        )
+        self.assertEqual(self.problems(text), ["aarch64_arm"])
+
+    def test_axis_without_a_boot_passes(self) -> None:
+        self.assertEqual(self.problems(self.job("ubuntu-26.04", run="make prebuilt")), [])
+
+    def test_axis_without_aarch64_passes(self) -> None:
+        self.assertEqual(self.problems(self.job("ubuntu-26.04", arch="[x86_64]")), [])
+
+    def test_axis_not_passed_to_the_guest_passes(self) -> None:
+        self.assertEqual(self.problems(self.job("ubuntu-26.04", env=False)), [])
+
+
 class TestBudgetDoc(unittest.TestCase):
     ROWS = (
         "| x86_64 | one | `test-a`, `test-b` | 30 |\n"
