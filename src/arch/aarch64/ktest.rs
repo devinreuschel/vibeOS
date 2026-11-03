@@ -387,9 +387,13 @@ pub(crate) fn test_sysreg_compare() -> Outcome {
         if hcr & E2H_TGE != E2H_TGE {
             return Outcome::Fail("el2 hcr");
         }
-        let described = described_aps();
-        if described != 0 && aps != described {
-            return Outcome::Fail("el2 ap missing");
+        // Bring-up starts every described CPU only when PSCI has a conduit.
+        // Without one only the boot CPU runs, so the comparison does not apply.
+        if crate::arch::aarch64::power::psci_available() {
+            let described = described_aps();
+            if described != 0 && aps != described {
+                return Outcome::Fail("el2 ap missing");
+            }
         }
     }
     if aps == 0 {

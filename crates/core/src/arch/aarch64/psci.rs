@@ -20,8 +20,8 @@ pub const SYSTEM_RESET: u64 = 0x8400_0009;
 /// `CPU_ON` returned this core already running.
 pub const ALREADY_ON: i64 = -4;
 
-/// PSCI `NOT_SUPPORTED` (DEN0022): returned without a call when the device
-/// tree names no PSCI conduit.
+/// PSCI `NOT_SUPPORTED` (DEN0022): returned without a call when there is no
+/// firmware description or it names no PSCI conduit.
 pub const NOT_SUPPORTED: i64 = -1;
 
 /// The SMCCC conduit a PSCI call takes (DEN0028).
@@ -31,14 +31,15 @@ pub enum Conduit {
     Smc,
 }
 
-/// The conduit `method` names, or `None` when the firmware description has no
-/// PSCI. Without a `/psci` node there is no EL2 or EL3 handler, so `hvc` or
-/// `smc` would be UNDEFINED and no call may be made (DT spec, `/psci`).
-pub const fn conduit(method: EnableMethod) -> Option<Conduit> {
+/// The conduit `method` names. No firmware description (`None`) and a
+/// description with no PSCI (`EnableMethod::None`) both name none. Without a
+/// `/psci` node there is no EL2 or EL3 handler, so `hvc` or `smc` would be
+/// UNDEFINED and no call may be made (DT spec, `/psci`).
+pub const fn conduit(method: Option<EnableMethod>) -> Option<Conduit> {
     match method {
-        EnableMethod::None => None,
-        EnableMethod::Psci { hvc: true } => Some(Conduit::Hvc),
-        EnableMethod::Psci { hvc: false } => Some(Conduit::Smc),
+        None | Some(EnableMethod::None) => None,
+        Some(EnableMethod::Psci { hvc: true }) => Some(Conduit::Hvc),
+        Some(EnableMethod::Psci { hvc: false }) => Some(Conduit::Smc),
     }
 }
 
@@ -197,15 +198,20 @@ mod tests {
 
     #[test]
     fn conduit_follows_the_firmware_description() {
-        assert_eq!(conduit(EnableMethod::None), None);
+        assert_eq!(conduit(Some(EnableMethod::None)), None);
         assert_eq!(
-            conduit(EnableMethod::Psci { hvc: true }),
+            conduit(Some(EnableMethod::Psci { hvc: true })),
             Some(Conduit::Hvc)
         );
         assert_eq!(
-            conduit(EnableMethod::Psci { hvc: false }),
+            conduit(Some(EnableMethod::Psci { hvc: false })),
             Some(Conduit::Smc)
         );
+    }
+
+    #[test]
+    fn no_description_names_no_conduit() {
+        assert_eq!(conduit(None), None);
     }
 
     #[test]

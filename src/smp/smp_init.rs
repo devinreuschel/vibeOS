@@ -1025,6 +1025,16 @@ fn init_aarch64() {
         crate::klog!(vibeos::log::Level::Error, "vibeOS: smp: stub pa");
         return;
     };
+    let Some(desc) = machine_init::info() else {
+        return;
+    };
+    if !crate::arch::aarch64::power::psci_available() {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "vibeOS: smp: no /psci node, boot cpu only"
+        );
+        return;
+    }
     let mut pas = TryVec::new();
     let stub_end = stub_pa.saturating_add(stub_len as u64);
     let mut p = stub_pa;
@@ -1049,16 +1059,6 @@ fn init_aarch64() {
     }
     clean_identity(&id_tables, n_id);
     arch::aarch64::secondary::clean_poc(stub_va, stub_len);
-    let Some(desc) = machine_init::info() else {
-        return;
-    };
-    if !crate::arch::aarch64::power::psci_available() {
-        crate::klog!(
-            vibeos::log::Level::Warn,
-            "vibeOS: smp: no /psci node, boot cpu only"
-        );
-        return;
-    }
     let bsp = per_cpu_init::cpu(0)
         .map(|c| {
             // Relaxed: the BSP's MPIDR is fixed after `init_bsp`; pairs with nothing.

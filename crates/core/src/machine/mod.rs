@@ -388,6 +388,9 @@ impl MachineDesc {
 
     /// MADT / HPET / MCFG only. FADT stays on [`AcpiInfo`].
     pub fn from_acpi(info: &AcpiInfo) -> Self {
+        // `enable` stays None. aarch64 has no RSDP path yet (src/boot/mod.rs),
+        // so this is not reached there. An aarch64 RSDP path must set it from
+        // the FADT's PSCI flags, or the machine stays on one CPU.
         let mut d = Self::default();
         if let Some(m) = info.madt.as_ref() {
             fill_madt(&mut d, m);

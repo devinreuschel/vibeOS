@@ -4,18 +4,15 @@ use core::arch::asm;
 
 use vibeos::arch::aarch64::psci::{self, Conduit};
 
-/// The conduit from the device tree. With no machine description at all,
-/// `hvc`, as before the `/psci` check: nothing in early boot calls into
-/// PSCI, and the ktest exit needs its `SYSTEM_OFF` attempt.
+/// The conduit from the device tree. No machine description, or one with no
+/// `/psci` node, names no conduit. `machine_init::init_from_dtb` publishes the
+/// description before any PSCI call, and QEMU's `virt` always passes a DTB.
 fn conduit() -> Option<Conduit> {
-    match crate::machine_init::info() {
-        Some(d) => psci::conduit(d.enable),
-        None => Some(Conduit::Hvc),
-    }
+    psci::conduit(crate::machine_init::info().map(|d| d.enable))
 }
 
-/// Whether PSCI calls have a conduit. False when the device tree has no
-/// `/psci` node, and then no call is made.
+/// Whether PSCI calls have a conduit. False with no machine description or
+/// no `/psci` node, and then no call is made.
 pub fn psci_available() -> bool {
     conduit().is_some()
 }
