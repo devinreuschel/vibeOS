@@ -115,6 +115,12 @@ pub const fn cnthctl_el2() -> u64 {
     EL1PCTEN | EL1PCEN
 }
 
+/// Smallest data-cache line in bytes, from `CTR_EL0.DminLine` (bits 19:16;
+/// Arm ARM DDI0487): the line is `4 << DminLine` bytes.
+pub const fn dcache_line_bytes(ctr: u64) -> usize {
+    4 << ((ctr >> 16) & 0xF)
+}
+
 /// `PMUSERENR_EL0`: no EL0 PMU access.
 pub const fn pmuserenr_el0() -> u64 {
     0
@@ -247,6 +253,17 @@ mod tests {
         const EL1PCEN: u64 = 1 << 1;
         assert_eq!(cnthctl_el2(), EL1PCTEN | EL1PCEN);
         assert_ne!(cnthctl_el2(), cntkctl_el1());
+    }
+
+    #[test]
+    fn dcache_line_from_dminline() {
+        // DminLine 4 is 64-byte lines, the size this stride used before.
+        assert_eq!(dcache_line_bytes(4 << 16), 64);
+        assert_eq!(dcache_line_bytes(0), 4);
+        assert_eq!(dcache_line_bytes(0xF << 16), 4 << 15);
+        // Bits outside DminLine (IminLine in 3:0, the rest above) do not count.
+        assert_eq!(dcache_line_bytes(0xFFF0_FFFF), 4);
+        assert_eq!(dcache_line_bytes((4 << 16) | 0xF | (0xF << 32)), 64);
     }
 
     #[test]

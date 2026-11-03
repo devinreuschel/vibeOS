@@ -225,6 +225,16 @@ pub unsafe fn write_ttbr0(ttbr0: u64) {
     }
 }
 
+/// `CTR_EL0`: the cache line sizes (`sysreg::dcache_line_bytes`).
+pub fn read_ctr_el0() -> u64 {
+    let v: u64;
+    // SAFETY: CTR_EL0 is readable at EL1 with no trap set for it; established here.
+    unsafe {
+        asm!("mrs {0}, ctr_el0", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
 pub fn read_ttbr0() -> u64 {
     let v: u64;
     // SAFETY: TTBR0_EL1 is readable at EL1 / VHE EL2; established here.

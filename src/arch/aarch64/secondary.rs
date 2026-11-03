@@ -333,16 +333,18 @@ pub fn build_identity(pas: &[u64]) -> Option<(u64, u64, TryBox<[u64; IDENTITY_TA
     Some((l0, empty, tables))
 }
 
-/// `dc cvac` over `[va, va+len)`, then `dsb sy`.
+/// `dc cvac` over `[va, va+len)`, one op per `CTR_EL0.DminLine` line, then
+/// `dsb sy`.
 pub fn clean_poc(va: u64, len: usize) {
-    let start = va & !63;
+    let line = sysreg::dcache_line_bytes(crate::arch::aarch64::cpu::read_ctr_el0()) as u64;
+    let start = va & !(line - 1);
     let end = va.saturating_add(len as u64);
     let mut p = start;
     while p < end {
         // SAFETY: clean a cache line of kernel memory we own to PoC.
         // established here.
         unsafe { asm!("dc cvac, {0}", in(reg) p, options(nostack, preserves_flags)) };
-        p = p.saturating_add(64);
+        p = p.saturating_add(line);
     }
     // SAFETY: `dsb sy` after the cleans. established here.
     unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
