@@ -630,8 +630,9 @@ pub unsafe fn load_cr3_u64(want: u64) {
         unsafe {
             crate::arch::aarch64::cpu::write_ttbr0(want);
             // `msr ttbr0_el1` does not flush, unlike an x86 CR3 write;
-            // `switch_cr3_for` already pairs its write with this.
-            crate::arch::aarch64::cpu::tlbi_all();
+            // `switch_cr3_for` already pairs its write with this local
+            // ASID-0 flush.
+            crate::arch::aarch64::cpu::tlbi_asid0_local();
         }
         #[cfg(not(target_arch = "aarch64"))]
         // SAFETY: invariant I44: `want` is a user PML4 that stays

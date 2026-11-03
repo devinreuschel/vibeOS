@@ -273,7 +273,7 @@ pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     // TTBR0, which stays allocated while that TCB names it; established
     // by `addr_space_init::SpaceCore`'s drop and `paging_init::install`.
     unsafe { crate::arch::aarch64::cpu::write_ttbr0(want) };
-    crate::arch::aarch64::cpu::tlbi_all();
+    crate::arch::aarch64::cpu::tlbi_asid0_local();
     // Release: pairs with the Acquire load in `addr_space_init::root_holder`.
     cpu.remote.as_cr3.store(want, Ordering::Release);
     false

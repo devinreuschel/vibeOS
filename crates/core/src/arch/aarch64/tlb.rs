@@ -85,6 +85,13 @@ pub const ASID_INVAL: [TlbOp; 4] = [
 /// Flush-pending CPU before it loads an ASID of the new generation.
 pub const ROLLOVER_LOCAL: [TlbOp; 3] = [TlbOp::TlbiVmalle1, TlbOp::DsbNsh, TlbOp::Isb];
 
+/// After a TTBR0 write, with the `isb` that follows it. Local only: every
+/// user root is ASID 0 until ASIDs are wired, and a CPU's TLB holds user
+/// entries only from roots it loaded, each flushed when it switched away.
+/// The broadcast `vmalle1is` would also drop global kernel entries on every
+/// CPU. The kernel's `tlbi_asid0_local` runs this.
+pub const TTBR0_SWITCH: [TlbOp; 3] = [TlbOp::TlbiAside1, TlbOp::DsbNsh, TlbOp::Isb];
+
 /// Break-before-make, after the invalid store and before the new one.
 /// The kernel's `bbm_break` runs this.
 pub const BBM_AFTER_INVALID: [TlbOp; 3] = [TlbOp::DsbIshst, TlbOp::TlbiVale1is, TlbOp::DsbIsh];
@@ -209,6 +216,18 @@ mod tests {
             ["dsb ishst", "tlbi vale1is", "dsb ish"]
         );
         assert_eq!(BBM_AFTER_MAKE.map(TlbOp::mnemonic), ["dsb ishst", "isb"]);
+    }
+
+    #[test]
+    fn ttbr0_switch_is_local_asid0() {
+        assert_eq!(
+            TTBR0_SWITCH.map(TlbOp::mnemonic),
+            ["tlbi aside1", "dsb nsh", "isb"]
+        );
+        // ASID 0 is the operand's bits 63:48, with no VA.
+        assert_eq!(tlbi_va_operand(0, 0), 0);
+        assert!(!TTBR0_SWITCH.contains(&TlbOp::TlbiAside1is));
+        assert!(!TTBR0_SWITCH.contains(&TlbOp::TlbiVmalle1is));
     }
 
     #[test]

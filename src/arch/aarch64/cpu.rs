@@ -189,6 +189,12 @@ pub fn tlbi_all() {
     run_tlb(&tlb::ALL_INVAL, 0);
 }
 
+/// Local ASID-0 invalidate after a TTBR0 write, which `write_ttbr0` ends
+/// with an `isb`. Runs `tlb::TTBR0_SWITCH`.
+pub fn tlbi_asid0_local() {
+    run_tlb(&tlb::TTBR0_SWITCH, 0);
+}
+
 /// Leaf TLB invalidate. Runs `tlb::LEAF_INVAL`. ASID 0: TTBR0 does not
 /// carry one yet (ROADMAP §11.2).
 pub fn tlbi_va(va: u64) {
