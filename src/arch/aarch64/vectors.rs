@@ -150,7 +150,11 @@ global_asm!(
     ".endm",
     // Slots 0 to 3 and 12 to 15 are never taken: the kernel runs on SP_ELx,
     // and EL0 is AArch64 only (PORTABILITY §11.5 rule 1). They dump and halt
-    // without the IRQ, uaccess, or ring-3 paths.
+    // without the IRQ, uaccess, or ring-3 paths. Slots 12 to 15 (lower EL,
+    // AArch32) halt only while the kernel never ERETs with SPSR.M[4]=1, which
+    // holds because `PSTATE_EL0T` starts every user frame (`UserFrame::new_user`
+    // in crates/core/src/arch/aarch64/trap.rs). A path that copies pstate from
+    // user memory must keep that property.
     ".macro vibeos_slot_halt n",
     "    vibeos_swap_sp_x0",
     "    sub x0, x0, #{frame}",

@@ -42,6 +42,9 @@ pub struct Caught {
 
 static KIND: AtomicU8 = AtomicU8::new(ST_OFF);
 /// The arming CPU's index plus one (see [`armed_token`]); 0 when no window is armed.
+/// One slot for every CPU, so catch windows must not overlap across CPUs: a second
+/// CPU's arm replaces this value and its end stores 0, so the first CPU's fault
+/// misses its window and falls through to a halt.
 static ARMED: AtomicU32 = AtomicU32::new(0);
 static GOT_FAR: AtomicU64 = AtomicU64::new(0);
 static GOT_ESR: AtomicU64 = AtomicU64::new(0);

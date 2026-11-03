@@ -837,6 +837,7 @@ fn tpidrro_on_ap(_: *mut ()) {
 
 /// `TPIDRRO_EL0` is zero on this CPU and on every AP: the overflow stub's
 /// stash must not outlive the catch that reads it (DESIGN §11.5 rule 6).
+/// Red only if `kstack_overflow` ran earlier in this boot; QEMU resets the register to 0, so boot and AP clears go unseen.
 pub(crate) fn test_tpidrro_zero() -> Outcome {
     if arch::aarch64::cpu::tpidrro_el0() != 0 {
         return Outcome::Fail("bsp tpidrro set");
