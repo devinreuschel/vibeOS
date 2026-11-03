@@ -619,7 +619,10 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
 
     let mut vecs = [IrqId::NONE; MAX_VQ];
     let mut vcpus = [0u32; MAX_VQ];
-    let spec = crate::virtio_mmio_init::irq_spec(dev).ok_or(VirtioError::Failed)?;
+    let Some(spec) = crate::virtio_mmio_init::irq_spec(dev) else {
+        fail_mmio(base, &[], 0, None, &mut vqs, None);
+        return Err(VirtioError::Failed);
+    };
     let cpu = irq_init::threaded_cpu();
     #[cfg(target_arch = "aarch64")]
     if let vibeos::irq::IrqSpecifier::Gic { intid } = spec {
