@@ -51,6 +51,12 @@ pub enum Event {
     BbmBreak(u64),
     /// Barriers after the new store of break-before-make.
     BbmMake,
+    /// A new table's words are published, before the descriptor that links it.
+    PublishTable,
+    /// The descriptor that links a new table, built right before its store.
+    TableLink(u64),
+    /// A batch of Fresh stores is published.
+    PublishLeaves,
     Wmb,
     Rmb,
     Mb,
@@ -390,6 +396,7 @@ impl PageTable for Arch {
         paging::make_pte(pa, flags)
     }
     fn make_table(pa: PhysAddr) -> u64 {
+        record(Event::TableLink(pa.as_u64()));
         paging::make_pte(
             pa,
             PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER),
@@ -430,6 +437,12 @@ impl PageTable for Arch {
     }
     fn bbm_make() {
         record(Event::BbmMake);
+    }
+    fn publish_table() {
+        record(Event::PublishTable);
+    }
+    fn publish_leaves() {
+        record(Event::PublishLeaves);
     }
 }
 

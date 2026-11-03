@@ -541,6 +541,55 @@ fn invalidate_runs_break_then_make() {
 }
 
 #[test]
+fn fresh_tables_publish_before_their_link_and_batch_after_its_stores() {
+    stub::reset();
+    let mut pool = Pool::new(64);
+    let mut m = fresh_mapper(&mut pool);
+    stub::reset();
+    // Two 4 KiB pages under a kernel VA with no tables yet: PDPT, PD and PT
+    // are linked for the first page and reused for the second.
+    let va = VirtAddr(0xFFFF_C000_0000_0000);
+    let pa = PhysAddr(0x0080_0000);
+    // SAFETY: host tables; the leaf frames are never touched; established
+    // here.
+    unsafe {
+        m.map_range(
+            va,
+            pa,
+            2 * PAGE_SIZE_4K,
+            physmap_flags(),
+            MapMode::Fresh,
+            &mut pool,
+        )
+        .unwrap();
+    }
+    let log = stub::take_events();
+    assert_eq!(log.dropped(), 0);
+    let ev = log.as_slice();
+    let links = ev
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, Event::TableLink(_)))
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    assert_eq!(links.len(), 3, "events {ev:?}");
+    for i in links {
+        assert_eq!(
+            ev.get(i.wrapping_sub(1)),
+            Some(&Event::PublishTable),
+            "table linked at event {i} before its words were published: {ev:?}"
+        );
+    }
+    // The batch is published once, after its last store.
+    assert_eq!(
+        ev.iter().filter(|e| **e == Event::PublishLeaves).count(),
+        1,
+        "events {ev:?}"
+    );
+    assert_eq!(ev.last(), Some(&Event::PublishLeaves), "events {ev:?}");
+}
+
+#[test]
 fn mmio_pages_counts_the_pages_a_window_touches() {
     // A 0x1C-byte window, the PL011's FR at +0x18 included.
     // Aligned: one page.

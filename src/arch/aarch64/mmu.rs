@@ -118,6 +118,18 @@ impl PageTable for Arch {
     fn bbm_make() {
         cpu::bbm_make();
     }
+
+    #[inline]
+    fn publish_table() {
+        cpu::publish_table();
+    }
+
+    /// The same barriers as `bbm_make`: a batch's stores are published by
+    /// `dsb ishst` and an `isb`.
+    #[inline]
+    fn publish_leaves() {
+        cpu::bbm_make();
+    }
 }
 
 /// NX is a leaf bit on aarch64; Limine already honours UXN/PXN.

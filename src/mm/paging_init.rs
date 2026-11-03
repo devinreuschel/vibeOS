@@ -338,6 +338,7 @@ pub unsafe fn map_4k_locked(
     unsafe {
         pt.map_page(va, pa, flags, PageSize::Size4K, MapMode::Fresh, &mut alloc)?;
     }
+    pt.publish_leaves();
     Arch::flush_local(va);
     Ok(())
 }
@@ -733,6 +734,7 @@ fn map_device_window(mapper: &mut Mapper, alloc: &mut BuddyFrames, base: u64, sp
             return false;
         }
     }
+    mapper.publish_leaves();
     true
 }
 
@@ -942,6 +944,7 @@ unsafe fn map_physmap_run(
             }
             off = off.saturating_add(PAGE_SIZE_1G);
         }
+        mapper.publish_leaves();
         return Ok(());
     }
     // SAFETY: this fn's `# Safety` contract, established here.

@@ -103,6 +103,10 @@ pub const TTBR0_SWITCH: [TlbOp; 4] = [
 pub const BBM_AFTER_INVALID: [TlbOp; 3] = [TlbOp::DsbIshst, TlbOp::TlbiVale1is, TlbOp::DsbIsh];
 /// Break-before-make, after the new store. The kernel's `bbm_make` runs this.
 pub const BBM_AFTER_MAKE: [TlbOp; 2] = [TlbOp::DsbIshst, TlbOp::Isb];
+/// A new table's zeroed words, before the descriptor that links it. The
+/// kernel's `publish_table` runs this (Arm ARM DDI0487: a table walk is not
+/// ordered after a plain store).
+pub const PUBLISH_TABLE: [TlbOp; 1] = [TlbOp::DsbIshst];
 
 /// `TLBI VA*E1` / `VA*E1IS` register operand (Arm ARM DDI0487).
 ///
@@ -222,6 +226,7 @@ mod tests {
             ["dsb ishst", "tlbi vale1is", "dsb ish"]
         );
         assert_eq!(BBM_AFTER_MAKE.map(TlbOp::mnemonic), ["dsb ishst", "isb"]);
+        assert_eq!(PUBLISH_TABLE.map(TlbOp::mnemonic), ["dsb ishst"]);
     }
 
     #[test]

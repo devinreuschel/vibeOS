@@ -213,6 +213,12 @@ pub(crate) fn bbm_make() {
     run_tlb(&tlb::BBM_AFTER_MAKE, 0);
 }
 
+/// Publish a new table before the descriptor that links it. Runs
+/// `tlb::PUBLISH_TABLE`.
+pub(crate) fn publish_table() {
+    run_tlb(&tlb::PUBLISH_TABLE, 0);
+}
+
 /// Write `TTBR0_EL1` (ASID in the high bits when `TCR.A1` is clear).
 ///
 /// # Safety

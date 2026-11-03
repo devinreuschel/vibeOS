@@ -228,6 +228,13 @@ pub trait PageTable {
     /// Barriers after the new store of break-before-make. aarch64 runs
     /// `BBM_AFTER_MAKE` (`dsb ishst`, `isb`).
     fn bbm_make() {}
+    /// Publish a new table's zeroed words before the descriptor that links
+    /// it is stored: a walker must not read that descriptor and then the
+    /// frame's old contents. aarch64 runs `dsb ishst`.
+    fn publish_table() {}
+    /// Publish a batch of Fresh stores (leaves and table descriptors) before
+    /// the mapping is used. aarch64 runs `dsb ishst`, `isb`, as `bbm_make`.
+    fn publish_leaves() {}
 }
 
 /// Frame allocator abstraction. Hands out order-0 [`Frames`], one
@@ -385,6 +392,7 @@ impl<A: PageTable> Mapper<A> {
                 // frame the token above owned, reached at `hhdm_offset` as
                 // `FrameAlloc`'s contract (`mm::paging::FrameAlloc`) says.
                 unsafe { self.zero_frame(new) };
+                A::publish_table();
                 // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract);
                 // `&mut self` makes this the root's one writer, and for the
                 // kernel root the page-table lock is held (invariant I48,
@@ -503,6 +511,7 @@ impl<A: PageTable> Mapper<A> {
             return Err(MapError::Misaligned);
         }
         let mut off: u64 = 0;
+        let mut done = Ok(());
         while off < len {
             let cur_va = VirtAddr(va.0 + off);
             let cur_pa = PhysAddr(pa.0 + off);
@@ -517,10 +526,22 @@ impl<A: PageTable> Mapper<A> {
             };
             // SAFETY: `map_page`'s contract, which this fn's `# Safety`
             // passes on for the whole range, established here.
-            unsafe { self.map_page(cur_va, cur_pa, flags, size, mode, alloc)? };
+            if let Err(e) = unsafe { self.map_page(cur_va, cur_pa, flags, size, mode, alloc) } {
+                done = Err(e);
+                break;
+            }
             off += step;
         }
-        Ok(())
+        // The stores made before a failure are published too.
+        self.publish_leaves();
+        done
+    }
+
+    /// Publish the Fresh stores a batch of `map_page` calls made, so the
+    /// mapping is visible to the walker before the caller uses it. Callers
+    /// that map a range page by page call this once, after the last page.
+    pub fn publish_leaves(&self) {
+        A::publish_leaves();
     }
 
     /// Unmap one 4 KiB or 2 MiB page. Returns the physical frame that
