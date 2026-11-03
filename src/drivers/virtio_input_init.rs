@@ -48,6 +48,8 @@ struct State {
     devs: [Option<Dev>; MAX_DEVS],
     ring: Ring<DecodedKey, RING_CAP>,
     dec: EvDecoder,
+    /// Used elements the device returned shorter than one event.
+    short_used: u64,
 }
 
 static STATE: SpinMutex<State> = SpinMutex::with_rank(
@@ -55,6 +57,7 @@ static STATE: SpinMutex<State> = SpinMutex::with_rank(
         devs: [None, None, None, None],
         ring: Ring::empty(DecodedKey::Char(0)),
         dec: EvDecoder::new(),
+        short_used: 0,
     },
     RANK_DEVICE,
 );
@@ -123,7 +126,19 @@ fn harvest(st: &mut State) {
         d.data.sync_for_cpu::<Arch>();
         while let Some(u) = d.vq.get_used() {
             let slot = d.desc_slot.get(u.id as usize).copied().unwrap_or(0);
-            if let Some(ev) = event_at(&d.data, slot)
+            if (u.len as usize) < EVENT_SIZE {
+                // A short element holds no whole event: count it, log it at
+                // most once a second, and requeue its buffer below.
+                st.short_used = st.short_used.saturating_add(1);
+                crate::klog_ratelimited!(
+                    1000,
+                    vibeos::log::Level::Warn,
+                    "vibeOS: virtio: input used len {} < {} ({} short so far)",
+                    u.len,
+                    EVENT_SIZE,
+                    st.short_used
+                );
+            } else if let Some(ev) = event_at(&d.data, slot)
                 && let Some(k) = st.dec.feed(ev)
             {
                 st.ring.push(k);
