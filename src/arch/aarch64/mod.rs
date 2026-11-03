@@ -221,12 +221,14 @@ impl Barriers for Arch {
     /// Device against Normal; herd7 does not model Device memory.
     #[inline]
     unsafe fn mmio_read<W: MmioWidth>(reg: *const W) -> W {
-        compiler_fence(Ordering::SeqCst);
         // SAFETY: `reg` is a mapped device register, the `# Safety`
         // contract of `vibeos::arch::Barriers::mmio_read`; established
         // here by the caller's unsafe call.
         let v = unsafe { core::ptr::read_volatile(reg) };
-        compiler_fence(Ordering::SeqCst);
+        // SAFETY: `dmb oshld` orders the load above against later
+        // device-visible loads. Without `nomem`, the asm is also a compiler
+        // barrier for the volatile access. established here.
+        unsafe { core::arch::asm!("dmb oshld", options(nostack, preserves_flags)) };
         v
     }
 
@@ -234,10 +236,12 @@ impl Barriers for Arch {
     /// Normal against Device; herd7 does not model Device memory.
     #[inline]
     unsafe fn mmio_write<W: MmioWidth>(reg: *mut W, v: W) {
-        compiler_fence(Ordering::SeqCst);
+        // SAFETY: `dmb oshst` orders earlier device-visible stores before
+        // the store below. Without `nomem`, the asm is also a compiler
+        // barrier for the volatile access. established here.
+        unsafe { core::arch::asm!("dmb oshst", options(nostack, preserves_flags)) };
         // SAFETY: `reg` is a mapped device register the caller owns. established here.
         unsafe { core::ptr::write_volatile(reg, v) };
-        compiler_fence(Ordering::SeqCst);
     }
 
     #[inline]
