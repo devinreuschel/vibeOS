@@ -1185,15 +1185,16 @@ pub(crate) fn test_el0_sp_el0_current() -> Outcome {
 }
 
 /// Limine framebuffer over ramfb (ROADMAP §11.5): up, and a pixel written
-/// through it reads back.
+/// through it reads back and then reads its old value again.
 pub(crate) fn test_fb_limine() -> Outcome {
     if !crate::fb_init::ready() {
         return Outcome::Fail("no framebuffer");
     }
     let color = vibeos::fb::pack_bgrx(0x12, 0x34, 0x56);
     match crate::fb_init::pixel_round_trip(0, 0, color) {
-        Some(got) if got == color => Outcome::Ok,
-        Some(_) => Outcome::Fail("pixel mismatch"),
+        Some((_, got, _)) if got != color => Outcome::Fail("pixel mismatch"),
+        Some((old, _, restored)) if restored != old => Outcome::Fail("pixel not restored"),
+        Some(_) => Outcome::Ok,
         None => Outcome::Fail("no pixel"),
     }
 }

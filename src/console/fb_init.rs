@@ -73,19 +73,20 @@ pub fn ready() -> bool {
     READY.load(Ordering::Acquire)
 }
 
-/// Write `color` at `(x, y)`, read it back, and put the old pixel back,
-/// under the console lock so no console write lands in between. `None`
-/// with no framebuffer or off its edge. `kernel_tests` only (AGENTS.md
-/// rule 9).
+/// Write `color` at `(x, y)`, read it back, put the old pixel back, and
+/// read that back too, under the console lock so no console write lands in
+/// between. Returns `(old, written, restored)`. `None` with no framebuffer
+/// or off its edge. `kernel_tests` only (AGENTS.md rule 9).
 #[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
-pub(crate) fn pixel_round_trip(x: u32, y: u32, color: u32) -> Option<u32> {
+pub(crate) fn pixel_round_trip(x: u32, y: u32, color: u32) -> Option<(u32, u32, u32)> {
     let c = CONSOLE.lock();
     let fb = c.fb.as_ref()?;
     let old = fb.get_pixel(x, y)?;
     fb.put_pixel(x, y, color);
     let got = fb.get_pixel(x, y);
     fb.put_pixel(x, y, old);
-    got
+    let restored = fb.get_pixel(x, y);
+    Some((old, got?, restored?))
 }
 
 /// Physical `[base, base+len)` of the console framebuffer, if any.
