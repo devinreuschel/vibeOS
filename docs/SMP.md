@@ -169,6 +169,8 @@ On aarch64 there is no real-mode trampoline. Each secondary enters at a physical
 MMU and D-cache off (`src/arch/aarch64/secondary.rs`), through PSCI `CPU_ON` on the conduit
 `/psci` named. The boot CPU fills one parameter page per core, cleans that page and the stub to the
 Point of Coherency (`dc cvac`, `dsb sy`), and passes the page's physical address as `context_id`.
+The parameter pages, the identity tables, and `ttbr0_empty` are never freed: they live for the boot,
+one page per CPU plus a fixed table count (`secondary::IDENTITY_TABLES`), so that leak is bounded.
 The stub, in order: checks the ISA floor (FEAT_LSE and FEAT_PAN) and stores `STATUS_FEATURE` then
 `CPU_OFF` if either is missing; when the block says EL2, writes `HCR_EL2` whole and an `isb`, then
 `tlbi vmalle1` and `dsb nsh` (an E2H/TGE change leaves the local TLB stale), then the rest of the
