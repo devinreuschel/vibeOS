@@ -97,8 +97,9 @@ reader reads exactly that shape. It applies no `ranges` translation to `reg`, an
 parent phandle, so a map whose length is not a whole number of such rows is left empty and counted. It
 ignores `/chosen` and `memory@`, keeps the first 32 properties of a node and the first four `arm,pl011`
 nodes, and counts what it drops. A `/reserved-memory` past its table, or a walk past its depth cap, refuses
-the whole tree. An MCFG whose base overflows once moved to its start bus is dropped and counted. Each count
-is logged as one warning line at boot.
+the whole tree. An MCFG whose window leaves the address space once moved to its start bus, or whose end bus
+is below its start bus, is dropped and counted; so are PCI hosts past the host cap and interrupt-map rows
+past sixteen. Each count is logged as one warning line at boot.
 
 The mechanism:
 

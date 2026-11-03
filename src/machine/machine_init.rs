@@ -98,15 +98,19 @@ fn warn_dropped(d: &MachineDesc) {
         && d.dropped_uarts == 0
         && d.refused_interrupt_maps == 0
         && d.dropped_mcfg == 0
+        && d.dropped_pci_hosts == 0
+        && d.dropped_interrupt_rows == 0
     {
         return;
     }
     crate::klog!(
         vibeos::log::Level::Warn,
-        "vibeOS: machine: dropped {} props, {} uarts, {} mcfg; refused {} interrupt maps",
+        "vibeOS: machine: dropped {} props, {} uarts, {} mcfg, {} pci hosts, {} interrupt-map rows; refused {} interrupt maps",
         d.dropped_props,
         d.dropped_uarts,
         d.dropped_mcfg,
+        d.dropped_pci_hosts,
+        d.dropped_interrupt_rows,
         d.refused_interrupt_maps
     );
 }

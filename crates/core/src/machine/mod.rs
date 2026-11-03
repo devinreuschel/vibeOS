@@ -203,8 +203,13 @@ pub struct MachineDesc {
     /// `interrupt-map` properties whose length is not a whole number of
     /// rows; the host's map is left empty.
     pub refused_interrupt_maps: u32,
-    /// MCFG allocations whose base overflows once moved to the start bus.
+    /// MCFG allocations whose window leaves the address space once moved to
+    /// the start bus, or whose end bus is below the start bus.
     pub dropped_mcfg: u32,
+    /// PCI hosts past [`MAX_PCI_HOSTS`], which [`push_pci`] drops.
+    pub dropped_pci_hosts: u32,
+    /// `interrupt-map` rows past [`MAX_INTERRUPT_MAP`] in an accepted map.
+    pub dropped_interrupt_rows: u32,
 }
 
 const EMPTY_IRQ: IrqController = IrqController::Lapic { base: 0 };
@@ -243,6 +248,8 @@ impl Default for MachineDesc {
             dropped_uarts: 0,
             refused_interrupt_maps: 0,
             dropped_mcfg: 0,
+            dropped_pci_hosts: 0,
+            dropped_interrupt_rows: 0,
         }
     }
 }
@@ -459,7 +466,7 @@ fn fill_mcfg(d: &mut MachineDesc, m: McfgInfo) {
     // The MCFG Base Address is bus 0's config space whatever the start bus
     // (PCI Firmware Spec 3.2 §4.1.2), so the first bus's config space sits
     // `start_bus` buses up. `pci::ecam_phys` adds `(bus - first) << 20`.
-    let Some(ecam_base) = m.ecam_base.checked_add(u64::from(m.start_bus) << 20) else {
+    let Some((ecam_base, ecam_size)) = mcfg_window(m) else {
         d.dropped_mcfg = d.dropped_mcfg.saturating_add(1);
         return;
     };
@@ -470,11 +477,25 @@ fn fill_mcfg(d: &mut MachineDesc, m: McfgInfo) {
             first_bus: m.start_bus,
             last_bus: m.end_bus,
             ecam_base,
-            ecam_size: crate::pci::ecam_bytes(m.start_bus, m.end_bus),
+            ecam_size,
             dma_coherent: true,
             ..PciHost::default()
         },
     );
+}
+
+/// The first bus's config-space base and the window's size, or `None` when
+/// the end bus is below the start bus or the window's end leaves the 64-bit
+/// address space.
+fn mcfg_window(m: McfgInfo) -> Option<(u64, u64)> {
+    let buses = u64::from(m.end_bus)
+        .checked_sub(u64::from(m.start_bus))?
+        .checked_add(1)?;
+    let size = buses.checked_mul(1 << 20)?;
+    let ecam_base = m.ecam_base.checked_add(u64::from(m.start_bus) << 20)?;
+    // One past the window's last byte must be representable too.
+    ecam_base.checked_add(size)?;
+    Some((ecam_base, size))
 }
 
 pub(crate) fn push_cpu(d: &mut MachineDesc, c: CpuDesc) {
@@ -509,6 +530,8 @@ pub(crate) fn push_pci(d: &mut MachineDesc, h: PciHost) {
     if let Some(slot) = d.pci_hosts.get_mut(d.pci_host_count) {
         *slot = h;
         d.pci_host_count = d.pci_host_count.saturating_add(1);
+    } else {
+        d.dropped_pci_hosts = d.dropped_pci_hosts.saturating_add(1);
     }
 }
 
@@ -733,10 +756,46 @@ mod tests {
         let d = from_mcfg(&mcfg_table(0xFFFF_FFFF_FF00_0000, 0x10, 0x1F));
         assert_eq!(d.pci_hosts().len(), 0);
         assert_eq!(d.dropped_mcfg, 1);
-        // The same base at start bus 0 needs no addition and is kept as it is.
-        let ok = from_mcfg(&mcfg_table(0xFFFF_FFFF_FF00_0000, 0, 0x0F));
-        assert_eq!(ok.pci_hosts()[0].ecam_base, 0xFFFF_FFFF_FF00_0000);
+        // At start bus 0 the base needs no addition, and a window that fits
+        // is kept as it is.
+        let ok = from_mcfg(&mcfg_table(0xFFFF_FFFF_E000_0000, 0, 0x0F));
+        assert_eq!(ok.pci_hosts()[0].ecam_base, 0xFFFF_FFFF_E000_0000);
         assert_eq!(ok.dropped_mcfg, 0);
+    }
+
+    #[test]
+    fn mcfg_window_that_wraps_is_dropped_and_counted() {
+        // 256 buses from 0xFFFF_FFFF_F100_0000 end at 2^64 + 0x0100_0000:
+        // bus 0xF0 would wrap to physical 0, so the whole window is refused.
+        let d = from_mcfg(&mcfg_table(0xFFFF_FFFF_F100_0000, 0, 0xFF));
+        assert_eq!(d.pci_hosts().len(), 0);
+        assert_eq!(d.dropped_mcfg, 1);
+        // The same window from 0xFFFF_FFFF_E000_0000 ends at 0xFFFF_FFFF_F000_0000.
+        let fits = from_mcfg(&mcfg_table(0xFFFF_FFFF_E000_0000, 0, 0xFF));
+        assert_eq!(fits.pci_hosts()[0].ecam_base, 0xFFFF_FFFF_E000_0000);
+        assert_eq!(fits.pci_hosts()[0].ecam_size, 0x1000_0000);
+        assert_eq!(fits.dropped_mcfg, 0);
+        // An end bus below the start bus names no bus.
+        let inverted = from_mcfg(&mcfg_table(0xE000_0000, 0x10, 0x0F));
+        assert_eq!(inverted.pci_hosts().len(), 0);
+        assert_eq!(inverted.dropped_mcfg, 1);
+    }
+
+    #[test]
+    fn pci_host_past_the_cap_is_counted() {
+        let mut d = MachineDesc::default();
+        for i in 0..MAX_PCI_HOSTS as u64 + 1 {
+            push_pci(
+                &mut d,
+                PciHost {
+                    ecam_base: 0x1000_0000 + (i << 28),
+                    ecam_size: 0x1000_0000,
+                    ..PciHost::default()
+                },
+            );
+        }
+        assert_eq!(d.pci_host_count, MAX_PCI_HOSTS);
+        assert_eq!(d.dropped_pci_hosts, 1);
     }
 
     #[test]
