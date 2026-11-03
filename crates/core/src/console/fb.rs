@@ -28,8 +28,13 @@ pub fn pixel_offset(x: u32, y: u32, width: u32, height: u32, pitch: u64) -> Opti
 }
 
 /// Whether `[phys, phys + len)` lies inside the span `[base, base + span)`.
-/// `false` when either end overflows.
+/// `false` when either end overflows, and for an empty range, which no
+/// caller maps: a zero-length range at the span's end would otherwise
+/// yield a VA one past the mapping.
 pub fn span_contains(base: u64, span: u64, phys: u64, len: u64) -> bool {
+    if len == 0 {
+        return false;
+    }
     match (base.checked_add(span), phys.checked_add(len)) {
         (Some(span_end), Some(end)) => phys >= base && end <= span_end,
         _ => false,
@@ -566,6 +571,16 @@ mod tests {
         // An end that overflows u64 is outside the span, not a wrap to inside.
         assert!(!span_contains(0x1000, 0x2000, u64::MAX - 0x10, 0x20));
         assert!(!span_contains(u64::MAX - 0x10, 0x20, 0x1000, 0x10));
+    }
+
+    #[test]
+    fn span_contains_refuses_empty_range() {
+        // A zero length at either end, or anywhere inside, is not a range
+        // a mapping can hand out a VA for.
+        assert!(!span_contains(0x1000, 0x2000, 0x3000, 0));
+        assert!(!span_contains(0x1000, 0x2000, 0x1000, 0));
+        assert!(!span_contains(0x1000, 0x2000, 0x2000, 0));
+        assert!(!span_contains(0x1000, 0x2000, 0x2FFF, 0));
     }
 
     #[test]
