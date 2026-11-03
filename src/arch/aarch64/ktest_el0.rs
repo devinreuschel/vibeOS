@@ -819,6 +819,46 @@ pub(crate) fn test_el0_pan_every_cpu() -> Outcome {
     Outcome::Ok
 }
 
+static TPIDRRO_BAD: AtomicU64 = AtomicU64::new(0);
+static TPIDRRO_SEEN: AtomicU64 = AtomicU64::new(0);
+
+fn tpidrro_on_ap(_: *mut ()) {
+    let id = per_cpu_init::current().cpu_id;
+    if id >= 64 {
+        return;
+    }
+    if arch::aarch64::cpu::tpidrro_el0() != 0 {
+        // Release: pairs with the Acquire load in `test_tpidrro_zero`.
+        TPIDRRO_BAD.fetch_or(1u64 << id, Ordering::Release);
+    }
+    // Release: pairs with the Acquire load in `test_tpidrro_zero`.
+    TPIDRRO_SEEN.fetch_or(1u64 << id, Ordering::Release);
+}
+
+/// `TPIDRRO_EL0` is zero on this CPU and on every AP: the overflow stub's
+/// stash must not outlive the catch that reads it (DESIGN §11.5 rule 6).
+pub(crate) fn test_tpidrro_zero() -> Outcome {
+    if arch::aarch64::cpu::tpidrro_el0() != 0 {
+        return Outcome::Fail("bsp tpidrro set");
+    }
+    TPIDRRO_BAD.store(0, Ordering::SeqCst);
+    TPIDRRO_SEEN.store(0, Ordering::SeqCst);
+    let aps = super::ktest::ap_mask();
+    if aps == 0 {
+        return Outcome::Skip("no AP");
+    }
+    crate::ipi_init::call_mask(aps, tpidrro_on_ap, core::ptr::null_mut(), true);
+    // Acquire: pairs with the Release stores in `tpidrro_on_ap`.
+    if TPIDRRO_SEEN.load(Ordering::Acquire) != aps {
+        return Outcome::Fail("ap did not read tpidrro");
+    }
+    // Acquire: pairs with the Release stores in `tpidrro_on_ap`.
+    if TPIDRRO_BAD.load(Ordering::Acquire) != 0 {
+        return Outcome::Fail("ap tpidrro set");
+    }
+    Outcome::Ok
+}
+
 static ENV_ST: AtomicU32 = AtomicU32::new(0);
 static ENV_DONE: AtomicBool = AtomicBool::new(false);
 

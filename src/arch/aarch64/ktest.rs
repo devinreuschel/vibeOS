@@ -72,44 +72,6 @@ pub(crate) fn test_kstack_overflow() -> Outcome {
     }
 }
 
-static TPIDRRO_BAD: AtomicU64 = AtomicU64::new(0);
-static TPIDRRO_SEEN: AtomicU64 = AtomicU64::new(0);
-
-fn tpidrro_on_ap(_: *mut ()) {
-    let id = crate::per_cpu_init::current().cpu_id;
-    if id >= 64 {
-        return;
-    }
-    if crate::arch::aarch64::cpu::tpidrro_el0() != 0 {
-        // Release: pairs with the Acquire load in `test_tpidrro_zero`.
-        TPIDRRO_BAD.fetch_or(1u64 << id, Ordering::Release);
-    }
-    // Release: pairs with the Acquire load in `test_tpidrro_zero`.
-    TPIDRRO_SEEN.fetch_or(1u64 << id, Ordering::Release);
-}
-
-/// `TPIDRRO_EL0` is zero on this CPU and on every AP: the overflow stub's
-/// stash must not outlive the catch that reads it (DESIGN §11.5 rule 6).
-pub(crate) fn test_tpidrro_zero() -> Outcome {
-    if crate::arch::aarch64::cpu::tpidrro_el0() != 0 {
-        return Outcome::Fail("bsp tpidrro set");
-    }
-    TPIDRRO_BAD.store(0, Ordering::SeqCst);
-    TPIDRRO_SEEN.store(0, Ordering::SeqCst);
-    let aps = ap_mask();
-    if aps == 0 {
-        return Outcome::Skip("no AP");
-    }
-    crate::ipi_init::call_mask(aps, tpidrro_on_ap, core::ptr::null_mut(), true);
-    if TPIDRRO_SEEN.load(Ordering::Acquire) != aps {
-        return Outcome::Fail("ap did not read tpidrro");
-    }
-    if TPIDRRO_BAD.load(Ordering::Acquire) != 0 {
-        return Outcome::Fail("ap tpidrro set");
-    }
-    Outcome::Ok
-}
-
 /// EL1 vector entry must restore x16 (DESIGN §11.5 rule 6: no scratch).
 /// Holds x16 live until a timer IRQ, so TCG still takes one at a TB
 /// boundary. Fails when the stub saves SP-FRAME as x16.
@@ -363,7 +325,7 @@ const PERCPU_TICKS_WANT: u64 = 10;
 const PERCPU_TICKS_WAIT_NS: u64 = 2_000_000_000;
 const TICK_WAIT_NS: u64 = 200_000_000;
 
-fn ap_mask() -> u64 {
+pub(crate) fn ap_mask() -> u64 {
     let n = crate::per_cpu_init::cpu_count().min(64) as u32;
     let mut m = 0u64;
     let mut i = 1u32;
@@ -1413,7 +1375,10 @@ pub(crate) fn test_weak_order_probe() -> Outcome {
 
 pub(crate) const TESTS: &[Test] = &[
     test("kstack_overflow", test_kstack_overflow),
-    test("tpidrro_zero", test_tpidrro_zero),
+    test(
+        "tpidrro_zero",
+        crate::arch::aarch64::ktest_el0::test_tpidrro_zero,
+    ),
     test("el1_x16_survives_irq", test_el1_x16_survives_irq),
     test("gic_present", test_gic_present),
     test("now_ns_cntvct", test_now_ns_cntvct),
