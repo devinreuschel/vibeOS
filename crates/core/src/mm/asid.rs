@@ -283,8 +283,8 @@ impl AsidAlloc {
     /// its `tlbi` after this, so a rollover that sets the flag again later
     /// is seen by the next check instead of being wiped.
     pub fn take_flush(&self, cpu: u32) -> bool {
-        // AcqRel: the Acquire half pairs with the Release store in `rollover`;
-        // the Release half orders the flag's clear before the caller's `tlbi`.
+        // AcqRel: Acquire pairs with the Release store in `rollover`; the swap
+        // precedes the caller's `tlbi` in program order.
         self.flush_pending
             .get(cpu as usize)
             .is_some_and(|a| a.swap(false, Ordering::AcqRel))
