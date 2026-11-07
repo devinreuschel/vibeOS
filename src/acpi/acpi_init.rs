@@ -11,6 +11,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use vibeos::acpi::{self, AcpiError, AcpiInfo, MAX_IOAPICS, PhysMem};
 use vibeos::paging::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
+use vibeos::physmap::page_bounds;
 
 use crate::cell::BootCell;
 use crate::kva_init;
@@ -76,20 +77,15 @@ impl PhysMem for HhdmPhys {
     }
 }
 
-fn align_down(x: u64, a: u64) -> u64 {
-    x & !(a - 1)
-}
-fn align_up(x: u64, a: u64) -> u64 {
-    x.saturating_add(a - 1) & !(a - 1)
-}
-
-/// True when the RAM-only physmap already covers `[phys, phys+len)`.
+/// True when the RAM-only physmap already covers `[phys, phys+len)`. A
+/// range whose end wraps the 64-bit space is not covered.
 fn physmap_covers(phys: u64, len: u64) -> bool {
     if len == 0 {
         return true;
     }
-    let start = align_down(phys, PAGE_SIZE_4K);
-    let end = align_up(phys.saturating_add(len), PAGE_SIZE_4K);
+    let Some((start, end)) = page_bounds(phys, len) else {
+        return false;
+    };
     let mut p = start;
     while p < end {
         let va = VirtAddr(paging_init::hhdm_offset().wrapping_add(p));

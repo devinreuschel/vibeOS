@@ -98,6 +98,16 @@ pub const fn phys_in_slot(slot: PhysmapSlot, offset: u64, phys: u64) -> bool {
     }
 }
 
+/// Whole-page bounds `[start, end)` of `[phys, phys+len)`, `end` exclusive.
+/// `None` when the range, rounded up to a page, passes the top of the 64-bit
+/// space, so a firmware-supplied `phys` near the top is refused rather than
+/// read as an empty range.
+pub fn page_bounds(phys: u64, len: u64) -> Option<(u64, u64)> {
+    let bytes = crate::paging::page_span(phys, len)?;
+    let start = phys & !(PAGE_SIZE_4K - 1);
+    Some((start, start.checked_add(bytes)?))
+}
+
 /// One coalesced physmap run: `[pa, pa+len)` at `va` with leaf `size`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PhysmapRun {
@@ -360,6 +370,19 @@ where
 mod tests {
     use super::*;
     use crate::paging::PAGE_SIZE_4K;
+
+    #[test]
+    fn page_bounds_refuses_a_range_that_wraps_the_top() {
+        // The top page's end is past 2^64, so there are no page bounds.
+        assert_eq!(page_bounds(0xFFFF_FFFF_FFFF_F000, 8), None);
+        assert_eq!(page_bounds(0xFFFF_FFFF_FFFF_F800, 0x1000), None);
+        assert_eq!(
+            page_bounds(0xFFFF_FFFF_FFFF_E000, 0x1000),
+            Some((0xFFFF_FFFF_FFFF_E000, 0xFFFF_FFFF_FFFF_F000))
+        );
+        assert_eq!(page_bounds(0x1234, 1), Some((0x1000, 0x2000)));
+        assert_eq!(page_bounds(0x0FFF, 2), Some((0, 0x2000)));
+    }
 
     #[test]
     fn hhdm_offset_outside_slot_each_arch() {
