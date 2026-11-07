@@ -874,6 +874,10 @@ pub fn set_affinity(irq: IrqId, cpu: u32) -> Result<(), IrqError> {
 }
 
 fn apic_id(cpu: u32) -> Option<u8> {
+    // An offline CPU is not a destination; its APIC id may be stale.
+    if !per_cpu_init::is_online(cpu) {
+        return None;
+    }
     // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
     per_cpu_init::cpu(cpu).map(|c| c.apic_id.load(Ordering::Relaxed) as u8)
 }
