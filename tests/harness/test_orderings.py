@@ -160,6 +160,14 @@ class TestFileErrors(unittest.TestCase):
         e = errs("use core::sync::atomic::Ordering::*;\n")
         self.assertEqual(len(e), 1, e)
 
+    def test_bare_import_in_brace_with_glob_fails(self) -> None:
+        e = errs("use core::sync::atomic::Ordering::{*};\n")
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("bare name", e[0])
+        e = errs("use core::sync::atomic::Ordering::{self, *};\n")
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("bare name", e[0])
+
     def test_rename_must_end_in_ordering(self) -> None:
         e = errs("use core::sync::atomic::Ordering as Ord;\n")
         self.assertEqual(len(e), 1, e)

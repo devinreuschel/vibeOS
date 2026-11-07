@@ -77,7 +77,7 @@ NAMES = "Relaxed|Acquire|Release|AcqRel"
 SITE = re.compile(rf"\b\w*Ordering::({NAMES})\b")
 PAIRS = re.compile(r"\bpairs with\s+\S")
 USE = re.compile(r"\buse\b[^;]*;")
-BARE = re.compile(rf"\bOrdering::(?:\*|\{{[^}}]*\b(?:{NAMES})\b|(?:{NAMES})\b)")
+BARE = re.compile(rf"\bOrdering::(?:\*|\{{[^}}]*(?:\*|\b(?:{NAMES})\b)|(?:{NAMES})\b)")
 SELF_ALIAS = re.compile(r"\bOrdering::\{[^}]*?\bself\s+as\s+(\w+)")
 ORDERING_AS = re.compile(r"\bOrdering\s+as\s+(\w+)")
 # The path before a name ends in `cmp::`, so the name is `core::cmp::Ordering`.
