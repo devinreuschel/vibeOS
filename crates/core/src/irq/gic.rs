@@ -229,17 +229,20 @@ pub fn its_compose(its_base: u64, event_id: u32) -> (u64, u32) {
     )
 }
 
-/// Aff0 ≥ 16 while `ICC_CTLR_EL1.RSS` is clear (ARM ARM).
+/// Aff0 ≥ 16 while `ICC_CTLR_EL1.RSS` is clear (ARM ARM); Aff3 ≠ 0 in a CPU
+/// id the kernel keeps in 32 bits (`PerCpuRemote::apic_id`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
 pub enum SgiError {
     Aff0,
+    Aff3,
 }
 
 impl SgiError {
     pub const fn as_str(self) -> &'static str {
         match self {
             SgiError::Aff0 => "aff0 needs ICC_CTLR_EL1.RSS",
+            SgiError::Aff3 => "aff3 is not 0; the kernel keeps 32 bits of CPU id",
         }
     }
 }
@@ -247,8 +250,18 @@ impl SgiError {
 impl From<SgiError> for crate::kerror::KError {
     fn from(e: SgiError) -> Self {
         match e {
-            SgiError::Aff0 => Self::Inval,
+            SgiError::Aff0 | SgiError::Aff3 => Self::Inval,
         }
+    }
+}
+
+/// `Ok` when MPIDR Aff3 (bits [39:32]) is 0. The kernel stores a CPU's id in
+/// 32 bits, so a CPU with Aff3 set would be started or signalled as another CPU.
+pub const fn aff3_ok(mpidr: u64) -> Result<(), SgiError> {
+    if (mpidr >> 32) & 0xFF == 0 {
+        Ok(())
+    } else {
+        Err(SgiError::Aff3)
     }
 }
 
@@ -408,6 +421,11 @@ mod tests {
         assert_eq!(sgi1r(0, 16, false), Err(SgiError::Aff0));
         assert_eq!(sgi1r(0, 63, false), Err(SgiError::Aff0));
         assert_eq!(sgi1r(0, 255, false), Err(SgiError::Aff0));
+        assert_eq!(aff3_ok(0x00FF_FFFF), Ok(()));
+        assert_eq!(aff3_ok(0x0000_0001_0000_0000), Err(SgiError::Aff3));
+        assert_eq!(aff3_ok(0x0000_00FF_0000_0000), Err(SgiError::Aff3));
+        // Bit 40 is outside Aff3 (bits 39:32).
+        assert_eq!(aff3_ok(0x0000_0100_0000_0000), Ok(()));
     }
 
     #[test]

@@ -616,9 +616,10 @@ fn icc_ctlr_rss() -> bool {
     (v & ICC_CTLR_RSS) != 0
 }
 
-/// Aff0 of `hw_id` can be named in `ICC_SGI1R_EL1`. GICv2 does not use
-/// that register. No chip yet is not a refusal.
+/// Aff3 of `hw_id` is 0 (`gic::aff3_ok`), and Aff0 can be named in
+/// `ICC_SGI1R_EL1`. GICv2 does not use that register. No chip yet is not a refusal.
 pub fn cpu_ok(hw_id: u64) -> Result<(), gic::SgiError> {
+    gic::aff3_ok(hw_id)?;
     let Some(g) = gic() else {
         return Ok(());
     };
