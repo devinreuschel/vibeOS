@@ -922,7 +922,6 @@ impl Default for IoremapWindow {
     }
 }
 
-#[inline]
 /// Bytes of whole pages covering `len` bytes at `phys`. `None` when the
 /// range runs past the address space or the page count overflows, which a
 /// firmware-supplied `len` can force.
@@ -934,6 +933,7 @@ pub fn page_span(phys: u64, len: u64) -> Option<u64> {
     Some(n & !(PAGE_SIZE_4K - 1))
 }
 
+#[inline]
 const fn align_up(x: u64, a: u64) -> u64 {
     (x + a - 1) & !(a - 1)
 }
