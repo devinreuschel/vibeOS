@@ -1113,6 +1113,7 @@ pub(crate) fn test_el0_bad_elr() -> Outcome {
     // spawn would land. The hook is one-shot, taken by the next return to
     // EL0 on any CPU, which here is the child's first.
     syscall_init::testing::arm_bad_elr();
+    let kills = crate::proc_init::BAD_ELR_KILLS.load(core::sync::atomic::Ordering::Relaxed);
     let pid = match user::spawn(&Image::Code(EL0_EXIT0, DEFAULT), &["el0_bad_elr"]) {
         Ok(p) => p,
         Err(e) => {
@@ -1125,6 +1126,15 @@ pub(crate) fn test_el0_bad_elr() -> Outcome {
     // armed here never fired, and is taken so a later test does not get it.
     if syscall_init::testing::take_bad_elr() {
         return Outcome::Fail("bad elr hook not taken");
+    }
+    // The status is SIGSEGV whether `elr_ok` or the MMU stopped the return,
+    // so the kill is counted: only `kill_bad_elr` moves the counter.
+    if crate::proc_init::BAD_ELR_KILLS
+        .load(core::sync::atomic::Ordering::Relaxed)
+        .wrapping_sub(kills)
+        != 1
+    {
+        return Outcome::Fail("bad elr not killed by elr_ok");
     }
     if signaled(st, vibeos::proc::SIGSEGV) {
         Outcome::Ok

@@ -899,6 +899,8 @@ pub fn try_user_fault(f: &TrapFrame) {
     finish_exit(wait_signaled(sig), Some(addr));
 }
 
+#[cfg(all(target_arch = "aarch64", feature = "kernel_tests"))]
+pub(crate) use exit::BAD_ELR_KILLS;
 #[cfg(target_arch = "aarch64")]
 pub use exit::{kill_bad_elr, try_user_trap};
 
