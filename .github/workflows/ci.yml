@@ -279,6 +279,14 @@ jobs:
           cargo clippy --bin vibeos --target aarch64-unknown-none-softfloat --features kernel_tests -- -D warnings
           cargo clippy --bin vibeos --target aarch64-unknown-none-softfloat --features kernel_shell -- -D warnings
 
+      # ROADMAP §11.4: `switch_context_roundtrip` runs this port's switch
+      # assembly on the arm64 runner's own host triple, so the leg runs it.
+      - name: host test switch_context (aarch64 host)
+        if: matrix.arch == 'aarch64'
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          cargo test -p vibeos-hostlib-tests --test switch_context --target "$host"
+
       # The Rust user programs (ROADMAP §10.5): links through rust-lld with no
       # C compiler, and checks each ELF with scripts/check_user_elf.py.
       - name: build the user programs (make user)
