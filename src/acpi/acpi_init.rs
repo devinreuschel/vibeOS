@@ -80,7 +80,7 @@ fn align_down(x: u64, a: u64) -> u64 {
     x & !(a - 1)
 }
 fn align_up(x: u64, a: u64) -> u64 {
-    (x + a - 1) & !(a - 1)
+    x.saturating_add(a - 1) & !(a - 1)
 }
 
 /// True when the RAM-only physmap already covers `[phys, phys+len)`.

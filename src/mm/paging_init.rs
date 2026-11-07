@@ -27,7 +27,7 @@ use vibeos::paging::{
     self, FrameAlloc, IoremapWindow, MapError, MapMode, PAGE_SIZE_2M, PAGE_SIZE_4K, PageFlags,
     PageSize, PhysAddr, VirtAddr,
 };
-use vibeos::physmap::{PhysmapRun, PhysmapSlot, phys_in_slot, walk_physmap};
+use vibeos::physmap::{PhysmapRun, phys_in_slot, walk_physmap};
 use vibeos::pmm::Frames;
 
 use crate::arch::current::{Arch, Mapper, enable_nx, stack_pointer};
@@ -37,18 +37,6 @@ use crate::sync_init::{SpinMutex, SpinMutexGuard};
 use vibeos::arch::PageTable;
 
 // ------------------ constants matching DESIGN §4.1 ------------------
-
-/// This port's physmap slot (MEMORY.md §4.1).
-pub fn physmap_slot() -> PhysmapSlot {
-    #[cfg(target_arch = "x86_64")]
-    {
-        vibeos::physmap::PHYSMAP_X86_64
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        vibeos::physmap::PHYSMAP_AARCH64
-    }
-}
 
 /// Limine's HHDM offset, from the one `BootInfo` capture.
 pub fn hhdm_offset() -> u64 {
@@ -357,7 +345,7 @@ pub unsafe fn map_4k(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(),
 
 /// Whether `phys` aliases inside this port's physmap slot at the HHDM offset.
 pub fn phys_mapped(phys: u64) -> bool {
-    phys_in_slot(physmap_slot(), hhdm_offset(), phys)
+    phys_in_slot(boot::physmap_slot(), hhdm_offset(), phys)
 }
 
 /// Unmap one leaf through `pt`. Local `invlpg` only.
@@ -525,7 +513,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // ---- 2. RAM-only physmap (MEMORY.md §4.1, ROADMAP §11.2) ----
     let mut map_end = 0u64;
     let walk = walk_physmap(
-        physmap_slot(),
+        boot::physmap_slot(),
         hhdm_offset(),
         info.ram_ranges(),
         info.kernel_phys.clone(),
