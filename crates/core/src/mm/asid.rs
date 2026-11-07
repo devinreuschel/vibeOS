@@ -240,10 +240,12 @@ impl AsidAlloc {
                 // A CPU whose slot already reads 0 keeps the reservation it
                 // had. Relaxed: the allocator lock is held; pairs with nothing.
                 let keep = if old == 0 {
+                    // Relaxed: the allocator lock is held; pairs with nothing.
                     self.reserved[i].load(Ordering::Relaxed)
                 } else {
                     old
                 };
+                // Relaxed: the allocator lock is held; pairs with nothing.
                 self.reserved[i].store(keep, Ordering::Relaxed);
             }
             // Release: pairs with the Acquire load in `flush_pending`.
