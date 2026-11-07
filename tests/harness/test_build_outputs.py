@@ -74,8 +74,10 @@ def parse_db(text: str) -> MakeDb:
 
 @functools.cache
 def make_db() -> MakeDb:
+    # ARCH is pinned: VARIANTS and the x86 ISO names describe the x86_64 build,
+    # whatever ARCH the caller set (the Makefile exports it as VIBEOS_ARCH).
     proc = subprocess.run(
-        ["make", "-pRrq", "-f", "Makefile", ":"],
+        ["make", "-pRrq", "-f", "Makefile", "ARCH=x86_64", ":"],
         cwd=ROOT,
         capture_output=True,
         text=True,
