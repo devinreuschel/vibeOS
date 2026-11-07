@@ -936,28 +936,31 @@ impl IrqChip for GicChip {
             return Err(IrqError::NoRoute);
         };
         if gic::is_lpi(hwirq) {
-            let Some(its) = g.its else {
+            if g.its.is_none() || !its_live() {
+                return Err(IrqError::NoRoute);
+            }
+            let slot = (hwirq - LPI_BASE) as usize;
+            let Some(event) = LPI_EVENT.get(slot) else {
                 return Err(IrqError::NoRoute);
             };
-            let slot = (hwirq - LPI_BASE) as usize;
             // Acquire: pairs with the Release store in `map_its_event`.
-            let event = LPI_EVENT
-                .get(slot)
-                .map(|e| e.load(Ordering::Acquire))
-                .unwrap_or(0);
-            let _ = its;
-            let phys = machine_init::info()
+            let event = event.load(Ordering::Acquire);
+            let Some(phys) = machine_init::info()
                 .and_then(|d| d.gic_its())
                 .map(|(r, _)| r.start)
-                .unwrap_or(0);
+            else {
+                return Err(IrqError::NoRoute);
+            };
             let (addr, data) = gic::its_compose(phys, event);
             return Ok(vibeos::irq::MsiMessage { addr, data });
         }
         if let Some((_, _, _)) = g.v2m {
-            let phys = machine_init::info()
+            let Some(phys) = machine_init::info()
                 .and_then(|d| d.gic_v2m().next())
                 .map(|(r, _, _)| r.start)
-                .unwrap_or(0);
+            else {
+                return Err(IrqError::NoRoute);
+            };
             let (addr, data) = gic::v2m_compose(phys, hwirq);
             return Ok(vibeos::irq::MsiMessage { addr, data });
         }
