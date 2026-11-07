@@ -100,8 +100,14 @@ fn physmap_covers(phys: u64, len: u64) -> bool {
     true
 }
 
+/// Whether `[phys, phys+len)` overlaps RAM. An ACPI register page is device
+/// MMIO, so RAM there would get a UC alias of a write-back leaf (invariant I17).
+fn overlaps_ram(phys: u64, len: u64) -> bool {
+    vibeos::dev::overlaps_any(phys, len, crate::boot::info().ram_ranges())
+}
+
 fn ioremap_page(phys: u64) -> Option<u64> {
-    if phys == 0 {
+    if phys == 0 || overlaps_ram(phys, PAGE_SIZE_4K) {
         return None;
     }
     // SAFETY: invariant I49: `[phys, phys+4K)` is a device register page
@@ -117,6 +123,9 @@ fn ioremap_page(phys: u64) -> Option<u64> {
 fn map_reg_page(phys: u64) -> Option<u64> {
     if physmap_covers(phys, PAGE_SIZE_4K) {
         return paging_init::hhdm_offset().checked_add(phys);
+    }
+    if overlaps_ram(phys, PAGE_SIZE_4K) {
+        return None;
     }
     // SAFETY: invariant I17: `physmap_covers` found no leaf, so `phys` is
     // device MMIO. It is the page of a FADT reset or sleep SystemMemory
