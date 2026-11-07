@@ -72,14 +72,17 @@ pub(crate) fn test_asid_4bit() -> Outcome {
         let mut n = 0usize;
         tables[n] = l0;
         n += 1;
-        if !crate::arch::aarch64::secondary::map_va(
-            l0,
-            USER_VA,
-            data,
-            &mut tables[..],
-            &mut n,
-            flags,
-        ) {
+        // SAFETY: `l0` is the root this test allocated, an HHDM-mapped table page. established here.
+        if !unsafe {
+            crate::arch::aarch64::secondary::map_va(
+                l0,
+                USER_VA,
+                data,
+                &mut tables[..],
+                &mut n,
+                flags,
+            )
+        } {
             let mut t = 0;
             while t < n {
                 free_pa(tables[t]);

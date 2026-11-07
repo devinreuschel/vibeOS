@@ -228,16 +228,24 @@ pub(crate) fn alloc_zeroed_page() -> Option<u64> {
     Some(pa)
 }
 
-fn table_slot(root_pa: u64, va: u64, level: u8) -> Option<*mut u64> {
+/// # Safety
+/// `root_pa` is a table page the HHDM maps (I14), and no other writer
+/// reaches the returned slot while the caller holds it.
+unsafe fn table_slot(root_pa: u64, va: u64, level: u8) -> Option<*mut u64> {
     let hhdm = crate::paging_init::hhdm_offset();
     let idx = paging::index(VirtAddr(va), level);
     let va = hhdm.wrapping_add(root_pa);
-    // SAFETY: `root_pa` is a table page we allocated. established here.
+    // SAFETY: `root_pa` is a table page the HHDM maps, per this fn's `# Safety`;
+    // `idx` is a 9-bit table index, so the slot stays in that page. established here.
     unsafe { (va as *mut u64).add(idx).as_mut().map(|p| p as *mut u64) }
 }
 
 /// Map `va` → `pa` as a 4 KiB leaf in `l0_pa` (TTBR0) with `flags`.
-pub fn map_va(
+///
+/// # Safety
+/// `l0_pa` is a root table page the HHDM maps (I14), and the tables under
+/// it are only written through this fn or by the caller's own tracking.
+pub unsafe fn map_va(
     l0_pa: u64,
     va: u64,
     pa: u64,
@@ -248,7 +256,9 @@ pub fn map_va(
     let mut table = l0_pa;
     let mut level = 4u8;
     while level > 1 {
-        let Some(slot) = table_slot(table, va, level) else {
+        // SAFETY: `table` is `l0_pa` or a table `alloc_zeroed_page` gave us,
+        // both HHDM-mapped table pages per map_va's `# Safety`. established here.
+        let Some(slot) = (unsafe { table_slot(table, va, level) }) else {
             return false;
         };
         // SAFETY: slot in a table we own. established here.
@@ -269,7 +279,9 @@ pub fn map_va(
         }
         level -= 1;
     }
-    let Some(slot) = table_slot(table, va, 1) else {
+    // SAFETY: `table` is the level-1 table the loop above reached, an
+    // HHDM-mapped table page per map_va's `# Safety`. established here.
+    let Some(slot) = (unsafe { table_slot(table, va, 1) }) else {
         return false;
     };
     // SAFETY: leaf slot we own. established here.
@@ -278,18 +290,24 @@ pub fn map_va(
 }
 
 /// Identity-map `pa` as a 4 KiB RW global page in `l0_pa` (TTBR0).
-pub fn map_identity(l0_pa: u64, pa: u64, tables: &mut [u64], n: &mut usize) -> bool {
-    map_va(
-        l0_pa,
-        pa,
-        pa,
-        tables,
-        n,
-        PageFlags::empty()
-            .with(PageFlags::PRESENT)
-            .with(PageFlags::WRITABLE)
-            .with(PageFlags::GLOBAL),
-    )
+///
+/// # Safety
+/// `l0_pa` is a root table page the HHDM maps, as [`map_va`] requires.
+pub unsafe fn map_identity(l0_pa: u64, pa: u64, tables: &mut [u64], n: &mut usize) -> bool {
+    // SAFETY: `l0_pa` meets map_identity's `# Safety`. established here.
+    unsafe {
+        map_va(
+            l0_pa,
+            pa,
+            pa,
+            tables,
+            n,
+            PageFlags::empty()
+                .with(PageFlags::PRESENT)
+                .with(PageFlags::WRITABLE)
+                .with(PageFlags::GLOBAL),
+        )
+    }
 }
 
 /// Table pages [`build_identity_into`] can track: the roots, the stub's
@@ -311,14 +329,16 @@ pub(crate) fn build_identity_into(pas: &[u64], tables: &mut [u64]) -> Option<(u6
     }
     for &pa in pas {
         let page = pa & !0xFFFu64;
-        if !map_identity(l0, page, tables, &mut n) {
+        // SAFETY: `l0` is the root this fn allocated, an HHDM-mapped table page. established here.
+        if !unsafe { map_identity(l0, page, tables, &mut n) } {
             return None;
         }
     }
     let mut i = 0;
     while i < n {
         let pa = tables[i];
-        if pa != 0 && !map_identity(l0, pa, tables, &mut n) {
+        // SAFETY: `l0` is the root this fn allocated, an HHDM-mapped table page. established here.
+        if pa != 0 && !unsafe { map_identity(l0, pa, tables, &mut n) } {
             return None;
         }
         i += 1;

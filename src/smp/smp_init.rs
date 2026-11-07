@@ -446,7 +446,7 @@ fn free_live_ap(
 fn wait_ready(cpu_id: u32) -> bool {
     let mut ms = 0u64;
     while ms < READY_TIMEOUT_MS {
-        // Acquire: pairs with the Release store in `ap_main`.
+        // Acquire: pairs with the Release store in `ap_entry`.
         if per_cpu_init::cpu(cpu_id).is_some_and(|c| c.ready.load(Ordering::Acquire)) {
             return true;
         }
@@ -1275,7 +1275,10 @@ fn start_one_aarch64(
         free_live_ap(cpu_id, idle_id, workers, published, false);
         return StartAp::Failed;
     };
-    if !arch::aarch64::secondary::map_identity(ttbr0_id, param_pa, &mut id_tables[..], n_id) {
+    // SAFETY: `ttbr0_id` is the identity root this fn built, an HHDM-mapped table page. established here.
+    if !unsafe {
+        arch::aarch64::secondary::map_identity(ttbr0_id, param_pa, &mut id_tables[..], n_id)
+    } {
         crate::marker!("vibeOS: smp: apic {hw_id} alloc failed");
         free_live_ap(cpu_id, idle_id, workers, published, false);
         return StartAp::Failed;
@@ -1301,7 +1304,8 @@ fn start_one_aarch64(
         param_va,
         core::mem::size_of::<vibeos::arch::aarch64::psci::SecondaryParam>(),
     );
-    let on = crate::arch::aarch64::power::cpu_on(hw_id, entry_pa, param_pa);
+    // SAFETY: `entry_pa` is the kernel's secondary entry stub and `param_pa` the page written above, per power::cpu_on's `# Safety`. established here.
+    let on = unsafe { crate::arch::aarch64::power::cpu_on(hw_id, entry_pa, param_pa) };
     if on == vibeos::arch::aarch64::psci::ALREADY_ON {
         crate::marker!("vibeOS: smp: apic {hw_id} already on");
         free_live_ap(cpu_id, idle_id, workers, published, false);

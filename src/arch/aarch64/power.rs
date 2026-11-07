@@ -115,7 +115,12 @@ pub fn restart() -> ! {
 }
 
 /// PSCI `CPU_ON` (64-bit). `target` is the MPIDR affinity.
-pub fn cpu_on(target: u64, entry_pa: u64, context: u64) -> i64 {
+///
+/// # Safety
+/// `entry_pa` is the physical address of an EL1 entry stub the kernel
+/// keeps mapped, and `context` is the parameter page the stub reads, so
+/// the CPU that firmware starts runs code and data this kernel owns.
+pub unsafe fn cpu_on(target: u64, entry_pa: u64, context: u64) -> i64 {
     // SAFETY: CPU_ON; firmware returns a status. established here.
     unsafe { psci_call(psci::CPU_ON, target, entry_pa, context) }
 }
