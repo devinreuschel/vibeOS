@@ -1104,7 +1104,7 @@ fn init_aarch64() {
     if !crate::arch::aarch64::power::psci_available() {
         crate::klog!(
             vibeos::log::Level::Warn,
-            "vibeOS: smp: no /psci node, boot cpu only"
+            "vibeOS: smp: no PSCI conduit, boot cpu only"
         );
         return;
     }

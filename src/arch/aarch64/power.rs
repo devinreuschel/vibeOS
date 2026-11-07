@@ -5,14 +5,14 @@ use core::arch::asm;
 use vibeos::arch::aarch64::psci::{self, Conduit};
 
 /// The conduit from the device tree. No machine description, or one with no
-/// `/psci` node, names no conduit. `machine_init::init_from_dtb` publishes the
+/// PSCI conduit, names no conduit. `machine_init::init_from_dtb` publishes the
 /// description before any PSCI call, and QEMU's `virt` always passes a DTB.
 fn conduit() -> Option<Conduit> {
     psci::conduit(crate::machine_init::info().map(|d| d.enable))
 }
 
 /// Whether PSCI calls have a conduit. False with no machine description or
-/// no `/psci` node, and then no call is made.
+/// no PSCI conduit, and then no call is made.
 pub fn psci_available() -> bool {
     conduit().is_some()
 }
@@ -95,7 +95,7 @@ fn psci_halt(fid: u32) -> ! {
     } else {
         crate::klog!(
             vibeos::log::Level::Warn,
-            "vibeOS: psci: no /psci node, halting"
+            "vibeOS: psci: no PSCI conduit, halting"
         );
     }
     // SAFETY: `wfi` touches no memory; established here.
