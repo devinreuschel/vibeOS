@@ -81,12 +81,23 @@ static LPI_DEV: [AtomicU32; LPI_SLOTS] = [const { AtomicU32::new(LPI_NO_DEV) }; 
 /// Collection (logical CPU) the LPI was last moved to.
 static LPI_COL: [AtomicU32; LPI_SLOTS] = [const { AtomicU32::new(0) }; LPI_SLOTS];
 static CMDQ: AtomicU64 = AtomicU64::new(0);
+/// Set once `init_its` has enabled the ITS (GITS_CTLR.Enabled). While it is
+/// clear, `g.its` may still be `Some` (the tables were found), but no command
+/// queue is programmed, so nothing may be pushed or mapped.
+static ITS_LIVE: AtomicBool = AtomicBool::new(false);
 /// One command queue. MAPC, MAPTI, MOVI and DISCARD all push here.
 static ITS_CMDS: SpinMutex<()> = SpinMutex::with_rank((), RANK_DEVICE);
 /// Bit `cpu` is set once that CPU's collection has a MAPC.
 static COLLECTIONS: AtomicU64 = AtomicU64::new(0);
 /// RDbase passed to that CPU's MAPC. Read only after its `COLLECTIONS` bit.
 static COLLECTION_RD: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+
+/// True once `init_its` has enabled the ITS. `gic.rs` reads it through
+/// [`its_live`] before it hands out or composes an LPI.
+pub(super) fn its_live() -> bool {
+    // Acquire: pairs with the Release store in `init_its`.
+    ITS_LIVE.load(Ordering::Acquire)
+}
 
 /// Allocate ITS tables, the command queue, and enable the ITS. `rd` is the
 /// boot CPU's redistributor, which the BSP collection maps.
@@ -116,6 +127,8 @@ pub(super) unsafe fn init_its(g: &Gic, its: u64, rd: u64) {
         mmio64w(its, GITS_CWRITER, 0);
         mmio32w(its, GITS_CTLR, GITS_CTLR_ENABLED);
     }
+    // Release: pairs with the Acquire loads in `its_live`, which gate every command.
+    ITS_LIVE.store(true, Ordering::Release);
     // BSP collection. APs map theirs in `enable_ap`.
     map_collection(g, its, rd);
 }
@@ -191,34 +204,60 @@ fn claim_its_dev(device_id: u32) -> Option<&'static ItsDev> {
         }
         i = i.saturating_add(1);
     }
-    let itt = alloc_pages(1)?;
-    clean_table_if_needed(itt, 4096);
+    // The ITT is allocated only once a free slot is seen, so a full table or
+    // a lost race hands the page back instead of leaking it.
+    let mut itt: Option<u64> = None;
     i = 0;
     while i < ITS_DEV_MAX {
         let Some(d) = ITS_DEVS.get(i) else {
             break;
         };
-        // AcqRel: publishes DeviceID; Acquire failure pairs with another claimer's AcqRel.
-        if d.id
-            .compare_exchange(
-                ITS_DEV_EMPTY,
-                device_id,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            // Release: pairs with the Acquire ITT load in `map_its_event`.
-            d.itt.store(itt, Ordering::Release);
-            return Some(d);
-        }
-        // Relaxed: pairs with nothing; another CPU claimed this DeviceID.
-        if d.id.load(Ordering::Relaxed) == device_id {
-            return Some(d);
-        }
         i = i.saturating_add(1);
+        // Relaxed: pairs with nothing; a slot's DeviceID is written once, by its claimer.
+        if d.id.load(Ordering::Relaxed) != ITS_DEV_EMPTY {
+            continue;
+        }
+        let page = match itt {
+            Some(page) => page,
+            None => {
+                let page = alloc_pages(1)?;
+                clean_table_if_needed(page, 4096);
+                itt = Some(page);
+                page
+            }
+        };
+        // AcqRel: publishes DeviceID; Acquire failure pairs with another claimer's AcqRel.
+        match d.id.compare_exchange(
+            ITS_DEV_EMPTY,
+            device_id,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                // Release: pairs with the Acquire ITT load in `map_its_event`.
+                d.itt.store(page, Ordering::Release);
+                return Some(d);
+            }
+            Err(claimed) if claimed == device_id => {
+                // Another CPU claimed this DeviceID; its ITT is the one kept.
+                free_pages(page);
+                return Some(d);
+            }
+            Err(_) => {}
+        }
+    }
+    if let Some(page) = itt {
+        free_pages(page);
     }
     None
+}
+
+/// Return one page from `alloc_pages(1)` that no table names.
+fn free_pages(pa: u64) {
+    // SAFETY: `pa` is the block `alloc_pages(1)` returned, never published;
+    // the caller holds its only record. established here.
+    let frame = unsafe { vibeos::pmm::Frames::from_entry(pa, 0) };
+    crate::pmm_init::with_buddy(|b| b.free(frame));
 }
 
 fn lpi_slot(hwirq: u32) -> Option<usize> {
@@ -231,6 +270,9 @@ fn lpi_slot(hwirq: u32) -> Option<usize> {
 pub fn map_its_event(device_id: u32, hwirq: u32) -> Result<(), IrqError> {
     let Some(g) = gic() else { return Ok(()) };
     let Some(its) = g.its else { return Ok(()) };
+    if !its_live() {
+        return Err(IrqError::NoRoute);
+    }
     let Some(slot) = lpi_slot(hwirq) else {
         return Err(IrqError::BadVector);
     };
@@ -323,6 +365,9 @@ pub fn map_its_event(device_id: u32, hwirq: u32) -> Result<(), IrqError> {
 /// MAPC this CPU's collection to `rd_va`, then SYNC. The BSP calls it from
 /// `init_its`; each AP from `enable_ap`, after its redistributor has LPIs on.
 pub(super) fn map_collection(g: &Gic, its: u64, rd_va: u64) {
+    if !its_live() {
+        return;
+    }
     let cpu = crate::per_cpu_init::current().cpu_id;
     if cpu >= 64 {
         crate::klog!(Level::Error, "vibeOS: gic: its mapc cpu {cpu}");
@@ -548,6 +593,10 @@ unsafe fn its_push(its: u64, cmd: ItsCommand) -> bool {
         let wr = mmio64(its, GITS_CWRITER) & !GITS_CREADR_STALLED;
         // Relaxed: pairs with nothing.
         let base = CMDQ.load(Ordering::Relaxed);
+        if base == 0 {
+            // Boot ran out of memory before the queue was allocated.
+            return false;
+        }
         let va = crate::paging_init::hhdm_offset()
             .wrapping_add(base)
             .wrapping_add(wr);

@@ -11,7 +11,7 @@ use super::gic_common::{
     CHIP, GICR_TYPER, Gic, Kind, LPI_BASE, LPI_SLOTS, SPI_SLOTS, XBASER_SHARE_IS, alloc_pages,
     clean_table_if_needed, gic, mmio32, mmio32w, mmio64, mmio64w, note_shareability,
 };
-use super::gic_its::{LPI_EVENT, discard_lpi, init_its, map_collection, movi_lpi};
+use super::gic_its::{LPI_EVENT, discard_lpi, init_its, its_live, map_collection, movi_lpi};
 pub use super::gic_its::{map_its_event, remove_its_device};
 use crate::cell::BootCell;
 use crate::machine_init;
@@ -893,7 +893,7 @@ impl IrqChip for GicChip {
         }
         // The whole range is reserved before any slot is handed out, so a
         // refused request leaves the counter where it was.
-        if g.kind == Kind::V3 && g.its.is_some() {
+        if g.kind == Kind::V3 && g.its.is_some() && its_live() {
             let limit = u32::try_from(LPI_SLOTS).unwrap_or(0);
             let Some(first) = reserve_slots(&g.next_lpi, u32::from(n), limit) else {
                 return Err(IrqError::Exhausted);
