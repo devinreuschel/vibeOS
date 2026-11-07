@@ -75,9 +75,13 @@ global_asm!(
     "    msr s3_4_c3_c1_4, x1",
     "    ldr x1, [x0, #{hdfgwtr}]",
     "    msr s3_4_c3_c1_5, x1",
+    "22:",
+    // HAFGRTR_EL2 exists with FEAT_AMUv1, which FEAT_FGT does not imply.
+    "    ldr x1, [x0, #{hafgrtr_ok}]",
+    "    cbz x1, 24f",
     "    ldr x1, [x0, #{hafgrtr}]",
     "    msr s3_4_c3_c1_6, x1",
-    "22:",
+    "24:",
     "    msr cntvoff_el2, xzr",
     "    isb",
     // M/C/I clear: translation stays off until the SCTLR_EL1 write below.
@@ -170,6 +174,7 @@ global_asm!(
     hdfgrtr = const SecondaryParam::HDFGRTR_EL2,
     hdfgwtr = const SecondaryParam::HDFGWTR_EL2,
     hafgrtr = const SecondaryParam::HAFGRTR_EL2,
+    hafgrtr_ok = const SecondaryParam::HAFGRTR_VALID,
     sctlr_el2 = const SecondaryParam::SCTLR_EL2,
     sctlr_early_clear = const sysreg::SCTLR_EL2_EARLY_CLEAR,
     cntkctl = const SecondaryParam::CNTKCTL,
@@ -434,6 +439,12 @@ pub fn capture_el2(p: &mut SecondaryParam) {
             asm!("mrs {0}, s3_4_c1_c1_6", out(reg) p.hfgitr_el2, options(nomem, nostack, preserves_flags));
             asm!("mrs {0}, s3_4_c3_c1_4", out(reg) p.hdfgrtr_el2, options(nomem, nostack, preserves_flags));
             asm!("mrs {0}, s3_4_c3_c1_5", out(reg) p.hdfgwtr_el2, options(nomem, nostack, preserves_flags));
+        }
+    }
+    if sysreg::feat_amu(super::cpu::id_aa64pfr0_el1()) {
+        p.hafgrtr_valid = 1;
+        // SAFETY: FEAT_AMUv1 gives HAFGRTR_EL2. established here.
+        unsafe {
             asm!("mrs {0}, s3_4_c3_c1_6", out(reg) p.hafgrtr_el2, options(nomem, nostack, preserves_flags));
         }
     }
@@ -490,12 +501,15 @@ pub fn snapshot_sysregs() -> [u64; SNAP_LEN] {
             if sysreg::feat_hcx(mmfr1) {
                 asm!("mrs {0}, s3_4_c1_c2_2", out(reg) v[16], options(nomem, nostack, preserves_flags));
             }
+            let pfr0 = super::cpu::id_aa64pfr0_el1();
             if sysreg::feat_fgt(mmfr0) {
                 asm!("mrs {0}, s3_4_c1_c1_4", out(reg) v[17], options(nomem, nostack, preserves_flags));
                 asm!("mrs {0}, s3_4_c1_c1_5", out(reg) v[18], options(nomem, nostack, preserves_flags));
                 asm!("mrs {0}, s3_4_c1_c1_6", out(reg) v[19], options(nomem, nostack, preserves_flags));
                 asm!("mrs {0}, s3_4_c3_c1_4", out(reg) v[20], options(nomem, nostack, preserves_flags));
                 asm!("mrs {0}, s3_4_c3_c1_5", out(reg) v[21], options(nomem, nostack, preserves_flags));
+            }
+            if sysreg::feat_amu(pfr0) {
                 asm!("mrs {0}, s3_4_c3_c1_6", out(reg) v[22], options(nomem, nostack, preserves_flags));
             }
         } else {

@@ -86,6 +86,12 @@ pub const fn feat_fgt(mmfr0: u64) -> bool {
     (mmfr0 >> 56) & 0xF != 0
 }
 
+/// `ID_AA64PFR0_EL1.AMU` (bits 47:44) is not zero: FEAT_AMUv1 exists, so
+/// `HAFGRTR_EL2` is implemented (Arm ARM DDI0487).
+pub const fn feat_amu(pfr0: u64) -> bool {
+    (pfr0 >> 44) & 0xF != 0
+}
+
 /// `ID_AA64PFR0_EL1.GIC` (bits 27:24) is not zero: the GICv3 system-register
 /// interface exists, so `ICC_SRE_EL2` is implemented (Arm ARM DDI0487).
 pub const fn feat_gic_sysreg(pfr0: u64) -> bool {
@@ -208,6 +214,15 @@ mod tests {
         assert!(!feat_fgt(0));
         assert!(feat_fgt(1 << 56));
         assert!(!feat_fgt(0xF << 52));
+    }
+
+    #[test]
+    fn amu_field() {
+        assert!(!feat_amu(0));
+        assert!(feat_amu(1 << 44));
+        assert!(feat_amu(0xF << 44));
+        // SVE (35:32) and GIC (27:24) sit outside the AMU field.
+        assert!(!feat_amu((0xF << 32) | (0xF << 24)));
     }
 
     #[test]
