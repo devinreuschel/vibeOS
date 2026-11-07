@@ -54,9 +54,10 @@ pub enum FdtError {
     BadToken,
     /// `last_comp_version` is past the version this walker reads.
     BadVersion,
-    /// A reserved range would not fit in [`super::MAX_RESERVED`], or its
+    /// A reserved range would not fit in [`super::MAX_RESERVED`], its
     /// start is the last address of the space so it cannot be a half-open
-    /// range.
+    /// range, or a property under `/reserved-memory` would not fit in the
+    /// property table, so its range could not be read as reserved.
     Reserved,
 }
 
