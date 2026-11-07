@@ -910,7 +910,9 @@ pub(crate) mod testing {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
     #[cfg(target_arch = "x86_64")]
-    use vibeos::syscall::{SYS_GETPID, UserFrame};
+    use crate::arch::current::syscall_nr::SYS_GETPID;
+    #[cfg(target_arch = "x86_64")]
+    use vibeos::syscall::UserFrame;
 
     #[cfg(target_arch = "x86_64")]
     use crate::arch::idt::TrapFrame;

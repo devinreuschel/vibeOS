@@ -3,8 +3,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use crate::arch::current::syscall_nr::{SYS_GETPID, SYS_KILL};
 use vibeos::proc::{SIGCONT, SIGKILL, SIGSTOP, wait_signaled};
-use vibeos::syscall::{SYS_GETPID, SYS_KILL};
 use vibeos::vectors;
 
 use super::hooks as exit_testing;

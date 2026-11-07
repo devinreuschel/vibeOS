@@ -2,8 +2,8 @@
 //! two-count object (ROADMAP §10.6, F019) and the fill API. Rows: the
 //! parent `ktest.rs`'s `TESTS`.
 
+use crate::arch::current::syscall_nr::SYS_KILL;
 use vibeos::proc::{SIGKILL, wait_signaled};
-use vibeos::syscall::SYS_KILL;
 
 use crate::addr_space_init::testing as as_testing;
 use crate::fill_init::testing as fill_testing;

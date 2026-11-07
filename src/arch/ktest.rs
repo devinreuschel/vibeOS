@@ -3,13 +3,13 @@
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use crate::arch::current::syscall_nr::SYS_KILL;
 use vibeos::addr_space::UserPerms;
 use vibeos::apic::TimerMode;
 use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL, star_value, sysret_selectors};
 use vibeos::kva::PAGE_SIZE;
 use vibeos::paging::PAGE_SIZE_4K;
 use vibeos::proc::{SIGBUS, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGTRAP, wait_signaled};
-use vibeos::syscall::SYS_KILL;
 use vibeos::vectors;
 
 use crate::addr_space_init;
