@@ -521,7 +521,7 @@ fn shoot_span(va: VirtAddr, n: usize) {
 /// `[phys, phys+len)` is memory the kernel may map at this type, and no
 /// other mapping of it uses a conflicting type (invariant I17).
 pub unsafe fn memremap(phys: PhysAddr, len: u64, flags: PageFlags) -> Option<VirtAddr> {
-    if len == 0 {
+    if len == 0 || !vibeos::physmap::phys_range_below(phys.as_u64(), len, paging_init::PHYS_LIMIT) {
         return None;
     }
     let page_off = phys.as_u64() & (PAGE_SIZE - 1);

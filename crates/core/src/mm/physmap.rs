@@ -98,6 +98,14 @@ pub const fn phys_in_slot(slot: PhysmapSlot, offset: u64, phys: u64) -> bool {
     }
 }
 
+/// Whether `[phys, phys+len)` ends at or below `limit` without wrapping.
+pub const fn phys_range_below(phys: u64, len: u64, limit: u64) -> bool {
+    match phys.checked_add(len) {
+        Some(end) => end <= limit,
+        None => false,
+    }
+}
+
 /// Whole-page bounds `[start, end)` of `[phys, phys+len)`, `end` exclusive.
 /// `None` when the range, rounded up to a page, passes the top of the 64-bit
 /// space, so a firmware-supplied `phys` near the top is refused rather than
@@ -370,6 +378,16 @@ where
 mod tests {
     use super::*;
     use crate::paging::PAGE_SIZE_4K;
+
+    #[test]
+    fn phys_range_below_refuses_past_the_limit_and_wrap() {
+        let limit = 1u64 << 52;
+        assert!(phys_range_below(limit - 0x1000, 0x1000, limit));
+        assert!(!phys_range_below(limit - 0x1000, 0x1001, limit));
+        assert!(!phys_range_below(limit, 1, limit));
+        assert!(!phys_range_below(0xFFFF_FFFF_FFFF_F000, 8, limit));
+        assert!(!phys_range_below(0xFFFF_FFFF_FFFF_F800, 0x1000, limit));
+    }
 
     #[test]
     fn page_bounds_refuses_a_range_that_wraps_the_top() {

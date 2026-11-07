@@ -27,7 +27,7 @@ use vibeos::paging::{
     self, FrameAlloc, IoremapWindow, MapError, MapMode, PAGE_SIZE_2M, PAGE_SIZE_4K, PageFlags,
     PageSize, PhysAddr, VirtAddr,
 };
-use vibeos::physmap::{PhysmapRun, phys_in_slot, walk_physmap};
+use vibeos::physmap::{PhysmapRun, phys_in_slot, phys_range_below, walk_physmap};
 use vibeos::pmm::Frames;
 
 use crate::arch::current::{Arch, Mapper, enable_nx, stack_pointer};
@@ -37,6 +37,18 @@ use crate::sync_init::{SpinMutex, SpinMutexGuard};
 use vibeos::arch::PageTable;
 
 // ------------------ constants matching DESIGN §4.1 ------------------
+
+/// One past the highest physical address the page tables can name. `make_pte`
+/// masks the bits above the address field off, so a higher address would
+/// silently map a lower page.
+#[cfg(target_arch = "x86_64")]
+pub const PHYS_LIMIT: u64 = (vibeos::arch::x86_64::paging::PTE_ADDR_MASK | (PAGE_SIZE_4K - 1)) + 1;
+/// One past the highest physical address the page tables can name. `make_pte`
+/// masks the bits above the address field off, so a higher address would
+/// silently map a lower page.
+#[cfg(target_arch = "aarch64")]
+pub const PHYS_LIMIT: u64 =
+    (vibeos::arch::aarch64::paging::DESC_ADDR_MASK | (PAGE_SIZE_4K - 1)) + 1;
 
 /// Limine's HHDM offset, from the one `BootInfo` capture.
 pub fn hhdm_offset() -> u64 {
@@ -178,6 +190,9 @@ pub fn empty_user_root() -> u64 {
 /// no aliased mapping through the physmap will be used to touch the
 /// same registers with cacheable attributes.
 pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
+    if !phys_range_below(phys.as_u64(), len, PHYS_LIMIT) {
+        return None;
+    }
     let round_len = paging::page_span(phys.as_u64(), len)?;
     let (mapped, base_va, round_len) = {
         let mut pt = current_mapper();
