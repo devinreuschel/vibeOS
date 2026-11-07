@@ -20,6 +20,25 @@ pub const KERNEL_PML4_FIRST: usize = 256;
 /// current hardware; bits 0..12 and 52..63 are flags / reserved / NX.
 pub const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
+/// MAXPHYADDR when CPUID.80000008H is absent: the SDM's 36-bit floor, which
+/// every 64-bit CPU reports at least.
+pub const MAXPHYADDR_FLOOR: u32 = 36;
+
+/// One past the highest physical address a CPU with CPUID.80000008H:EAX[7:0]
+/// equal to `bits` can name, clamped to the 52 bits the PTE address field
+/// holds. A higher address sets a reserved bit in the table walk, so it is
+/// refused rather than mapped. `bits` of 0 is an absent leaf.
+pub const fn phys_limit_for_maxphyaddr(bits: u32) -> u64 {
+    let bits = if bits < MAXPHYADDR_FLOOR {
+        MAXPHYADDR_FLOOR
+    } else if bits > 52 {
+        52
+    } else {
+        bits
+    };
+    1u64 << bits
+}
+
 /// The index `va` selects in a table at `level` (4 is the root, 1 holds
 /// 4 KiB leaves).
 #[inline]
@@ -78,6 +97,32 @@ mod tests {
             index(v, 4),
             ((0x0000_1234_5678_9abcu64 >> 39) & 0x1FF) as usize
         );
+    }
+
+    #[test]
+    fn phys_limit_follows_maxphyaddr() {
+        assert_eq!(phys_limit_for_maxphyaddr(40), 1 << 40);
+        assert_eq!(phys_limit_for_maxphyaddr(46), 1 << 46);
+        assert_eq!(phys_limit_for_maxphyaddr(52), 1 << 52);
+        // An absent leaf, and a field above the 52-bit address field.
+        assert_eq!(phys_limit_for_maxphyaddr(0), 1 << 36);
+        assert_eq!(phys_limit_for_maxphyaddr(0xFF), 1 << 52);
+    }
+
+    #[test]
+    fn firmware_addresses_past_maxphyaddr_are_refused() {
+        use crate::physmap::phys_range_below;
+        let limit = phys_limit_for_maxphyaddr(40);
+        // The top page of the 64-bit space, and a garbage HPET-sized base
+        // with a non-canonical bit set, both past 1 TiB.
+        assert!(!phys_range_below(0xFFFF_FFFF_FFFF_F000, 0x1000, limit));
+        assert!(!phys_range_below(0x0100_0000_0000_0000, 0x1000, limit));
+        assert!(!phys_range_below(limit - 0x1000, 0x1001, limit));
+        assert!(phys_range_below(limit - 0x1000, 0x1000, limit));
+        // The LAPIC, I/O APIC and HPET pages sit well under the limit.
+        assert!(phys_range_below(0xFEE0_0000, 0x1000, limit));
+        assert!(phys_range_below(0xFEC0_0000, 0x1000, limit));
+        assert!(phys_range_below(0xFED0_0000, 0x1000, limit));
     }
 
     #[test]

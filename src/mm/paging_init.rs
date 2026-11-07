@@ -38,17 +38,29 @@ use vibeos::arch::PageTable;
 
 // ------------------ constants matching DESIGN §4.1 ------------------
 
-/// One past the highest physical address the page tables can name. `make_pte`
-/// masks the bits above the address field off, so a higher address would
-/// silently map a lower page.
+/// One past the highest physical address this CPU can name. `make_pte`
+/// masks the bits above the address field off, and an address past the
+/// CPU's MAXPHYADDR takes a reserved-bit fault on access, so `ioremap` and
+/// `memremap` refuse anything at or above it.
 #[cfg(target_arch = "x86_64")]
-pub const PHYS_LIMIT: u64 = (vibeos::arch::x86_64::paging::PTE_ADDR_MASK | (PAGE_SIZE_4K - 1)) + 1;
-/// One past the highest physical address the page tables can name. `make_pte`
-/// masks the bits above the address field off, so a higher address would
-/// silently map a lower page.
+pub fn phys_limit() -> u64 {
+    // CPUID.80000000H:EAX is the highest extended leaf; below 80000008H the
+    // leaf is absent, and `phys_limit_for_maxphyaddr` takes the floor for 0.
+    let bits = if crate::x86::cpuid(0x8000_0000, 0).0 >= 0x8000_0008 {
+        crate::x86::cpuid(0x8000_0008, 0).0 & 0xFF
+    } else {
+        0
+    };
+    vibeos::arch::x86_64::paging::phys_limit_for_maxphyaddr(bits)
+}
+
+/// One past the highest physical address the aarch64 page tables can name.
+/// `make_pte` masks the bits above the address field off, so a higher
+/// address would silently map a lower page.
 #[cfg(target_arch = "aarch64")]
-pub const PHYS_LIMIT: u64 =
-    (vibeos::arch::aarch64::paging::DESC_ADDR_MASK | (PAGE_SIZE_4K - 1)) + 1;
+pub fn phys_limit() -> u64 {
+    (vibeos::arch::aarch64::paging::DESC_ADDR_MASK | (PAGE_SIZE_4K - 1)) + 1
+}
 
 /// Limine's HHDM offset, from the one `BootInfo` capture.
 pub fn hhdm_offset() -> u64 {
@@ -190,7 +202,7 @@ pub fn empty_user_root() -> u64 {
 /// no aliased mapping through the physmap will be used to touch the
 /// same registers with cacheable attributes.
 pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
-    if !phys_range_below(phys.as_u64(), len, PHYS_LIMIT) {
+    if !phys_range_below(phys.as_u64(), len, phys_limit()) {
         return None;
     }
     let round_len = paging::page_span(phys.as_u64(), len)?;

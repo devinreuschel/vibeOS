@@ -37,6 +37,8 @@ fn canonical_check() {
     // Middle of the non-canonical hole.
     assert!(!is_canonical(0x0000_8000_0000_0000));
     assert!(!is_canonical(0xFFFF_7FFF_FFFF_FFFF));
+    // A firmware entry with bit 56 set: the HHDM copy of it is refused.
+    assert!(!is_canonical(0x0100_0000_0000_0000));
 }
 
 #[test]
