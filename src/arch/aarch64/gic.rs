@@ -320,18 +320,16 @@ fn init_v3(g: &Gic) {
                 GICD_IPRIORITYR + u64::from(i),
                 u32::from(p) | u32::from(p) << 8 | u32::from(p) << 16 | u32::from(p) << 24,
             );
-            let mut j = 0u32;
-            while j < 4 {
-                let n = i.saturating_add(j);
-                if n < lines {
-                    mmio64w(g.dist, gic::gicd_irouter(n), 0);
-                }
-                j = j.saturating_add(1);
-            }
             i = i.saturating_add(4);
         }
         mmio32w(g.dist, GICD_CTLR, GICD_CTLR_ENABLE_G1A | GICD_CTLR_ARE_NS);
         wait_rwp(g.dist, GICD_CTLR, GICD_CTLR_RWP, "gicd");
+        // IROUTER is RAZ/WI until ARE_NS is set, so route after the write and its RWP wait.
+        let mut n = 32u32;
+        while n < lines {
+            mmio64w(g.dist, gic::gicd_irouter(n), 0);
+            n = n.saturating_add(1);
+        }
         program_sgi_ppi(rd);
         // Fail closed: without its LPI tables the boot CPU cannot take an MSI,
         // and an ITS would map LPIs into nothing. A machine with no physical
