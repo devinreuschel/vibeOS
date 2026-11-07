@@ -430,6 +430,9 @@ impl ClockWriter {
     /// wrap keeps every wrap counted.
     pub fn advance(&mut self, raw: u64) -> Snapshot {
         let d = self.counter.delta(raw, self.last_raw);
+        // A delta past half the range is a read that went backward, not a
+        // wrap: it counts nothing, so one such read cannot pin `ext`.
+        let d = if d > self.counter.mask() / 2 + 1 { 0 } else { d };
         self.ext = self.ext.saturating_add(d);
         self.last_raw = raw & self.counter.mask();
         self.snapshot()
@@ -1216,9 +1219,26 @@ mod tests {
         };
         assert_eq!(ns_at(s, c, 1), u64::MAX);
         assert_eq!(ns_at(s, c, 0), u64::MAX - 5);
+        // A read half the range on is still a forward read and saturates.
         let mut w = ClockWriter::new(c, 0, u64::MAX - 1);
-        assert_eq!(w.advance(u64::MAX).ns, u64::MAX);
+        assert_eq!(w.advance(u64::MAX / 2).ns, u64::MAX);
         assert_eq!(w.advance(u64::MAX - 1).ns, u64::MAX);
+    }
+
+    #[test]
+    fn backward_read_counts_nothing_and_does_not_pin_the_clock() {
+        let c = ghz();
+        let mut w = ClockWriter::new(c, 1_000, 0);
+        // A read 500 cycles behind counts as no time at all.
+        assert_eq!(w.advance(500).ns, 0);
+        // The next forward read counts from the backward read.
+        assert_eq!(w.advance(1_500).ns, c.scale.to_ns(1_000));
+        // A 64-bit counter read far behind does not saturate `ext`.
+        assert_eq!(w.advance(u64::MAX - 7).ns, c.scale.to_ns(1_000));
+        assert_eq!(
+            w.advance((u64::MAX - 7).wrapping_add(100)).ns,
+            c.scale.to_ns(1_000 + 100)
+        );
     }
 
     #[test]
