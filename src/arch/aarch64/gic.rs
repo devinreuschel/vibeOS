@@ -306,7 +306,9 @@ fn init_v3(g: &Gic) {
             crate::klog!(Level::Error, "vibeOS: gic: no redistributor for boot CPU");
             crate::boot::halt_with("vibeOS: gic: no redistributor");
         };
-        wake_redist(rd);
+        if !wake_redist(rd) {
+            crate::klog!(Level::Error, "vibeOS: gic: boot cpu redistributor asleep");
+        }
         let lines = gic::gicd_lines(mmio32(g.dist, GICD_TYPER));
         mmio32w(g.dist, GICD_CTLR, 0);
         wait_rwp(g.dist, GICD_CTLR, GICD_CTLR_RWP, "gicd");
@@ -344,11 +346,12 @@ fn init_v3(g: &Gic) {
     }
 }
 
-/// Clear `GICR_WAKER.ProcessorSleep` and wait for ChildrenAsleep.
+/// Clear `GICR_WAKER.ProcessorSleep` and wait for ChildrenAsleep. `false`
+/// after a bounded wait with ChildrenAsleep still set, and an Error line.
 ///
 /// # Safety
 /// `rd` is the mapped redistributor this CPU owns.
-unsafe fn wake_redist(rd: u64) {
+unsafe fn wake_redist(rd: u64) -> bool {
     // SAFETY: `rd` is the mapped redistributor. established here.
     unsafe {
         let w = mmio32(rd, GICR_WAKER) & !GICR_WAKER_PS;
@@ -356,12 +359,14 @@ unsafe fn wake_redist(rd: u64) {
         let mut n = 100_000u32;
         while n > 0 {
             if mmio32(rd, GICR_WAKER) & GICR_WAKER_CA == 0 {
-                return;
+                return true;
             }
             n -= 1;
             core::hint::spin_loop();
         }
     }
+    crate::klog!(Level::Error, "vibeOS: gic: redistributor wake timeout");
+    false
 }
 
 /// Banked SGI/PPI Group 1, priorities, enable (GICv2 distributor view).
@@ -396,7 +401,7 @@ unsafe fn program_sgi_ppi(rd: u64) {
     // SAFETY: `rd` is this CPU's redistributor. established here.
     unsafe {
         mmio32w(rd, GICR_IGROUPR0, 0xFFFF_FFFF);
-        mmio32w(rd, GICR_ICENABLER0, 0);
+        mmio32w(rd, GICR_ICENABLER0, 0xFFFF_FFFF);
         let mut s = 0u32;
         while s < 32 {
             let p = gic::priority_for(s);
@@ -721,7 +726,9 @@ pub unsafe fn enable_ap() -> bool {
                     );
                     return false;
                 };
-                wake_redist(rd);
+                if !wake_redist(rd) {
+                    return false;
+                }
                 program_sgi_ppi(rd);
                 if !enable_lpi(g, rd) {
                     return false;
@@ -792,6 +799,7 @@ pub fn set_spi_edge(intid: u32, edge: bool) {
     unsafe {
         let cur = mmio32(g.dist, off);
         mmio32w(g.dist, off, (cur & !(3 << shift)) | (bits << shift));
+        wait_rwp(g.dist, GICD_CTLR, GICD_CTLR_RWP, "gicd icfgr");
     }
 }
 
