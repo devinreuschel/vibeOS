@@ -103,9 +103,8 @@ pub(crate) fn test_asid_4bit() -> Outcome {
         // Deleting this flush left the test green under TCG, where every switch
         // here changes the ASID. HVF did not reach the test with or without the
         // flush, so no accel here is shown to catch a missing flush.
-        if alloc.flush_pending(cpu) {
+        if alloc.take_flush(cpu) {
             crate::arch::aarch64::cpu::tlbi_all();
-            alloc.clear_flush(cpu);
         }
         let asid = u64::from(alloc.asid_of(packed));
         let got = {
