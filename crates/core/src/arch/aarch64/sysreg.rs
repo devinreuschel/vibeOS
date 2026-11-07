@@ -86,6 +86,14 @@ pub const fn feat_fgt(mmfr0: u64) -> bool {
     (mmfr0 >> 56) & 0xF != 0
 }
 
+/// `ID_AA64DFR0_EL1.PMUVer` (bits 11:8) names an architected PMUv3. Zero
+/// means no PMU, and 0b1111 is IMPLEMENTATION DEFINED, so neither has
+/// `PMUSERENR_EL0` (Arm ARM DDI0487).
+pub const fn feat_pmuv3(dfr0: u64) -> bool {
+    let pmuver = (dfr0 >> 8) & 0xF;
+    pmuver != 0 && pmuver != 0xF
+}
+
 /// `ID_AA64PFR0_EL1.AMU` (bits 47:44) is not zero: FEAT_AMUv1 exists, so
 /// `HAFGRTR_EL2` is implemented (Arm ARM DDI0487).
 pub const fn feat_amu(pfr0: u64) -> bool {
@@ -223,6 +231,17 @@ mod tests {
         assert!(feat_amu(0xF << 44));
         // SVE (35:32) and GIC (27:24) sit outside the AMU field.
         assert!(!feat_amu((0xF << 32) | (0xF << 24)));
+    }
+
+    #[test]
+    fn pmuv3_field() {
+        assert!(!feat_pmuv3(0));
+        assert!(feat_pmuv3(1 << 8));
+        assert!(feat_pmuv3(0x9 << 8));
+        // 0b1111 is IMPLEMENTATION DEFINED, not architected PMUv3.
+        assert!(!feat_pmuv3(0xF << 8));
+        // PMSVer (bits 35:32) and DebugVer (bits 3:0) sit outside the field.
+        assert!(!feat_pmuv3((0xF << 32) | 0xF));
     }
 
     #[test]

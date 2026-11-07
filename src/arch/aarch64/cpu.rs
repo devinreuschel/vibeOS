@@ -47,6 +47,20 @@ pub fn id_aa64pfr0_el1() -> u64 {
     v
 }
 
+/// `ID_AA64DFR0_EL1`, readable at EL1 and at EL2 under VHE.
+pub fn id_aa64dfr0_el1() -> u64 {
+    let v: u64;
+    // SAFETY: ID_AA64DFR0_EL1 is readable at EL1 and at EL2 under VHE; established here.
+    unsafe {
+        asm!(
+            "mrs {0}, ID_AA64DFR0_EL1",
+            out(reg) v,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    v
+}
+
 fn hcr_el2() -> u64 {
     let v: u64;
     // SAFETY: readable at EL2; callers check `current_el`. established here.
@@ -306,7 +320,10 @@ pub fn apply_computed_sysregs() {
         } else {
             asm!("msr cntkctl_el1, {0}", in(reg) cnt, options(nostack, preserves_flags));
         }
-        asm!("msr pmuserenr_el0, {0}", in(reg) pmuserenr, options(nostack, preserves_flags));
+        // PMUSERENR_EL0 is UNDEFINED without FEAT_PMUv3.
+        if sysreg::feat_pmuv3(id_aa64dfr0_el1()) {
+            asm!("msr pmuserenr_el0, {0}", in(reg) pmuserenr, options(nostack, preserves_flags));
+        }
         asm!("msr cpacr_el1, {0}", in(reg) cpacr, options(nostack, preserves_flags));
         asm!("msr sctlr_el1, {0}", in(reg) sctlr, options(nostack, preserves_flags));
         asm!("isb", options(nostack, preserves_flags));

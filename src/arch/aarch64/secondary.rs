@@ -97,8 +97,11 @@ global_asm!(
     "    ldr x1, [x0, #{cntkctl}]",
     "    msr cntkctl_el1, x1",
     "31:",
+    "    ldr x1, [x0, #{pmu_ok}]",
+    "    cbz x1, 25f",
     "    ldr x1, [x0, #{pmuserenr}]",
     "    msr pmuserenr_el0, x1",
+    "25:",
     "    ldr x1, [x0, #{cpacr}]",
     "    msr cpacr_el1, x1",
     "    ldr x1, [x0, #{mair}]",
@@ -179,6 +182,7 @@ global_asm!(
     sctlr_early_clear = const sysreg::SCTLR_EL2_EARLY_CLEAR,
     cntkctl = const SecondaryParam::CNTKCTL,
     pmuserenr = const SecondaryParam::PMUSERENR,
+    pmu_ok = const SecondaryParam::PMU_VALID,
     cpacr = const SecondaryParam::CPACR,
     mair = const SecondaryParam::MAIR,
     tcr = const SecondaryParam::TCR,
@@ -379,6 +383,9 @@ pub fn fill_computed(p: &mut SecondaryParam) {
     p.sctlr = sysreg::sctlr_el1();
     p.cntkctl = sysreg::cntkctl_el1();
     p.pmuserenr = sysreg::pmuserenr_el0();
+    if sysreg::feat_pmuv3(super::cpu::id_aa64dfr0_el1()) {
+        p.pmu_valid = 1;
+    }
     p.cpacr = sysreg::cpacr_el1();
     // The stub writes CNTHCTL_EL2 only after setting E2H, when bits 0 and 1
     // are EL0PCTEN and EL0VCTEN. capture_el2 stores this same value.

@@ -99,6 +99,8 @@ pub struct SecondaryParam {
     /// Nonzero when `HAFGRTR_EL2` exists (`ID_AA64PFR0_EL1.AMU`).
     pub hafgrtr_valid: u64,
     pub fgt_valid: u64,
+    /// Nonzero when `PMUSERENR_EL0` exists (`ID_AA64DFR0_EL1.PMUVer`).
+    pub pmu_valid: u64,
     pub conduit_hvc: u64,
     pub status: u64,
 }
@@ -112,6 +114,7 @@ impl SecondaryParam {
     pub const MAIR: usize = offset_of!(Self, mair);
     pub const CNTKCTL: usize = offset_of!(Self, cntkctl);
     pub const PMUSERENR: usize = offset_of!(Self, pmuserenr);
+    pub const PMU_VALID: usize = offset_of!(Self, pmu_valid);
     pub const CPACR: usize = offset_of!(Self, cpacr);
     pub const STACK_TOP: usize = offset_of!(Self, stack_top);
     pub const CPU_PTR: usize = offset_of!(Self, cpu_ptr);
@@ -175,6 +178,7 @@ impl SecondaryParam {
             hafgrtr_el2: 0,
             hafgrtr_valid: 0,
             fgt_valid: 0,
+            pmu_valid: 0,
             conduit_hvc: 0,
             status: 0,
         }
@@ -224,8 +228,8 @@ mod tests {
         assert_eq!(SecondaryParam::TTBR1, 8);
         assert_eq!(SecondaryParam::SCTLR, 24);
         assert_eq!(SecondaryParam::CNTKCTL, 48);
-        assert_eq!(SecondaryParam::STATUS, 34 * 8);
-        assert_eq!(core::mem::size_of::<SecondaryParam>(), 35 * 8);
+        assert_eq!(SecondaryParam::STATUS, 35 * 8);
+        assert_eq!(core::mem::size_of::<SecondaryParam>(), 36 * 8);
         assert!(core::mem::size_of::<SecondaryParam>() <= 4096);
     }
 
