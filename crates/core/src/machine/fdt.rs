@@ -37,6 +37,8 @@ const FDT_NOP: u32 = 0x4;
 const FDT_END: u32 = 0x9;
 
 const HDR_LEN: usize = 40;
+/// Newest `last_comp_version` this walker reads (`dt_spec` v0.4 §5.2).
+const LAST_COMP_VERSION: u32 = 17;
 const DEPTH: usize = 16;
 const PATH_CAP: usize = 128;
 const PROP_CAP: usize = 32;
@@ -50,6 +52,8 @@ pub enum FdtError {
     Truncated,
     BadMagic,
     BadToken,
+    /// `last_comp_version` is past the version this walker reads.
+    BadVersion,
     /// A reserved range would not fit in [`super::MAX_RESERVED`], or its
     /// start is the last address of the space so it cannot be a half-open
     /// range.
@@ -62,6 +66,7 @@ impl FdtError {
             FdtError::Truncated => "truncated",
             FdtError::BadMagic => "bad magic",
             FdtError::BadToken => "bad token",
+            FdtError::BadVersion => "bad version",
             FdtError::Reserved => "reserved",
         }
     }
@@ -136,6 +141,9 @@ fn parse_header(dtb: &[u8]) -> Result<Header, FdtError> {
     let totalsize = be_u32(h, 4).ok_or(FdtError::Truncated)?;
     if (totalsize as usize) > dtb.len() || (totalsize as usize) < HDR_LEN {
         return Err(FdtError::Truncated);
+    }
+    if be_u32(h, 24).ok_or(FdtError::Truncated)? > LAST_COMP_VERSION {
+        return Err(FdtError::BadVersion);
     }
     Ok(Header {
         totalsize,
@@ -356,6 +364,25 @@ fn path_starts(path: &[u8], prefix: &[u8]) -> bool {
     path.get(..prefix.len()) == Some(prefix) && path.get(prefix.len()).is_none_or(|&c| c == b'/')
 }
 
+/// The first component of an absolute node path, and whether a component follows it.
+fn first_component(path: &[u8]) -> Option<(&[u8], bool)> {
+    let rest = path.strip_prefix(b"/")?;
+    match rest.iter().position(|&c| c == b'/') {
+        Some(i) => Some((rest.get(..i)?, true)),
+        None => Some((rest, false)),
+    }
+}
+
+/// `/reserved-memory`, `/reserved-memory@…`, or a node below either.
+fn in_reserved_memory(path: &[u8]) -> bool {
+    first_component(path).is_some_and(|(c, _)| is_reserved_memory(c))
+}
+
+/// A node below `/reserved-memory` or `/reserved-memory@…`.
+fn below_reserved_memory(path: &[u8]) -> bool {
+    first_component(path).is_some_and(|(c, below)| below && is_reserved_memory(c))
+}
+
 /// The one UART chooser. `/aliases` `serial0`, else the first okay `arm,pl011`.
 pub fn pick_pl011(dtb: &[u8]) -> Option<u64> {
     let mut dropped = 0u32;
@@ -443,7 +470,7 @@ pub fn parse_dtb(dtb: &[u8]) -> Result<Parsed, FdtError> {
         take_reserved(&mut d, path, props, inh)
     })?;
     match walk(dtb, false, |path, props, inh| {
-        if path_starts(path, b"/reserved-memory") || path_is(path, b"/chosen") {
+        if in_reserved_memory(path) || path_is(path, b"/chosen") {
             return Ok(());
         }
         fill_node(&mut d, path, props, inh);
@@ -482,7 +509,7 @@ fn take_reserved(
     props: &[Prop<'_>],
     inh: Inherit,
 ) -> Result<(), FdtError> {
-    if path_starts(path, b"/reserved-memory") && !path_is(path, b"/reserved-memory") {
+    if below_reserved_memory(path) {
         let no_map = has_empty(props, b"no-map");
         if let Some(v) = prop_named(props, b"reg") {
             each_reg(v, inh.addr_cells, inh.size_cells, |r| {
@@ -853,6 +880,9 @@ fn walk(
         match tok {
             FDT_NOP => {}
             FDT_END => {
+                if depth != 0 {
+                    return Err(FdtError::BadToken);
+                }
                 return Ok(WalkTotals {
                     nodes,
                     dropped_props,
@@ -883,6 +913,8 @@ fn walk(
                     return Err(FdtError::BadToken);
                 }
                 // Collect this node's properties before visiting.
+                let in_reserved =
+                    reserved_depth.is_some() || (depth == 1 && is_reserved_memory(name));
                 let mut np = 0usize;
                 loop {
                     let t = be_u32(st, off).ok_or(FdtError::Truncated)?;
@@ -904,6 +936,8 @@ fn walk(
                     if let Some(slot) = props_buf.get_mut(np) {
                         *slot = Prop { name: pname, value };
                         np = np.saturating_add(1);
+                    } else if in_reserved {
+                        return Err(FdtError::Reserved);
                     } else {
                         dropped_props = dropped_props.saturating_add(1);
                     }

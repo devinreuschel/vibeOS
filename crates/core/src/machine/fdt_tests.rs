@@ -456,6 +456,59 @@ fn psci_without_a_known_method_enables_nothing() {
 }
 
 #[test]
+fn reserved_memory_at_address_has_reserved_children() {
+    // A child of `reserved-memory@…` is a reservation, as one of `reserved-memory`.
+    let mut t = root_2_2();
+    t.begin("reserved-memory@80000000");
+    t.prop("#address-cells", &be(&[2]));
+    t.prop("#size-cells", &be(&[2]));
+    t.begin("child@80000000");
+    t.prop("reg", &be(&[0, 0x8000_0000, 0, 0x1000]));
+    t.prop("no-map", &[]);
+    t.end();
+    t.end();
+    t.end();
+    let d = parse(&t.finish()).unwrap();
+    assert_eq!(
+        d.reserved_ranges().collect::<Vec<_>>(),
+        vec![0x8000_0000..0x8000_1000]
+    );
+    assert_eq!(
+        d.nomap_ranges().collect::<Vec<_>>(),
+        vec![0x8000_0000..0x8000_1000]
+    );
+}
+
+#[test]
+fn unclosed_node_at_fdt_end_is_a_bad_token() {
+    let mut t = root_2_2();
+    t.begin("soc");
+    assert_eq!(parse(&t.finish()).err(), Some(FdtError::BadToken));
+}
+
+#[test]
+fn last_comp_version_past_17_is_refused() {
+    let mut t = root_2_2();
+    t.end();
+    let mut dtb = t.finish();
+    assert!(parse(&dtb).is_ok());
+    dtb[24..28].copy_from_slice(&18u32.to_be_bytes());
+    assert_eq!(parse(&dtb).err(), Some(FdtError::BadVersion));
+}
+
+#[test]
+fn property_dropped_in_reserved_memory_refuses_the_tree() {
+    let mut t = root_2_2();
+    t.begin("reserved-memory");
+    for i in 0..PROP_CAP + 1 {
+        t.prop(&format!("p{i}"), &be(&[i as u32]));
+    }
+    t.end();
+    t.end();
+    assert_eq!(parse(&t.finish()).err(), Some(FdtError::Reserved));
+}
+
+#[test]
 fn properties_past_the_cap_are_counted() {
     // Two cell properties, then PROP_CAP + 3 more: 5 past the cap.
     let mut t = root_2_2();
