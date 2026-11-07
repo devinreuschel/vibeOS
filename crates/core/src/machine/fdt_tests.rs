@@ -436,6 +436,25 @@ fn pl011(t: &mut Dtb, name: &str, base: u32) {
     t.end();
 }
 
+/// A `/psci` node with no `method`, or one that names neither conduit,
+/// gives no enable method. It is not HVC.
+#[test]
+fn psci_without_a_known_method_enables_nothing() {
+    for method in [None, Some(&b"bogus\0"[..])] {
+        let mut t = root_2_2();
+        t.begin("psci");
+        t.prop("compatible", b"arm,psci-1.0\0");
+        if let Some(m) = method {
+            t.prop("method", m);
+        }
+        t.end();
+        t.end();
+        let d = parse(&t.finish()).unwrap();
+        assert_eq!(d.enable, EnableMethod::None);
+        assert_eq!(d.psci, Some(EnableMethod::None));
+    }
+}
+
 #[test]
 fn properties_past_the_cap_are_counted() {
     // Two cell properties, then PROP_CAP + 3 more: 5 past the cap.

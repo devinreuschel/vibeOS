@@ -541,12 +541,13 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
         || compatible_has(props, b"arm,psci-1.0")
         || compatible_has(props, b"arm,psci-0.2")
     {
-        let hvc = match prop_named(props, b"method").map(cstr) {
-            Some(b"hvc") => true,
-            Some(b"smc") => false,
-            _ => true,
+        // A missing or unknown `method` names no conduit: no CPU can be
+        // started through it, so it is not taken for HVC.
+        let m = match prop_named(props, b"method").map(cstr) {
+            Some(b"hvc") => EnableMethod::Psci { hvc: true },
+            Some(b"smc") => EnableMethod::Psci { hvc: false },
+            _ => EnableMethod::None,
         };
-        let m = EnableMethod::Psci { hvc };
         d.psci = Some(m);
         d.enable = m;
     }
