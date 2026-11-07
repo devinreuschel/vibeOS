@@ -363,7 +363,7 @@ global_asm!(
     "12:",
     "    adrp x1, VIBEOS_OVERFLOW_SP",
     "    add x1, x1, :lo12:VIBEOS_OVERFLOW_SP",
-    "    ldr x1, [x1]",
+    "    ldar x1, [x1]",
     "    cbz x1, 2f",
     "13:",
     "    mov sp, x1",
@@ -395,8 +395,8 @@ pub unsafe fn init_full() {
     };
     let top = stack.top().as_u64();
     cpu::set_overflow_sp(top);
-    // Release: the overflow stub reads it with a plain `ldr` on this CPU, so
-    // program order orders that read; the Release also orders a reader on another CPU.
+    // Release: pairs with the Acquire load (`ldar`) in the overflow stub's
+    // global fallback, which any CPU whose own overflow SP is 0 takes.
     VIBEOS_OVERFLOW_SP.store(top, Ordering::Release);
     match TryBox::try_new(stack) {
         Ok(b) => {
