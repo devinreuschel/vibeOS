@@ -56,6 +56,30 @@ pub const fn is_el1_abort(esr: u64) -> bool {
     matches!(esr_ec(esr), EC_DABT_EL1 | EC_IABT_EL1)
 }
 
+/// The mnemonic of a fatal synchronous exception in a `#<name>` dump line,
+/// from its class (DESIGN §11.5): instruction and data aborts, the two
+/// alignment faults, debug, and `UNDEF` for every other class.
+pub const fn fault_mnemonic(esr: u64) -> &'static str {
+    match esr_ec(esr) {
+        0x20 | 0x21 => "IABT",
+        0x22 => "PCALIGN",
+        0x24 | 0x25 => "DABT",
+        0x26 => "SPALIGN",
+        0x30..=0x3C => "DEBUG",
+        _ => "UNDEF",
+    }
+}
+
+/// The address a ring-3 fault reports: `far` for a class that sets
+/// `FAR_EL1` (aborts, alignment faults, watchpoints, DDI0487 D17.2.40),
+/// else `pc`, since `FAR_EL1` is UNKNOWN for `udf`, `brk` and the rest.
+pub const fn fault_addr(esr: u64, far: u64, pc: u64) -> u64 {
+    match esr_ec(esr) {
+        0x20 | 0x21 | 0x22 | 0x24 | 0x25 | 0x26 | 0x34 | 0x35 => far,
+        _ => pc,
+    }
+}
+
 /// Slot kind: bits [1:0] of the 16-entry index.
 const fn slot_group(slot: u8) -> u8 {
     slot & 3
@@ -219,6 +243,40 @@ mod tests {
 
     fn esr(ec: u8) -> u64 {
         u64::from(ec) << ESR_EC_SHIFT
+    }
+
+    #[test]
+    fn fault_mnemonic_names_every_class() {
+        // Every EC from 0x00 to 0x3F maps to one dump mnemonic (DESIGN §11.5).
+        for ec in 0..=0x3Fu8 {
+            let want = match ec {
+                0x20 | 0x21 => "IABT",
+                0x22 => "PCALIGN",
+                0x24 | 0x25 => "DABT",
+                0x26 => "SPALIGN",
+                0x30..=0x3C => "DEBUG",
+                _ => "UNDEF",
+            };
+            assert_eq!(fault_mnemonic(esr(ec)), want, "EC {ec:#x}");
+        }
+        // The ISS bits do not change the class.
+        assert_eq!(fault_mnemonic(esr(0x25) | 0x1FF_FFFF), "DABT");
+    }
+
+    #[test]
+    fn fault_addr_takes_far_only_where_far_is_valid() {
+        const FAR: u64 = 0xdead_0000;
+        const PC: u64 = 0x40_1000;
+        for ec in 0..=0x3Fu8 {
+            let want = match ec {
+                0x20 | 0x21 | 0x22 | 0x24 | 0x25 | 0x26 | 0x34 | 0x35 => FAR,
+                _ => PC,
+            };
+            assert_eq!(fault_addr(esr(ec), FAR, PC), want, "EC {ec:#x}");
+        }
+        // `udf` (EC 0x00) and `brk` (EC 0x3C) report the pc, not a stale FAR.
+        assert_eq!(fault_addr(esr(0x00), FAR, PC), PC);
+        assert_eq!(fault_addr(esr(0x3C), FAR, PC), PC);
     }
 
     fn esr_iss(ec: u8, iss: u32) -> u64 {

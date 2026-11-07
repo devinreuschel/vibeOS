@@ -424,7 +424,6 @@ fn exception_regs(frame: &InterruptFrame, rbp: u64) -> CrashRegs {
 /// An exception dump's first line, `vibeOS: ` and what `f` builds, formatted
 /// once: written as [`line`] writes, and recorded without the prefix for the
 /// core tool (`record_panic`) with the interrupted `regs`.
-#[cfg(target_arch = "x86_64")]
 fn first_line(regs: CrashRegs, f: impl FnOnce(&mut StackBuf<'_>)) {
     const PREFIX: &[u8] = b"vibeOS: ";
     let mut buf = [0u8; LINE_CAP];
@@ -455,6 +454,23 @@ pub fn exception_halt(
         frame_fields(w, frame, err, cr2);
     });
     dump_common(frame.rip, rbp, frame.rsp, frame.rflags);
+    finish();
+}
+
+#[cfg(target_arch = "aarch64")]
+/// An exception dump for a context with no x86 hardware frame (aarch64's
+/// `TrapFrame`): `args` is the first line after `vibeOS: `, and `regs` the
+/// interrupted registers. Shares [`exception_halt`]'s dump and halt.
+pub fn exception_halt_args(regs: CrashRegs, args: fmt::Arguments<'_>) -> ! {
+    begin_dump(regs);
+    first_line(regs, |w| {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "`StackBuf` truncates and never fails, so only a formatter's own error lands here, leaving a shorter line and nothing to act on (DESIGN §2.5)"
+        )]
+        let _ = w.write_fmt(args);
+    });
+    dump_common(regs.rip, regs.rbp, regs.rsp, regs.rflags);
     finish();
 }
 

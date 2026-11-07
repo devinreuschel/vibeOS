@@ -5,12 +5,14 @@
 //! (DESIGN §11.5).
 
 use core::arch::{asm, global_asm};
+use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use crate::arch::current::UserFrame;
 use vibeos::arch::aarch64::trap::{
-    self, SLOT_CURRENT_SPX_IRQ, SLOT_LOWER_A64_IRQ, SLOT_LOWER_A64_SYNC,
+    self, SLOT_CURRENT_SPX_IRQ, SLOT_LOWER_A64_IRQ, SLOT_LOWER_A64_SYNC, fault_mnemonic,
 };
+use vibeos::irq::stop::CrashRegs;
 use vibeos::kalloc::TryBox;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::proc::uaccess::untag_user_addr;
@@ -456,14 +458,32 @@ extern "C" fn vibeos_halt_slot(slot: u64) -> ! {
         asm!("mrs {0}, esr_el1", out(reg) esr, options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, elr_el1", out(reg) elr, options(nomem, nostack, preserves_flags));
     }
-    crate::marker!(
-        "vibeOS: panic: sync esr={:#x} far={:#x} elr={:#x} slot={}",
-        esr,
-        far,
+    halt_regs(
         elr,
-        slot
+        crate::arch::current::stack_pointer(),
+        crate::arch::current::frame_pointer(),
+        crate::arch::current::irq_flags(),
+        format_args!("panic: sync esr={esr:#x} far={far:#x} elr={elr:#x} slot={slot}"),
     );
-    cpu::halt();
+}
+
+/// The dump and halt for a fatal exception on the stack that took it, with
+/// the interrupted `pc`, `sp`, `fp` and `pstate` (DESIGN §11.5 rule 6).
+fn halt_regs(pc: u64, sp: u64, fp: u64, pstate: u64, args: fmt::Arguments<'_>) -> ! {
+    crate::panic::exception_halt_args(
+        CrashRegs {
+            rip: pc,
+            rsp: sp,
+            rbp: fp,
+            rflags: pstate,
+        },
+        args,
+    )
+}
+
+/// [`halt_regs`] for a trap frame: the interrupted registers the frame saved.
+fn halt_frame(frame: &TrapFrame, args: fmt::Arguments<'_>) -> ! {
+    halt_regs(frame.elr, frame.sp, frame.x[29], frame.spsr, args)
 }
 
 #[unsafe(no_mangle)]
@@ -492,15 +512,15 @@ extern "C" fn vibeos_overflow_rust(slot: u64) -> ! {
         }
     }
     let tid = crate::arch::current_tcb() as u64;
-    crate::marker!(
-        "vibeOS: panic: stack overflow far={:#x} esr={:#x} elr={:#x} sp={:#x} thread={:#x}",
-        far,
-        esr,
+    halt_regs(
         elr,
         stash,
-        tid
+        crate::arch::current::frame_pointer(),
+        crate::arch::current::irq_flags(),
+        format_args!(
+            "panic: stack overflow far={far:#x} esr={esr:#x} elr={elr:#x} sp={stash:#x} thread={tid:#x}"
+        ),
     );
-    cpu::halt();
 }
 
 #[cfg(feature = "kernel_tests")]
@@ -524,18 +544,16 @@ extern "C" fn vibeos_vector_rust(frame: &mut TrapFrame) {
             crate::arch::aarch64::gic::handle_irq();
         }
         TrapKind::Fiq | TrapKind::SError => {
-            crate::marker!(
-                "vibeOS: panic: #{} esr={:#x} far={:#x} elr={:#x}",
-                if matches!(kind, TrapKind::Fiq) {
-                    "FIQ"
-                } else {
-                    "SERROR"
-                },
-                frame.esr,
-                frame.far,
-                frame.elr
+            let name = if matches!(kind, TrapKind::Fiq) {
+                "FIQ"
+            } else {
+                "SERROR"
+            };
+            let (esr, far, elr) = (frame.esr, frame.far, frame.elr);
+            halt_frame(
+                frame,
+                format_args!("panic: #{name} esr={esr:#x} far={far:#x} elr={elr:#x}"),
             );
-            cpu::halt();
         }
         _ => handle_sync(frame, kind),
     }
@@ -596,23 +614,25 @@ fn handle_sync(frame: &mut TrapFrame, kind: TrapKind) {
                 frame.elr = frame.elr.wrapping_add(4);
                 return;
             }
-            crate::marker!(
-                "vibeOS: panic: sync esr={:#x} far={:#x} elr={:#x} slot={}",
-                frame.esr,
-                frame.far,
-                frame.elr,
-                frame.slot
+            halt_frame(
+                frame,
+                format_args!(
+                    "panic: sync esr={:#x} far={:#x} elr={:#x} slot={}",
+                    frame.esr, frame.far, frame.elr, frame.slot
+                ),
             );
-            cpu::halt();
         }
         Ring3Action::Signal { .. } => {
-            crate::marker!(
-                "vibeOS: panic: #DABT esr={:#x} far={:#x} elr={:#x}",
-                frame.esr,
-                frame.far,
-                frame.elr
+            halt_frame(
+                frame,
+                format_args!(
+                    "panic: #{} esr={:#x} far={:#x} elr={:#x}",
+                    fault_mnemonic(frame.esr),
+                    frame.esr,
+                    frame.far,
+                    frame.elr
+                ),
             );
-            cpu::halt();
         }
     }
 }
@@ -628,18 +648,21 @@ extern "C" fn vibeos_el0_rust(frame: &mut UserFrame, slot: u64, esr: u64, far: u
             cpu::daif_set_all();
         }
         TrapKind::Fiq | TrapKind::SError => {
-            crate::marker!(
-                "vibeOS: panic: #{} esr={:#x} far={:#x} elr={:#x}",
-                if matches!(kind, TrapKind::Fiq) {
-                    "FIQ"
-                } else {
-                    "SERROR"
-                },
-                esr,
-                far,
-                frame.pc
+            let name = if matches!(kind, TrapKind::Fiq) {
+                "FIQ"
+            } else {
+                "SERROR"
+            };
+            halt_regs(
+                frame.pc,
+                frame.sp,
+                frame.x[29],
+                frame.pstate,
+                format_args!(
+                    "panic: #{name} esr={esr:#x} far={far:#x} elr={:#x}",
+                    frame.pc
+                ),
             );
-            cpu::halt();
         }
         TrapKind::Syscall => {
             cpu::daif_clear_all();
@@ -656,12 +679,12 @@ extern "C" fn vibeos_el0_rust(frame: &mut UserFrame, slot: u64, esr: u64, far: u
                 return;
             }
             cpu::daif_clear_all();
-            crate::proc_init::try_user_trap(kind, frame.pc, far);
+            crate::proc_init::try_user_trap(kind, frame.pc, trap::fault_addr(esr, far, frame.pc));
             cpu::daif_set_all();
         }
         other => {
             cpu::daif_clear_all();
-            crate::proc_init::try_user_trap(other, frame.pc, far);
+            crate::proc_init::try_user_trap(other, frame.pc, trap::fault_addr(esr, far, frame.pc));
             cpu::daif_set_all();
         }
     }
