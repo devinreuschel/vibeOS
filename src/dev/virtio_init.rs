@@ -16,7 +16,8 @@ use vibeos::virtio::{
     COMMON_OFF_QNOTIFY, COMMON_OFF_QSEL, COMMON_OFF_QSIZE, COMMON_OFF_STATUS, DEV_RNG_LEGACY,
     DEV_RNG_MODERN, F_EVENT_IDX, F_INDIRECT_DESC, MSI_NO_VECTOR, ModernCaps, OFFER, PciCap,
     STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK, SplitLayout,
-    VENDOR_ID, VirtioError, notify_addr, pick_features, write_indirect_write,
+    VENDOR_ID, VirtioError, cap_fits, min_cap_len, notify_addr, pick_features,
+    write_indirect_write,
 };
 
 use crate::arch::{self, current::Arch};
@@ -141,7 +142,7 @@ pub(crate) fn r64(va: u64, off: u16) -> u64 {
 /// and mapped (`dev_init::claim_mem_bars`).
 pub(crate) fn region(dev: &DevRef, cap: PciCap) -> Option<u64> {
     let r = dev.resources.get(cap.bar as usize)?;
-    if (cap.offset as u64) >= r.size {
+    if !cap_fits(cap.offset, cap.length, min_cap_len(cap.cfg_type), r.size) {
         return None;
     }
     let va = dev_init::bar_va(dev, cap.bar)?;

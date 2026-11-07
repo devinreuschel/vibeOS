@@ -338,7 +338,31 @@ pub const fn queue_notify(qi: u16) -> u16 {
     qi
 }
 
-/// `notify = bar_va + cap.offset + queue_notify_off * multiplier`.
+/// Smallest `length` a capability of `cfg_type` may declare and still hold
+/// the registers the driver reads: the common config is 0x38 bytes
+/// (virtio 1.2 §4.1.4.3), a notify register 2 (§4.1.4.4), the ISR status 1
+/// (§4.1.4.5). A device config's length depends on its device, so its driver
+/// checks it, and this returns 0 for it.
+pub const fn min_cap_len(cfg_type: u8) -> u32 {
+    match cfg_type {
+        PCI_CAP_COMMON => 0x38,
+        PCI_CAP_NOTIFY => 2,
+        PCI_CAP_ISR => 1,
+        _ => 0,
+    }
+}
+
+/// Whether `[offset, offset + length)` lies inside a BAR of `bar_size` bytes,
+/// and `length` is at least `min_len`.
+pub fn cap_fits(offset: u32, length: u32, min_len: u32, bar_size: u64) -> bool {
+    length >= min_len
+        && (offset as u64)
+            .checked_add(length as u64)
+            .is_some_and(|end| end <= bar_size)
+}
+
+/// `notify = bar_va + cap.offset + queue_notify_off * multiplier`. The
+/// two-byte register must end inside `cap_length`, which must be nonzero.
 /// `None` on wrap or past `cap.length`.
 pub fn notify_addr(
     bar_va: u64,
@@ -348,7 +372,7 @@ pub fn notify_addr(
     multiplier: u32,
 ) -> Option<u64> {
     let delta = (queue_notify_off as u64).checked_mul(multiplier as u64)?;
-    if cap_length != 0 && delta >= cap_length as u64 {
+    if cap_length == 0 || delta.checked_add(2)? > cap_length as u64 {
         return None;
     }
     bar_va.checked_add(cap_offset as u64)?.checked_add(delta)
@@ -1087,6 +1111,45 @@ mod tests {
         assert_eq!(notify_addr(0x1000, 0x200, 0x1000, 1, 0), Some(0x1200));
         assert_eq!(notify_addr(0x1000, 0x10, 8, 3, 4), None);
         assert!(notify_addr(u64::MAX - 8, 16, 4, 1, 1).is_none());
+        // A zero-length cap has no register, and the last two bytes are the
+        // register: `delta == length - 1` runs past the cap.
+        assert_eq!(notify_addr(0x1000, 0x200, 0, 0, 0), None);
+        assert_eq!(notify_addr(0x1000, 0x200, 4, 1, 1), Some(0x1201));
+        assert_eq!(notify_addr(0x1000, 0x200, 4, 3, 1), None);
+        assert_eq!(notify_addr(0x1000, 0x200, 4, 0, 1), Some(0x1200));
+        assert_eq!(notify_addr(0x1000, 0x200, 4, 2, 1), Some(0x1202));
+        assert_eq!(notify_addr(0x1000, 0x200, 4, 1, 2), Some(0x1202));
+        assert_eq!(notify_addr(0x1000, 0x200, 4, 2, 2), None);
+    }
+
+    #[test]
+    fn cap_must_fit_its_bar_and_hold_its_registers() {
+        // Common config: 0x38 bytes at the end of a 0x1000-byte BAR fits.
+        assert!(cap_fits(
+            0x1000 - 0x38,
+            0x38,
+            min_cap_len(PCI_CAP_COMMON),
+            0x1000
+        ));
+        assert!(!cap_fits(
+            0x1000 - 0x37,
+            0x38,
+            min_cap_len(PCI_CAP_COMMON),
+            0x1000
+        ));
+        assert!(!cap_fits(0, 0x37, min_cap_len(PCI_CAP_COMMON), 0x1000));
+        assert!(!cap_fits(0, 0, min_cap_len(PCI_CAP_NOTIFY), 0x1000));
+        assert!(cap_fits(0xFFE, 2, min_cap_len(PCI_CAP_NOTIFY), 0x1000));
+        assert!(!cap_fits(0xFFF, 2, min_cap_len(PCI_CAP_NOTIFY), 0x1000));
+        assert!(!cap_fits(0, 0, min_cap_len(PCI_CAP_ISR), 0x1000));
+        assert!(cap_fits(u32::MAX, 0, 0, u64::MAX));
+        assert!(!cap_fits(u32::MAX, u32::MAX, 0, u32::MAX as u64));
+        assert!(!cap_fits(0, u32::MAX, 0, 0xFFFF_FFFE));
+        assert_eq!(min_cap_len(PCI_CAP_DEVICE), 0);
+    }
+
+    #[test]
+    fn queue_notify_and_parse_multiplier() {
         assert_eq!(queue_notify(0), 0);
         assert_eq!(queue_notify(3), 3);
         assert_eq!(
