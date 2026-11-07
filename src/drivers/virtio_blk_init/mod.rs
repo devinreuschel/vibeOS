@@ -202,7 +202,10 @@ fn setup(
     let common = region(dev, common_cap).ok_or(VirtioError::NoCaps)?;
     let notify_base = region(dev, notify_cap).ok_or(VirtioError::NoCaps)?;
     let isr = region(dev, isr_cap).ok_or(VirtioError::NoCaps)?;
-    let cfg = region(dev, cfg_cap).ok_or(VirtioError::NoCaps)?;
+    // The config is read up to its last field, `max_discard_sectors`.
+    let cfg = region(dev, cfg_cap)
+        .filter(|_| cfg_cap.length >= u32::from(CFG_MAX_DISCARD_SECTORS) + 4)
+        .ok_or(VirtioError::NoCaps)?;
     // Memory decode before the first touch, with bus mastering off, which
     // firmware can leave on; bus mastering only once the reset completed
     // (DESIGN §12.3).
@@ -710,7 +713,7 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
         );
         crate::virtio_mmio_init::set_queue_ready(base, true);
         if !crate::virtio_mmio_init::queue_ready(base) {
-            fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, None);
+            fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, Some(qdma));
             return Err(VirtioError::BadQueue);
         }
         vqs[qi] = Some(Vq {
