@@ -682,9 +682,10 @@ LAPIC_FALLBACK_SHARDS := test-lapic-fallback-1 test-lapic-fallback-2 test-lapic-
 LAPIC_FALLBACK_CPU ?= qemu64,-tsc-deadline
 # aarch64 env_config defaults VIBEOS_SMP to 1 (`make run`). The in-guest
 # `-smp 2` tiers must set it: AP tests skip with `no AP` at 1 CPU, and
-# those skips have no aarch64 skips.toml row (ROADMAP §11.7).
-test-kernel $(KERNEL_SHARDS) $(KERNEL_A64_PROOF): KTEST_ENV = VIBEOS_SMP=2
-test-kernel-smp4 $(KERNEL_SMP4_SHARDS) $(KERNEL_SMP4_A64_PROOF): KTEST_ENV = VIBEOS_SMP=4
+# those skips have no aarch64 skips.toml row (ROADMAP §11.7). A caller's
+# VIBEOS_SMP overrides the default of 2 or 4 these tiers set.
+test-kernel $(KERNEL_SHARDS) $(KERNEL_A64_PROOF): KTEST_ENV = VIBEOS_SMP=$(or $(VIBEOS_SMP),2)
+test-kernel-smp4 $(KERNEL_SMP4_SHARDS) $(KERNEL_SMP4_A64_PROOF): KTEST_ENV = VIBEOS_SMP=$(or $(VIBEOS_SMP),4)
 test-lapic-fallback $(LAPIC_FALLBACK_SHARDS): KTEST_ENV = VIBEOS_QEMU_CPU=$(LAPIC_FALLBACK_CPU)
 
 test-kernel: $(ISO_KTEST)
