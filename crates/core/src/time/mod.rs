@@ -432,7 +432,11 @@ impl ClockWriter {
         let d = self.counter.delta(raw, self.last_raw);
         // A delta past half the range is a read that went backward, not a
         // wrap: it counts nothing, so one such read cannot pin `ext`.
-        let d = if d > self.counter.mask() / 2 + 1 { 0 } else { d };
+        let d = if d > self.counter.mask() / 2 + 1 {
+            0
+        } else {
+            d
+        };
         self.ext = self.ext.saturating_add(d);
         self.last_raw = raw & self.counter.mask();
         self.snapshot()
