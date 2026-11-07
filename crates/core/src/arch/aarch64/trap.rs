@@ -247,17 +247,21 @@ mod tests {
 
     #[test]
     fn fault_mnemonic_names_every_class() {
-        // Every EC from 0x00 to 0x3F maps to one dump mnemonic (DESIGN §11.5).
-        for ec in 0..=0x3Fu8 {
-            let want = match ec {
-                0x20 | 0x21 => "IABT",
-                0x22 => "PCALIGN",
-                0x24 | 0x25 => "DABT",
-                0x26 => "SPALIGN",
-                0x30..=0x3C => "DEBUG",
-                _ => "UNDEF",
-            };
-            assert_eq!(fault_mnemonic(esr(ec)), want, "EC {ec:#x}");
+        // The dump mnemonic of each exception class 0x00 to 0x3F, written out
+        // here rather than derived from the match in `fault_mnemonic`
+        // (DESIGN §11.5). Index is the EC.
+        const WANT: [&str; 64] = [
+            "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF",
+            "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF",
+            "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF",
+            "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "IABT", "IABT", "PCALIGN", "UNDEF",
+            "DABT", "DABT", "SPALIGN", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF",
+            "UNDEF", "UNDEF", "UNDEF", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "DEBUG",
+            "DEBUG", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "UNDEF", "UNDEF",
+            "UNDEF",
+        ];
+        for (ec, want) in (0u8..).zip(WANT.iter()) {
+            assert_eq!(fault_mnemonic(esr(ec)), *want, "EC {ec:#x}");
         }
         // The ISS bits do not change the class.
         assert_eq!(fault_mnemonic(esr(0x25) | 0x1FF_FFFF), "DABT");

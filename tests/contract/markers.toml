@@ -608,6 +608,13 @@ source = "kernel"
 section = "§11.5"
 
 [[marker]]
+text = "#DEBUG"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.5"
+
+[[marker]]
 text = "#FIQ"
 kind = "failure"
 arch = "aarch64"
