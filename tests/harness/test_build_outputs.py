@@ -141,12 +141,12 @@ class NamedOutputsTest(unittest.TestCase):
         self.assertEqual(
             elfs,
             [
-                "build/kernels/vibeos-default.elf",
-                "build/kernels/vibeos-panic.elf",
-                "build/kernels/vibeos-ktest.elf",
+                "build/aarch64/kernels/vibeos-default.elf",
+                "build/aarch64/kernels/vibeos-panic.elf",
+                "build/aarch64/kernels/vibeos-ktest.elf",
             ],
         )
-        self.assertNotIn("build/kernels/vibeos-gp.elf", elfs)
+        self.assertNotIn("build/aarch64/kernels/vibeos-gp.elf", elfs)
 
     def test_iso_reads_only_its_own_elf(self) -> None:
         db = make_db()
