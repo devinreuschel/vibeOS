@@ -16,9 +16,9 @@ pub use chip::{
 };
 pub use its::{
     ITS_CMD_DISCARD, ITS_CMD_MAPC, ITS_CMD_MAPD, ITS_CMD_MAPTI, ITS_CMD_MOVI, ITS_CMD_SYNC,
-    ITS_MAPD_SIZE, ItsCommand, baser_entry_bytes, baser_indirect, encode_device_unmap,
-    encode_free_sequence, encode_lpi_free, gits_devbits, its_device_fits, its_event_limit,
-    rdbase_field,
+    ITS_MAPD_SIZE, ItsCommand, baser_entry_bytes, baser_indirect, baser_page_is_4k,
+    encode_device_unmap, encode_free_sequence, encode_lpi_free, gits_devbits, its_device_fits,
+    its_event_limit, rdbase_field,
 };
 
 use crate::vectors;

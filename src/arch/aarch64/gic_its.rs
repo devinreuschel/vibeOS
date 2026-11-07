@@ -5,8 +5,9 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::irq::{
-    ITS_MAPD_SIZE, IrqError, ItsCommand, baser_entry_bytes, baser_indirect, encode_device_unmap,
-    encode_lpi_free, gits_devbits, its_device_fits, its_event_limit, rdbase_field,
+    ITS_MAPD_SIZE, IrqError, ItsCommand, baser_entry_bytes, baser_indirect, baser_page_is_4k,
+    encode_device_unmap, encode_lpi_free, gits_devbits, its_device_fits, its_event_limit,
+    rdbase_field,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::log::Level;
@@ -102,7 +103,10 @@ pub(super) unsafe fn init_its(g: &Gic, its: u64, rd: u64) {
     // SAFETY: ITS tables and command queue, never freed; `DEV_TABLE` is set
     // once, on the BSP before SMP (invariant I22). established here.
     unsafe {
-        let dev = init_its_basers(its);
+        let Some(dev) = init_its_basers(its) else {
+            crate::klog!(Level::Error, "vibeOS: gic: its left off, baser page size");
+            return;
+        };
         DEV_TABLE.set(dev);
         // Valid, write-back, Inner Shareable. Size 0 = one 4 KiB page (IHI 0069G).
         let cbaser = (cmd & ITS_PA_MASK) | (1u64 << 63) | ITS_TABLE_WB_IS;
@@ -117,11 +121,13 @@ pub(super) unsafe fn init_its(g: &Gic, its: u64, rd: u64) {
 }
 
 /// Program each implemented GITS_BASER (Devices and Collections). Returns
-/// the geometry of the device table, `bytes` 0 when none was allocated.
+/// the geometry of the device table, `bytes` 0 when none was allocated, and
+/// `None` when the ITS reads back a page size other than the 4 KiB the
+/// kernel allocated. The caller then leaves the ITS disabled.
 ///
 /// # Safety
 /// `its` is the mapped ITS; the buddy is up.
-unsafe fn init_its_basers(its: u64) -> DevTable {
+unsafe fn init_its_basers(its: u64) -> Option<DevTable> {
     // SAFETY: GITS_TYPER is a read-only ITS register. established here.
     let devbits = gits_devbits(unsafe { mmio64(its, GITS_TYPER) });
     let mut dev = DevTable {
@@ -149,6 +155,9 @@ unsafe fn init_its_basers(its: u64) -> DevTable {
             // SAFETY: as `init_its_basers`. established here.
             let read = unsafe { mmio64(its, off) };
             note_shareability(val, read);
+            if !baser_page_is_4k(read) {
+                return None;
+            }
             clean_table_if_needed(pa, 4096);
             if ty == GITS_BASER_TYPE_DEVICE && dev.bytes == 0 {
                 if baser_indirect(read) {
@@ -166,7 +175,7 @@ unsafe fn init_its_basers(its: u64) -> DevTable {
         }
         n += 1;
     }
-    dev
+    Some(dev)
 }
 
 /// One ITT page per DeviceID. EventIDs are per-device (ITS MSI data).

@@ -56,6 +56,13 @@ pub const fn baser_indirect(baser: u64) -> bool {
     baser & (1u64 << 62) != 0
 }
 
+/// GITS_BASER.Page_Size (bits [9:8]) reads back as 0b00 when the ITS kept the
+/// 4 KiB pages the kernel wrote. Any other value means the ITS uses a larger
+/// page than the one allocated (IHI 0069G).
+pub const fn baser_page_is_4k(baser: u64) -> bool {
+    (baser >> 8) & 0x3 == 0
+}
+
 /// DeviceID bits the ITS implements: GITS_TYPER.Devbits (bits [17:13]) plus
 /// one (IHI 0069G).
 pub const fn gits_devbits(typer: u64) -> u32 {
@@ -389,6 +396,18 @@ mod tests {
         assert!(!baser_indirect(1u64 << 63));
         assert!(!baser_indirect((0x7u64 << 56) | (0x7u64 << 48)));
         assert!(!baser_indirect((1u64 << 61) - 1));
+    }
+
+    #[test]
+    fn baser_page_size_must_read_back_4k() {
+        // Page_Size is bits [9:8]: 0b00 is 4 KiB, 0b01 16 KiB, 0b10 64 KiB.
+        assert!(baser_page_is_4k(0));
+        assert!(baser_page_is_4k(
+            (1u64 << 63) | (1u64 << 62) | (0x7u64 << 56)
+        ));
+        assert!(!baser_page_is_4k(1u64 << 8));
+        assert!(!baser_page_is_4k(2u64 << 8));
+        assert!(!baser_page_is_4k(3u64 << 8));
     }
 
     #[test]
