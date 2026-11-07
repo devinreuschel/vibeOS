@@ -395,7 +395,8 @@ pub unsafe fn init_full() {
     };
     let top = stack.top().as_u64();
     cpu::set_overflow_sp(top);
-    // Release: pairs with the Acquire load in the overflow stub.
+    // Release: the overflow stub reads it with a plain `ldr` on this CPU, so
+    // program order orders that read; the Release also orders a reader on another CPU.
     VIBEOS_OVERFLOW_SP.store(top, Ordering::Release);
     match TryBox::try_new(stack) {
         Ok(b) => {

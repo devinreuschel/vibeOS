@@ -789,7 +789,6 @@ pub(crate) fn read_counter(id: ClocksourceId) -> Option<u64> {
 
 /// Timer interrupts CPU 0 has taken since `time_init::init`.
 pub fn ticks() -> u64 {
-    // Relaxed: as in `on_hw_tick`.
     // Relaxed: a count; pairs with nothing.
     STATE
         .try_get()

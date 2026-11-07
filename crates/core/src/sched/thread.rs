@@ -312,9 +312,8 @@ impl OnCpu {
     /// The incoming side of a switch marks the thread on this CPU.
     #[inline(always)]
     pub fn set(&self) {
-        // Relaxed (P10-S08): pairs with nothing; the scheduler lock, held
-        // across the switch's bookkeeping, orders this store with every
-        // reader that could see the thread Dead.
+        // Relaxed (P10-S08): pairs with nothing. The clear that a reader
+        // acquires is `OnCpu::clear`, which runs after the thread's last access.
         self.0.store(true, Ordering::Relaxed);
     }
 
