@@ -428,8 +428,12 @@ pub fn dump_ranges_to(w: &mut impl Write) -> core::fmt::Result {
                 flags.0
             );
         };
-        // The kernel root holds only the kernel half: TTBR1 on aarch64 has
-        // no low slots, and `index` ignores the top bits.
+        // CR3 on x86_64 also maps the low half: the identity window until
+        // `teardown_identity`, then the trampoline page it keeps.
+        #[cfg(target_arch = "x86_64")]
+        mapper.walk_ranges(VirtAddr(0), VirtAddr(0x0000_8000_0000_0000), &mut visit);
+        // TTBR1 on aarch64 holds only the kernel half: it has no low slots,
+        // and `index` ignores the top bits.
         mapper.walk_ranges(
             VirtAddr(Arch::KERNEL_VA_START),
             VirtAddr(u64::MAX),
