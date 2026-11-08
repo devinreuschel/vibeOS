@@ -1910,6 +1910,104 @@ def rule_matrix_artifact_names(tree: Tree) -> list[Problem]:
     return out
 
 
+BUILD_OUT_RE = re.compile(
+    r"^BUILD_OUT\s*:=\s*\$\(if \$\(filter aarch64,\$\(ARCH\)\),([^,()\s]+),([^,()\s]+)\)\s*$",
+    re.M,
+)
+# A path under the Makefile's BUILD_OUT: kernel ELFs, user programs, initrds,
+# ISOs and their staging roots, at build/ or build/aarch64/.
+ARCH_OUTPUT_RE = re.compile(
+    r"build/(?:(?P<sub>aarch64)/)?"
+    r"(?:kernels(?:/.*)?|user(?:/.*)?|iso_root[^/]*(?:/.*)?|initrd[^/]*\.fat"
+    r"|vibeos[^/]*\.iso(?:\.xorriso-version)?)"
+)
+_EXPR = re.compile(r"\$\{\{\s*([^{}]*?)\s*\}\}")
+
+
+def build_out(makefile: str) -> dict[str, str] | None:
+    """The Makefile's BUILD_OUT for each ARCH, or None if its line is not the known shape."""
+    m = BUILD_OUT_RE.search(makefile)
+    if m is None:
+        return None
+    return {"aarch64": m.group(1), "x86_64": m.group(2)}
+
+
+def _bind_expr(text: str, combo: dict[str, str]) -> str:
+    """`text` with each `${{ matrix.<key> }}` replaced by the leg's value."""
+    return _EXPR.sub(lambda m: _bind_matrix(m.group(1), combo), text)
+
+
+def _job_arch(wf: Node, job: Node, combo: dict[str, str]) -> str:
+    """The ARCH a leg's `make` sees: the job's `env.ARCH`, else the workflow's,
+    bound to the leg, else the Makefile's default."""
+    for scope in (job, wf):
+        env = scope.get("env")
+        arch = env.get("ARCH") if env is not None else None
+        if arch is not None and arch.value is not None:
+            return _bind_expr(arch.value, combo)
+    return "x86_64"
+
+
+def rule_arch_output_paths(tree: Tree) -> list[Problem]:
+    """An upload of a kernel, user program, initrd or ISO names it under the
+    Makefile's BUILD_OUT for the ARCH its leg builds with: build/ for x86_64,
+    build/aarch64/ for aarch64. A path under the other one finds no file, which
+    `if-no-files-found: error` fails, or uploads the other arch's image."""
+    out: list[Problem] = []
+    outs: dict[str, str] | None = None
+    for path, wf in tree.workflows.items():
+        for job in _jobs(wf):
+            strategy = job.get("strategy")
+            matrix = strategy.get("matrix") if strategy is not None else None
+            combos = _expand_matrix(matrix) if matrix is not None else [{}]
+            if combos is None:
+                continue
+            steps = job.get("steps")
+            job_if = _if_text(job)
+            for step in steps.items if steps is not None else []:
+                uses = step.get("uses")
+                if uses is None or not (uses.value or "").startswith("actions/upload-artifact@"):
+                    continue
+                with_ = step.get("with")
+                p = with_.get("path") if with_ is not None else None
+                if p is None:
+                    continue
+                raw = (p.value or "").split("\n") if p.kind == "scalar" else p.scalars()
+                step_if = _if_text(step)
+                seen: set[tuple[str, str]] = set()
+                for combo in combos:
+                    if not _if_allows(job_if, combo) or not _if_allows(step_if, combo):
+                        continue
+                    arch = _job_arch(wf, job, combo)
+                    for entry in raw:
+                        e = _bind_expr(entry.strip(), combo)
+                        while e.startswith("./"):
+                            e = e[2:]
+                        m = ARCH_OUTPUT_RE.fullmatch(e)
+                        if m is None:
+                            continue
+                        if outs is None:
+                            outs = build_out(tree.makefile)
+                            if outs is None:
+                                msg = "no `BUILD_OUT := $(if $(filter aarch64,$(ARCH)),..)` line"
+                                return [Problem("Makefile", 1, "arch_output_paths", msg)]
+                        want = outs.get(arch)
+                        got = "build/aarch64" if m.group("sub") else "build"
+                        if want is None or got == want or (arch, e) in seen:
+                            continue
+                        seen.add((arch, e))
+                        out.append(
+                            Problem(
+                                path,
+                                p.line,
+                                "arch_output_paths",
+                                f"job `{job.key}` uploads {e!r} on its ARCH={arch} leg, "
+                                f"but the Makefile builds that arch's outputs under {want}/",
+                            )
+                        )
+    return out
+
+
 RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_no_expr_in_run,
     rule_aarch64_arm,
@@ -1937,6 +2035,7 @@ RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_release_profile,
     rule_no_core_upload_with_secrets,
     rule_matrix_artifact_names,
+    rule_arch_output_paths,
 ]
 
 
