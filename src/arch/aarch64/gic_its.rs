@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use vibeos::irq::{
     ITS_MAPD_SIZE, IrqError, ItsCommand, baser_entry_bytes, baser_indirect, baser_page_is_4k,
     encode_device_unmap, encode_lpi_free, gits_devbits, its_device_fits, its_event_limit,
-    rdbase_field,
+    its_maps_event, rdbase_field,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::log::Level;
@@ -273,13 +273,14 @@ fn lpi_slot(hwirq: u32) -> Option<usize> {
     if slot >= LPI_SLOTS { None } else { Some(slot) }
 }
 
-/// Bind `hwirq` as the next EventID on `device_id`. No ITS is `Ok`:
-/// GICv2 still has a v2m SPI. Past the MAPD size is [`IrqError::Exhausted`].
+/// Bind `hwirq` as the next EventID on `device_id`. No ITS, or a hwirq that
+/// is not an LPI, is `Ok`: a v2m SPI needs no ITS entry. An LPI with the ITS
+/// off is [`IrqError::NoRoute`]; past the MAPD size is [`IrqError::Exhausted`].
 pub fn map_its_event(device_id: u32, hwirq: u32) -> Result<(), IrqError> {
     let Some(g) = gic() else { return Ok(()) };
     let Some(its) = g.its else { return Ok(()) };
-    if !its_live() {
-        return Err(IrqError::NoRoute);
+    if !its_maps_event(hwirq, its_live())? {
+        return Ok(());
     }
     let Some(slot) = lpi_slot(hwirq) else {
         return Err(IrqError::BadVector);

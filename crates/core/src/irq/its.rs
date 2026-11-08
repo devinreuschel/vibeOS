@@ -4,6 +4,9 @@
 //! 32 bytes, four little-endian doublewords, as the architecture
 //! specification defines them.
 
+use super::chip::IrqError;
+use super::gic::is_lpi;
+
 /// One 32-byte ITS command (IHI 0069G).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ItsCommand {
@@ -88,6 +91,19 @@ pub const fn its_device_fits(
     };
     let id = device_id as u64;
     id < entries && id < id_limit
+}
+
+/// Whether `map_its_event` binds `hwirq` to an EventID. An LPI needs a live
+/// ITS; any other INTID (a GICv2m SPI) has no ITS entry, so it is `Ok(false)`
+/// whether or not the ITS is live.
+pub const fn its_maps_event(hwirq: u32, its_live: bool) -> Result<bool, IrqError> {
+    if !is_lpi(hwirq) {
+        Ok(false)
+    } else if its_live {
+        Ok(true)
+    } else {
+        Err(IrqError::NoRoute)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -347,6 +363,15 @@ mod tests {
         let cmds = encode_device_unmap(1, 3).unwrap();
         assert_eq!(cmds[0], ItsCommand::mapd(1, 0, 0, false).unwrap());
         assert_eq!(cmds[1], ItsCommand::sync(3));
+    }
+
+    #[test]
+    fn its_maps_event_leaves_spis_to_v2m() {
+        // A v2m SPI is not the ITS's, live or not.
+        assert_eq!(its_maps_event(64, false), Ok(false));
+        assert_eq!(its_maps_event(64, true), Ok(false));
+        assert_eq!(its_maps_event(8192, true), Ok(true));
+        assert_eq!(its_maps_event(8192, false), Err(IrqError::NoRoute));
     }
 
     #[test]
