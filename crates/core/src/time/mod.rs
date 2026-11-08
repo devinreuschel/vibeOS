@@ -430,10 +430,12 @@ impl ClockWriter {
     /// wrap keeps every wrap counted.
     pub fn advance(&mut self, raw: u64) -> Snapshot {
         let d = self.counter.delta(raw, self.last_raw);
-        // A delta past half the range is a read that went backward, not a
-        // wrap: it counts nothing and moves no state, so one such read
-        // cannot pin `ext` or rewind `last_raw`.
-        if d > self.counter.mask() / 2 + 1 {
+        // On a counter of 56 bits or more, which no gap between reads gets
+        // half way round, a delta past half the range is a read that went
+        // backward, not a wrap: it counts nothing and moves no state, so one
+        // such read cannot pin `ext` or rewind `last_raw`. On a narrower
+        // counter it is a late forward read inside one wrap and counts.
+        if self.counter.width >= 56 && d > self.counter.mask() / 2 + 1 {
             return self.snapshot();
         }
         self.ext = self.ext.saturating_add(d);
@@ -1241,6 +1243,18 @@ mod tests {
         // `last_raw`: the next forward read still counts from 1_500.
         assert_eq!(w.advance(u64::MAX - 7).ns, c.scale.to_ns(500));
         assert_eq!(w.advance(1_600).ns, c.scale.to_ns(600));
+    }
+
+    #[test]
+    fn wrap24_late_read_inside_one_wrap_counts_in_full() {
+        let c = Counter::new(ClocksourceId::AcpiPm, PM_TIMER_HZ, 24).unwrap();
+        let wrap = 1u64 << 24;
+        let late = wrap / 4 * 3;
+        let mut w = ClockWriter::new(c, 0x10, 0);
+        // A read three quarters of a wrap on is a late forward read on a
+        // counter this narrow, not a backward one.
+        assert_eq!(w.advance(0x10 + late).ns, c.scale.to_ns(late));
+        assert_eq!(w.advance(0x10 + late + 100).ns, c.scale.to_ns(late + 100));
     }
 
     #[test]
