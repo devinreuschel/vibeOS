@@ -71,11 +71,13 @@ pub const fn fault_mnemonic(esr: u64) -> &'static str {
 }
 
 /// The address a ring-3 fault reports: `far` for a class that sets
-/// `FAR_EL1` (aborts, alignment faults, watchpoints, DDI0487 D17.2.40),
-/// else `pc`, since `FAR_EL1` is UNKNOWN for `udf`, `brk` and the rest.
-pub const fn fault_addr(esr: u64, far: u64, pc: u64) -> u64 {
+/// `FAR_EL1` (aborts, the PC alignment fault, watchpoints, DDI0487
+/// D17.2.40), `sp` for the SP alignment fault, else `pc`, since `FAR_EL1`
+/// is UNKNOWN for the SP alignment fault, `udf`, `brk` and the rest.
+pub const fn fault_addr(esr: u64, far: u64, pc: u64, sp: u64) -> u64 {
     match esr_ec(esr) {
-        0x20 | 0x21 | 0x22 | 0x24 | 0x25 | 0x26 | 0x34 | 0x35 => far,
+        0x20 | 0x21 | 0x22 | 0x24 | 0x25 | 0x34 | 0x35 => far,
+        0x26 => sp,
         _ => pc,
     }
 }
@@ -271,16 +273,20 @@ mod tests {
     fn fault_addr_takes_far_only_where_far_is_valid() {
         const FAR: u64 = 0xdead_0000;
         const PC: u64 = 0x40_1000;
+        const SP: u64 = 0x7fff_fff9;
         for ec in 0..=0x3Fu8 {
             let want = match ec {
-                0x20 | 0x21 | 0x22 | 0x24 | 0x25 | 0x26 | 0x34 | 0x35 => FAR,
+                0x20 | 0x21 | 0x22 | 0x24 | 0x25 | 0x34 | 0x35 => FAR,
+                0x26 => SP,
                 _ => PC,
             };
-            assert_eq!(fault_addr(esr(ec), FAR, PC), want, "EC {ec:#x}");
+            assert_eq!(fault_addr(esr(ec), FAR, PC, SP), want, "EC {ec:#x}");
         }
-        // `udf` (EC 0x00) and `brk` (EC 0x3C) report the pc, not a stale FAR.
-        assert_eq!(fault_addr(esr(0x00), FAR, PC), PC);
-        assert_eq!(fault_addr(esr(0x3C), FAR, PC), PC);
+        // `udf` (EC 0x00) and `brk` (EC 0x3C) report the pc, and the SP
+        // alignment fault (EC 0x26) the sp, not a stale FAR.
+        assert_eq!(fault_addr(esr(0x00), FAR, PC, SP), PC);
+        assert_eq!(fault_addr(esr(0x3C), FAR, PC, SP), PC);
+        assert_eq!(fault_addr(esr(0x26), FAR, PC, SP), SP);
     }
 
     fn esr_iss(ec: u8, iss: u32) -> u64 {
