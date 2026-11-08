@@ -26,10 +26,11 @@ use vibeos::virtio::{
     STATUS_FEATURES_OK, SplitLayout, VENDOR_ID, VirtioError, notify_addr,
 };
 use vibeos::virtio_blk::{
-    CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD,
-    F_FLUSH, F_MQ, F_RO, F_TOPOLOGY, MAX_DISKS, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT, disk_name,
-    exhausted_fails_device, fit_config, logical_capacity, map_status, nq_from_config, pack_discard,
-    pack_header, pick_blk_size, pick_features, queue_size, refuse_read_only, sector_for_lba,
+    CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_BLK_SIZE,
+    F_DISCARD, F_FLUSH, F_MQ, F_RO, F_TOPOLOGY, MAX_DISKS, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT,
+    disk_name, exhausted_fails_device, fit_config, logical_capacity, map_status, nq_from_config,
+    pack_discard, pack_header, pick_blk_size, pick_features, queue_size, refuse_read_only,
+    sector_for_lba,
 };
 
 use crate::arch::{self, current::Arch};
@@ -242,7 +243,11 @@ fn setup(
     }
 
     let cap_512 = r64(cfg, CFG_CAPACITY);
-    let cfg_bs = r32(cfg, CFG_BLK_SIZE);
+    let cfg_bs = if feat & F_BLK_SIZE != 0 {
+        r32(cfg, CFG_BLK_SIZE)
+    } else {
+        0
+    };
     let Some(blk_size) = pick_blk_size(feat, cfg_bs) else {
         crate::klog!(
             vibeos::log::Level::Error,
@@ -278,7 +283,11 @@ fn setup(
         blk.max_discard
             .store(r32(cfg, CFG_MAX_DISCARD_SECTORS), Ordering::Release);
     }
-    let cfg_nq = r16(cfg, CFG_NUM_QUEUES);
+    let cfg_nq = if feat & F_MQ != 0 {
+        r16(cfg, CFG_NUM_QUEUES)
+    } else {
+        1
+    };
     let common_nq = r16(common, COMMON_OFF_NUM_QUEUES);
     let offered = nq_from_config(feat, cfg_nq, common_nq);
     let nq = offered.min(online_cpus()).min(MAX_VQ as u16).max(1) as usize;
@@ -598,7 +607,11 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
 
     let cfg = crate::virtio_mmio_init::config_va(base);
     let cap_512 = r64(cfg, CFG_CAPACITY);
-    let cfg_bs = r32(cfg, CFG_BLK_SIZE);
+    let cfg_bs = if feat & F_BLK_SIZE != 0 {
+        r32(cfg, CFG_BLK_SIZE)
+    } else {
+        0
+    };
     let Some(blk_size) = pick_blk_size(feat, cfg_bs) else {
         fail_mmio(base, &[], 0, None, &mut vqs, None);
         return Err(VirtioError::Failed);
@@ -629,7 +642,11 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
         blk.max_discard
             .store(r32(cfg, CFG_MAX_DISCARD_SECTORS), Ordering::Release);
     }
-    let cfg_nq = r16(cfg, CFG_NUM_QUEUES);
+    let cfg_nq = if feat & F_MQ != 0 {
+        r16(cfg, CFG_NUM_QUEUES)
+    } else {
+        1
+    };
     let offered = nq_from_config(feat, cfg_nq, MAX_VQ as u16);
     let nq = offered.min(online_cpus()).min(MAX_VQ as u16).max(1) as usize;
 
