@@ -524,7 +524,10 @@ where
     fn fill(&mut self, span: Range<u64>) {
         self.part = 0;
         self.npart = 0;
-        let holes = self.holes.clone();
+        // Borrowed, not copied: this runs under `pci_init::map_mmio` on
+        // the 16 KiB bootstrap stack (DESIGN §4.5).
+        let holes = &self.holes;
+        let parts = &mut self.parts;
         let nh = self.nh;
         let mut n = 0usize;
         let mut overflow = false;
@@ -532,7 +535,7 @@ where
             span,
             || holes.iter().take(nh).cloned(),
             |p| {
-                if let Some(slot) = self.parts.get_mut(n) {
+                if let Some(slot) = parts.get_mut(n) {
                     *slot = p;
                     n = n.saturating_add(1);
                 } else {
