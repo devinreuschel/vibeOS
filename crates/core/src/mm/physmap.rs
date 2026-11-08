@@ -98,6 +98,24 @@ pub const fn phys_in_slot(slot: PhysmapSlot, offset: u64, phys: u64) -> bool {
     }
 }
 
+/// Whether `[phys, phys+len)` ends at or below `limit` without wrapping.
+pub const fn phys_range_below(phys: u64, len: u64, limit: u64) -> bool {
+    match phys.checked_add(len) {
+        Some(end) => end <= limit,
+        None => false,
+    }
+}
+
+/// Whole-page bounds `[start, end)` of `[phys, phys+len)`, `end` exclusive.
+/// `None` when the range, rounded up to a page, passes the top of the 64-bit
+/// space, so a firmware-supplied `phys` near the top is refused rather than
+/// read as an empty range.
+pub fn page_bounds(phys: u64, len: u64) -> Option<(u64, u64)> {
+    let bytes = crate::paging::page_span(phys, len)?;
+    let start = phys & !(PAGE_SIZE_4K - 1);
+    Some((start, start.checked_add(bytes)?))
+}
+
 /// One coalesced physmap run: `[pa, pa+len)` at `va` with leaf `size`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PhysmapRun {
@@ -253,13 +271,13 @@ fn emit_span<F: FnMut(PhysmapRun)>(
 ) {
     while start < end {
         let rem = end - start;
-        let size = choose_size(start, rem, force_4k, have_1g);
+        let size = choose_size(offset, start, rem, force_4k, have_1g);
         let step = size.bytes();
         let mut len = step;
         while start.saturating_add(len) < end {
             let next = start + len;
             let nrem = end - next;
-            if choose_size(next, nrem, force_4k, have_1g) != size {
+            if choose_size(offset, next, nrem, force_4k, have_1g) != size {
                 break;
             }
             match len.checked_add(step) {
@@ -284,14 +302,22 @@ fn emit_span<F: FnMut(PhysmapRun)>(
     }
 }
 
-fn choose_size(pa: u64, rem: u64, force_4k: bool, have_1g: bool) -> PageSize {
+/// The leaf size for a run at physical `pa`. A leaf needs its VA aligned
+/// as well as its PA: the physmap VA is `offset + pa`, and the mapper
+/// refuses a misaligned VA, so an offset that is only 2 MiB-aligned gets
+/// 2 MiB leaves at most.
+fn choose_size(offset: u64, pa: u64, rem: u64, force_4k: bool, have_1g: bool) -> PageSize {
     if force_4k {
         return PageSize::Size4K;
     }
-    if have_1g && pa & (PAGE_SIZE_1G - 1) == 0 && rem >= PAGE_SIZE_1G {
+    let Some(va) = offset.checked_add(pa) else {
+        return PageSize::Size4K;
+    };
+    let bits = pa | va;
+    if have_1g && bits & (PAGE_SIZE_1G - 1) == 0 && rem >= PAGE_SIZE_1G {
         return PageSize::Size1G;
     }
-    if pa & (PAGE_SIZE_2M - 1) == 0 && rem >= PAGE_SIZE_2M {
+    if bits & (PAGE_SIZE_2M - 1) == 0 && rem >= PAGE_SIZE_2M {
         return PageSize::Size2M;
     }
     PageSize::Size4K
@@ -352,6 +378,29 @@ where
 mod tests {
     use super::*;
     use crate::paging::PAGE_SIZE_4K;
+
+    #[test]
+    fn phys_range_below_refuses_past_the_limit_and_wrap() {
+        let limit = 1u64 << 52;
+        assert!(phys_range_below(limit - 0x1000, 0x1000, limit));
+        assert!(!phys_range_below(limit - 0x1000, 0x1001, limit));
+        assert!(!phys_range_below(limit, 1, limit));
+        assert!(!phys_range_below(0xFFFF_FFFF_FFFF_F000, 8, limit));
+        assert!(!phys_range_below(0xFFFF_FFFF_FFFF_F800, 0x1000, limit));
+    }
+
+    #[test]
+    fn page_bounds_refuses_a_range_that_wraps_the_top() {
+        // The top page's end is past 2^64, so there are no page bounds.
+        assert_eq!(page_bounds(0xFFFF_FFFF_FFFF_F000, 8), None);
+        assert_eq!(page_bounds(0xFFFF_FFFF_FFFF_F800, 0x1000), None);
+        assert_eq!(
+            page_bounds(0xFFFF_FFFF_FFFF_E000, 0x1000),
+            Some((0xFFFF_FFFF_FFFF_E000, 0xFFFF_FFFF_FFFF_F000))
+        );
+        assert_eq!(page_bounds(0x1234, 1), Some((0x1000, 0x2000)));
+        assert_eq!(page_bounds(0x0FFF, 2), Some((0, 0x2000)));
+    }
 
     #[test]
     fn hhdm_offset_outside_slot_each_arch() {
@@ -415,6 +464,12 @@ mod tests {
         let mut runs = Vec::new();
         let w = walk_physmap(slot, offset, ram, kernel, have_1g, |r| runs.push(r));
         (w, runs)
+    }
+
+    /// Bytes the emitted runs map. Unlike `PhysmapWalk::mapped`, which the
+    /// walk takes from its clip, this counts what `emit` was handed.
+    fn total_len(runs: &[PhysmapRun]) -> u64 {
+        runs.iter().map(|r| r.len).sum()
     }
 
     fn any_pa(runs: &[PhysmapRun], pa: u64) -> bool {
@@ -634,6 +689,36 @@ mod tests {
             let want = usize::from(matches!(page, 0x1000 | 0x2000 | 0x3000 | 0x5000));
             assert_eq!(n, want, "page {page:#x} covered {n} times");
             page += PAGE_SIZE_4K;
+        }
+    }
+
+    /// A leaf's VA is `offset + pa`, so an offset that is only 2 MiB-aligned
+    /// gets no 1 GiB leaf, and one that is only 4 KiB-aligned gets no 2 MiB
+    /// leaf. Each run's VA is aligned to its size.
+    #[test]
+    fn builder_aligns_va_as_well_as_pa() {
+        let ram = 0u64..2 * PAGE_SIZE_1G;
+        let off = PHYSMAP_X86_64.start + PAGE_SIZE_2M;
+        let (_, runs) = collect(
+            PHYSMAP_X86_64,
+            off,
+            core::iter::once(ram.clone()),
+            0..0,
+            true,
+        );
+        assert_eq!(total_len(&runs), 2 * PAGE_SIZE_1G);
+        assert!(runs.iter().all(|r| r.size == PageSize::Size2M));
+        for r in &runs {
+            assert_eq!(r.va.0 & (r.size.bytes() - 1), 0, "va {:#x}", r.va.0);
+            assert_eq!(r.va.0, off + r.pa.0);
+        }
+
+        let off = PHYSMAP_X86_64.start + PAGE_SIZE_4K;
+        let (_, runs) = collect(PHYSMAP_X86_64, off, core::iter::once(ram), 0..0, true);
+        assert_eq!(total_len(&runs), 2 * PAGE_SIZE_1G);
+        assert!(runs.iter().all(|r| r.size == PageSize::Size4K));
+        for r in &runs {
+            assert_eq!(r.va.0, off + r.pa.0);
         }
     }
 

@@ -4,6 +4,8 @@
 
 use core::mem::offset_of;
 
+use crate::machine::EnableMethod;
+
 /// 64-bit `CPU_ON` (PSCI 0.2 / 1.0).
 pub const CPU_ON: u64 = 0xC400_0003;
 /// 32-bit `CPU_OFF`.
@@ -17,6 +19,29 @@ pub const SYSTEM_RESET: u64 = 0x8400_0009;
 
 /// `CPU_ON` returned this core already running.
 pub const ALREADY_ON: i64 = -4;
+
+/// PSCI `NOT_SUPPORTED` (DEN0022): returned without a call when there is no
+/// firmware description or it names no PSCI conduit.
+pub const NOT_SUPPORTED: i64 = -1;
+
+/// The SMCCC conduit a PSCI call takes (DEN0028).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Conduit {
+    Hvc,
+    Smc,
+}
+
+/// The conduit `method` names. No firmware description (`None`) and a
+/// description with no PSCI (`EnableMethod::None`) both name none. Without a
+/// `/psci` node there is no EL2 or EL3 handler, so `hvc` or `smc` would be
+/// UNDEFINED and no call may be made (DT spec, `/psci`).
+pub const fn conduit(method: Option<EnableMethod>) -> Option<Conduit> {
+    match method {
+        None | Some(EnableMethod::None) => None,
+        Some(EnableMethod::Psci { hvc: true }) => Some(Conduit::Hvc),
+        Some(EnableMethod::Psci { hvc: false }) => Some(Conduit::Smc),
+    }
+}
 
 /// `AFFINITY_INFO`: the core is on.
 pub const AFF_ON: i64 = 0;
@@ -60,6 +85,8 @@ pub struct SecondaryParam {
     pub hstr_el2: u64,
     pub mdcr_el2: u64,
     pub icc_sre_el2: u64,
+    /// Nonzero when `ICC_SRE_EL2` exists (`ID_AA64PFR0_EL1.GIC`).
+    pub icc_sre_valid: u64,
     pub sctlr_el2: u64,
     pub hcrx_el2: u64,
     pub hcrx_valid: u64,
@@ -69,7 +96,11 @@ pub struct SecondaryParam {
     pub hdfgrtr_el2: u64,
     pub hdfgwtr_el2: u64,
     pub hafgrtr_el2: u64,
+    /// Nonzero when `HAFGRTR_EL2` exists (FEAT_FGT and FEAT_AMUv1).
+    pub hafgrtr_valid: u64,
     pub fgt_valid: u64,
+    /// Nonzero when `PMUSERENR_EL0` exists (`ID_AA64DFR0_EL1.PMUVer`).
+    pub pmu_valid: u64,
     pub conduit_hvc: u64,
     pub status: u64,
 }
@@ -83,6 +114,7 @@ impl SecondaryParam {
     pub const MAIR: usize = offset_of!(Self, mair);
     pub const CNTKCTL: usize = offset_of!(Self, cntkctl);
     pub const PMUSERENR: usize = offset_of!(Self, pmuserenr);
+    pub const PMU_VALID: usize = offset_of!(Self, pmu_valid);
     pub const CPACR: usize = offset_of!(Self, cpacr);
     pub const STACK_TOP: usize = offset_of!(Self, stack_top);
     pub const CPU_PTR: usize = offset_of!(Self, cpu_ptr);
@@ -96,6 +128,7 @@ impl SecondaryParam {
     pub const HSTR_EL2: usize = offset_of!(Self, hstr_el2);
     pub const MDCR_EL2: usize = offset_of!(Self, mdcr_el2);
     pub const ICC_SRE_EL2: usize = offset_of!(Self, icc_sre_el2);
+    pub const ICC_SRE_VALID: usize = offset_of!(Self, icc_sre_valid);
     pub const SCTLR_EL2: usize = offset_of!(Self, sctlr_el2);
     pub const HCRX_EL2: usize = offset_of!(Self, hcrx_el2);
     pub const HCRX_VALID: usize = offset_of!(Self, hcrx_valid);
@@ -105,6 +138,7 @@ impl SecondaryParam {
     pub const HDFGRTR_EL2: usize = offset_of!(Self, hdfgrtr_el2);
     pub const HDFGWTR_EL2: usize = offset_of!(Self, hdfgwtr_el2);
     pub const HAFGRTR_EL2: usize = offset_of!(Self, hafgrtr_el2);
+    pub const HAFGRTR_VALID: usize = offset_of!(Self, hafgrtr_valid);
     pub const FGT_VALID: usize = offset_of!(Self, fgt_valid);
     pub const CONDUIT_HVC: usize = offset_of!(Self, conduit_hvc);
     pub const STATUS: usize = offset_of!(Self, status);
@@ -132,6 +166,7 @@ impl SecondaryParam {
             hstr_el2: 0,
             mdcr_el2: 0,
             icc_sre_el2: 0,
+            icc_sre_valid: 0,
             sctlr_el2: 0,
             hcrx_el2: 0,
             hcrx_valid: 0,
@@ -141,7 +176,9 @@ impl SecondaryParam {
             hdfgrtr_el2: 0,
             hdfgwtr_el2: 0,
             hafgrtr_el2: 0,
+            hafgrtr_valid: 0,
             fgt_valid: 0,
+            pmu_valid: 0,
             conduit_hvc: 0,
             status: 0,
         }
@@ -164,6 +201,25 @@ mod tests {
         assert_eq!(AFF_ON, 0);
         assert_eq!(AFF_OFF, 1);
         assert_eq!(AFF_ON_PENDING, 2);
+        assert_eq!(NOT_SUPPORTED, -1);
+    }
+
+    #[test]
+    fn conduit_follows_the_firmware_description() {
+        assert_eq!(conduit(Some(EnableMethod::None)), None);
+        assert_eq!(
+            conduit(Some(EnableMethod::Psci { hvc: true })),
+            Some(Conduit::Hvc)
+        );
+        assert_eq!(
+            conduit(Some(EnableMethod::Psci { hvc: false })),
+            Some(Conduit::Smc)
+        );
+    }
+
+    #[test]
+    fn no_description_names_no_conduit() {
+        assert_eq!(conduit(None), None);
     }
 
     #[test]
@@ -172,17 +228,16 @@ mod tests {
         assert_eq!(SecondaryParam::TTBR1, 8);
         assert_eq!(SecondaryParam::SCTLR, 24);
         assert_eq!(SecondaryParam::CNTKCTL, 48);
-        assert_eq!(SecondaryParam::STATUS, 32 * 8);
-        assert_eq!(core::mem::size_of::<SecondaryParam>(), 33 * 8);
+        assert_eq!(SecondaryParam::STATUS, 35 * 8);
+        assert_eq!(core::mem::size_of::<SecondaryParam>(), 36 * 8);
         assert!(core::mem::size_of::<SecondaryParam>() <= 4096);
     }
 
     #[test]
     fn computed_sysregs_are_the_202_values() {
         assert_eq!(sysreg::sctlr_el1() & 1, 1);
+        // VHE writes `cntkctl_el1` into CNTHCTL_EL2, so this is the value.
         assert_eq!(sysreg::cntkctl_el1(), 1 << 1);
-        // E2H=0 encoding. VHE writes `cntkctl_el1` into CNTHCTL_EL2.
-        assert_eq!(sysreg::cnthctl_el2(), 0b11);
         assert_eq!(sysreg::pmuserenr_el0(), 0);
         assert_eq!(sysreg::cpacr_el1() >> 20 & 0b11, 0b11);
     }

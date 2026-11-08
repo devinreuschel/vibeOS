@@ -186,6 +186,18 @@ pub const fn is_leaf(entry: u64, level: u8) -> bool {
     entry & DESC_VALID != 0 && (level == 1 || entry & DESC_PAGE == 0)
 }
 
+/// Record table page `pa` in the next free slot of `tables`, which the
+/// caller cleans to PoC before a secondary walks it. False when full: a
+/// table page left out of the list is never cleaned.
+pub fn track_table(tables: &mut [u64], n: &mut usize, pa: u64) -> bool {
+    let Some(slot) = tables.get_mut(*n) else {
+        return false;
+    };
+    *slot = pa;
+    *n += 1;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +207,17 @@ mod tests {
         physmap_flags, user_leaf_flags,
     };
     use crate::pmm::testing::Pool;
+
+    #[test]
+    fn track_table_fails_when_full() {
+        let mut tables = [0u64; 2];
+        let mut n = 0;
+        assert!(track_table(&mut tables, &mut n, 0x1000));
+        assert!(track_table(&mut tables, &mut n, 0x2000));
+        assert!(!track_table(&mut tables, &mut n, 0x3000));
+        assert_eq!((tables, n), ([0x1000, 0x2000], 2));
+        assert!(!track_table(&mut [], &mut 0, 0x1000));
+    }
 
     #[test]
     fn indexing_matches_4k_48bit() {
@@ -364,7 +387,7 @@ mod tests {
         let raw = m.leaf_raw(user).unwrap();
         assert_eq!(raw & DESC_UXN, 0);
         assert_eq!(raw & DESC_AF, DESC_AF);
-        assert_eq!(raw, raw);
+        assert_eq!(pte_phys(raw), PhysAddr(0x2000));
         let _ = PAGE_SIZE_4K;
     }
 }

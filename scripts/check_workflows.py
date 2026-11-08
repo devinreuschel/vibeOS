@@ -1512,6 +1512,7 @@ def rule_no_core_upload_with_secrets(tree: Tree) -> list[Problem]:
 
 
 ARM64_LABELS = ("ubuntu-26.04-arm",)
+ARCH_AXIS_RE = re.compile(r"matrix(?:\.arch\b|\[\s*['\"]arch['\"]\s*\])")
 BOOT_CMD = re.compile(
     r"\bmake\b.*\b(test-\S+|run)\b|\brun_(?:ktest|e2e|forensics|interactive|power)\.py\b"
 )
@@ -1561,60 +1562,125 @@ def _entry_runner(job: Node, entry: Node) -> list[str]:
     return out
 
 
+def _leg_boots(leg: dict[str, str]) -> bool:
+    """Whether an include row's `targets` names a test target or `run`."""
+    return any(t.startswith("test-") or t == "run" for t in leg.get("targets", "").split())
+
+
 def rule_aarch64_arm(tree: Tree) -> list[Problem]:
-    """ROADMAP §11.7: a job that boots an aarch64 guest runs on arm64."""
-    out = []
+    """ROADMAP §11.7: a job that boots an aarch64 guest runs on arm64.
+
+    A leg boots aarch64 when its `include` row sets `arch: aarch64`, when the run
+    text names aarch64 (`ARCH=aarch64`), or when the run passes `matrix.arch` to
+    the guest and the leg's arch is aarch64. Each such leg's `runs-on` resolves
+    from that leg's own values, so an include row that names its runner is read
+    beside the axis. A `runs-on` label that mentions `matrix.arch` exempts the
+    axis, since the expression picks the runner.
+
+    Known gaps: a `fromJSON` matrix has no legs the rule can read, so a run that
+    passes `matrix.arch` through one is flagged instead. A reusable workflow
+    takes its arch as an `inputs.` value that the caller's matrix binds: a caller
+    passing `matrix.` to a local reusable workflow is flagged, and so is a callee
+    that boots from `inputs.`. An axis not named `arch` is unread, since
+    ARCH_AXIS_RE names `matrix.arch`. No workflow in this tree uses `fromJSON`, a
+    local reusable call or `workflow_call`, so these gaps are latent.
+    """
+    out: list[Problem] = []
     for path, wf in tree.workflows.items():
         for job in _jobs(wf):
-            strategy = job.get("strategy")
-            matrix = strategy.get("matrix") if strategy is not None else None
-            include = matrix.get("include") if matrix is not None else None
             run_text = _job_run_text(job)
             boots = BOOT_CMD.search(run_text) is not None
-            if include is not None and include.items:
-                for entry in include.items:
-                    arch = entry.get("arch")
-                    if arch is None or arch.value != "aarch64":
-                        continue
-                    targets = entry.get("targets")
-                    words = (targets.value or "").split() if targets is not None else []
-                    entry_boots = boots or any(
-                        t.startswith("test-") or t == "run" for t in words
-                    )
-                    if not entry_boots:
-                        continue
-                    labels = _entry_runner(job, entry)
-                    if not labels or not all(_is_arm64_label(lb) for lb in labels):
-                        out.append(
-                            Problem(
-                                path,
-                                entry.line,
-                                "aarch64_arm",
-                                f"job `{job.key}` boots aarch64 but "
-                                f"runs-on is {labels or 'unset'}; use an arm64 image",
-                            )
+            uses = job.get("uses")
+            if uses is not None and (uses.value or "").startswith("./"):
+                with_ = job.get("with")
+                if with_ is not None and any("matrix." in (c.value or "") for c in with_.children):
+                    out.append(
+                        Problem(
+                            path,
+                            job.line,
+                            "aarch64_arm",
+                            f"job `{job.key}` passes a matrix value to a reusable workflow; "
+                            "the rule cannot read the callee's runner",
                         )
+                    )
                 continue
-            if "aarch64" not in run_text and "ARCH=aarch64" not in run_text:
-                continue
-            if not boots:
-                continue
-            runs_on = job.get("runs-on")
-            labels = runs_on.scalars() if runs_on is not None else []
-            resolved: list[str] = []
-            for label in labels:
-                m = MATRIX_REF_RE.fullmatch(label.strip())
-                if m is None:
-                    resolved.append(label)
-                else:
-                    resolved += _matrix_values(job, m.group(1))
-            if not resolved or not all(_is_arm64_label(lb) for lb in resolved):
+            on = wf.get("on")
+            callee = on is not None and on.kind == "map" and on.get("workflow_call") is not None
+            if callee and boots and "inputs." in run_text:
                 out.append(
                     Problem(
                         path,
                         job.line,
                         "aarch64_arm",
-                        f"job `{job.key}` boots aarch64 but runs-on is {resolved or 'unset'}; "
+                        f"job `{job.key}` boots from a workflow input; the rule cannot read "
+                        "the caller's arch",
+                    )
+                )
+            strategy = job.get("strategy")
+            matrix = strategy.get("matrix") if strategy is not None else None
+            legs = [{}] if matrix is None else _expand_matrix(matrix)
+            literal = "aarch64" in run_text
+            axis = ARCH_AXIS_RE.search(run_text) is not None
+            if legs is None:
+                legs = [{}]
+                if axis and boots:
+                    out.append(
+                        Problem(
+                            path,
+                            job.line,
+                            "aarch64_arm",
+                            f"job `{job.key}`: matrix is an expression, so the rule cannot "
+                            "read the arch its legs run",
+                        )
+                    )
+            runs_on = job.get("runs-on")
+            raw = runs_on.scalars() if runs_on is not None else []
+            exempt = any(ARCH_AXIS_RE.search(lb) for lb in raw)
+            include = matrix.get("include") if matrix is not None else None
+            flagged = False
+            for entry in include.items if include is not None else []:
+                arch = entry.get("arch")
+                if arch is None or arch.value != "aarch64":
+                    continue
+                targets = entry.get("targets")
+                words = (targets.value or "").split() if targets is not None else []
+                entry_boots = boots or any(t.startswith("test-") or t == "run" for t in words)
+                if not entry_boots:
+                    continue
+                labels = _entry_runner(job, entry)
+                if not labels or not all(_is_arm64_label(lb) for lb in labels):
+                    flagged = True
+                    out.append(
+                        Problem(
+                            path,
+                            entry.line,
+                            "aarch64_arm",
+                            f"job `{job.key}` boots aarch64 but "
+                            f"runs-on is {labels or 'unset'}; use an arm64 image",
+                        )
+                    )
+            if flagged:
+                continue
+            bad: list[str] = []
+            for leg in legs:
+                if not (literal or (axis and not exempt and leg.get("arch") == "aarch64")):
+                    continue
+                if not (boots or _leg_boots(leg)):
+                    continue
+                labels = []
+                for label in raw:
+                    m = MATRIX_REF_RE.fullmatch(label.strip())
+                    labels.append(leg.get(m.group(1), label) if m is not None else label)
+                if not labels or not all(_is_arm64_label(lb) for lb in labels):
+                    bad.append(", ".join(labels) or "unset")
+            if bad:
+                shown = " / ".join(dict.fromkeys(bad))
+                out.append(
+                    Problem(
+                        path,
+                        job.line,
+                        "aarch64_arm",
+                        f"job `{job.key}` boots aarch64 but runs-on is {shown}; "
                         "use an arm64 image",
                     )
                 )
@@ -1844,6 +1910,104 @@ def rule_matrix_artifact_names(tree: Tree) -> list[Problem]:
     return out
 
 
+BUILD_OUT_RE = re.compile(
+    r"^BUILD_OUT\s*:=\s*\$\(if \$\(filter aarch64,\$\(ARCH\)\),([^,()\s]+),([^,()\s]+)\)\s*$",
+    re.M,
+)
+# A path under the Makefile's BUILD_OUT: kernel ELFs, user programs, initrds,
+# ISOs and their staging roots, at build/ or build/aarch64/.
+ARCH_OUTPUT_RE = re.compile(
+    r"build/(?:(?P<sub>aarch64)/)?"
+    r"(?:kernels(?:/.*)?|user(?:/.*)?|iso_root[^/]*(?:/.*)?|initrd[^/]*\.fat"
+    r"|vibeos[^/]*\.iso(?:\.xorriso-version)?)"
+)
+_EXPR = re.compile(r"\$\{\{\s*([^{}]*?)\s*\}\}")
+
+
+def build_out(makefile: str) -> dict[str, str] | None:
+    """The Makefile's BUILD_OUT for each ARCH, or None if its line is not the known shape."""
+    m = BUILD_OUT_RE.search(makefile)
+    if m is None:
+        return None
+    return {"aarch64": m.group(1), "x86_64": m.group(2)}
+
+
+def _bind_expr(text: str, combo: dict[str, str]) -> str:
+    """`text` with each `${{ matrix.<key> }}` replaced by the leg's value."""
+    return _EXPR.sub(lambda m: _bind_matrix(m.group(1), combo), text)
+
+
+def _job_arch(wf: Node, job: Node, combo: dict[str, str]) -> str:
+    """The ARCH a leg's `make` sees: the job's `env.ARCH`, else the workflow's,
+    bound to the leg, else the Makefile's default."""
+    for scope in (job, wf):
+        env = scope.get("env")
+        arch = env.get("ARCH") if env is not None else None
+        if arch is not None and arch.value is not None:
+            return _bind_expr(arch.value, combo)
+    return "x86_64"
+
+
+def rule_arch_output_paths(tree: Tree) -> list[Problem]:
+    """An upload of a kernel, user program, initrd or ISO names it under the
+    Makefile's BUILD_OUT for the ARCH its leg builds with: build/ for x86_64,
+    build/aarch64/ for aarch64. A path under the other one finds no file, which
+    `if-no-files-found: error` fails, or uploads the other arch's image."""
+    out: list[Problem] = []
+    outs: dict[str, str] | None = None
+    for path, wf in tree.workflows.items():
+        for job in _jobs(wf):
+            strategy = job.get("strategy")
+            matrix = strategy.get("matrix") if strategy is not None else None
+            combos = _expand_matrix(matrix) if matrix is not None else [{}]
+            if combos is None:
+                continue
+            steps = job.get("steps")
+            job_if = _if_text(job)
+            for step in steps.items if steps is not None else []:
+                uses = step.get("uses")
+                if uses is None or not (uses.value or "").startswith("actions/upload-artifact@"):
+                    continue
+                with_ = step.get("with")
+                p = with_.get("path") if with_ is not None else None
+                if p is None:
+                    continue
+                raw = (p.value or "").split("\n") if p.kind == "scalar" else p.scalars()
+                step_if = _if_text(step)
+                seen: set[tuple[str, str]] = set()
+                for combo in combos:
+                    if not _if_allows(job_if, combo) or not _if_allows(step_if, combo):
+                        continue
+                    arch = _job_arch(wf, job, combo)
+                    for entry in raw:
+                        e = _bind_expr(entry.strip(), combo)
+                        while e.startswith("./"):
+                            e = e[2:]
+                        m = ARCH_OUTPUT_RE.fullmatch(e)
+                        if m is None:
+                            continue
+                        if outs is None:
+                            outs = build_out(tree.makefile)
+                            if outs is None:
+                                msg = "no `BUILD_OUT := $(if $(filter aarch64,$(ARCH)),..)` line"
+                                return [Problem("Makefile", 1, "arch_output_paths", msg)]
+                        want = outs.get(arch)
+                        got = "build/aarch64" if m.group("sub") else "build"
+                        if want is None or got == want or (arch, e) in seen:
+                            continue
+                        seen.add((arch, e))
+                        out.append(
+                            Problem(
+                                path,
+                                p.line,
+                                "arch_output_paths",
+                                f"job `{job.key}` uploads {e!r} on its ARCH={arch} leg, "
+                                f"but the Makefile builds that arch's outputs under {want}/",
+                            )
+                        )
+    return out
+
+
 RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_no_expr_in_run,
     rule_aarch64_arm,
@@ -1871,6 +2035,7 @@ RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_release_profile,
     rule_no_core_upload_with_secrets,
     rule_matrix_artifact_names,
+    rule_arch_output_paths,
 ]
 
 

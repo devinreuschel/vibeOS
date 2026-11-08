@@ -3,16 +3,26 @@
 
 from __future__ import annotations
 
+import os
 import unittest
+from unittest import mock
 
 from tests.harness import frame
 from tests.harness.frame import FRAME
-from tests.harness.harness import HarnessError, boot_contract_markers, env_config
+from tests.harness.harness import EnvConfig, HarnessError, boot_contract_markers, env_config
 from tests.harness.linesource import FakeLineSource
 from tests.harness.qmp import FakeQmp
 from tests.harness.run_pid1 import CASES, check_no_sh_lines, run_case
 
 NAME = "init_fault"
+
+
+def x86_env() -> EnvConfig:
+    """The x86_64 boot config. The cases model the x86_64 contract (the
+    `rip=` fault line, the pvpanic write), so the arch is not read from the
+    caller's VIBEOS_ARCH."""
+    with mock.patch.dict(os.environ, {"VIBEOS_ARCH": "x86_64"}):
+        return env_config(default_iso="fake.iso", default_timeout=60.0)
 
 
 def k(text: str) -> str:
@@ -22,7 +32,7 @@ def k(text: str) -> str:
 
 def contract_lines() -> list[str]:
     """One framed line per kernel contract row, in the contract's order."""
-    env = env_config(default_iso="fake.iso", default_timeout=60.0)
+    env = x86_env()
     out = []
     for m in boot_contract_markers(cpu=env.cpu, smp=env.smp):
         if (m.source or frame.source_of(m.substring)) != frame.KERNEL:
@@ -46,7 +56,7 @@ DUMP = [
 def run(lines: list[str], *, end: str = "eof", panicked: bool = True) -> None:
     """Run the case over `lines`; the kernel's pvpanic write, QMP's
     `GUEST_PANICKED`, follows the last line unless `panicked` is false."""
-    env = env_config(default_iso="fake.iso", default_timeout=60.0)
+    env = x86_env()
     src = FakeLineSource.from_lines(lines, end=end, exit_code=0)
     after: dict[int, list[dict[str, object]]] = {
         len(lines): [{"event": "GUEST_PANICKED", "data": {"action": "pause"}}]

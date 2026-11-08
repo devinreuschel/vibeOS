@@ -38,6 +38,50 @@ const fn esr_iss(esr: u64) -> u32 {
     (esr & ESR_ISS_MASK) as u32
 }
 
+/// Exception class of a data abort taken at the kernel's own level.
+const EC_DABT_EL1: u8 = 0x25;
+/// Exception class of an instruction abort taken at the kernel's own level.
+const EC_IABT_EL1: u8 = 0x21;
+
+/// A data abort at the kernel's own level (EC 0x25). Only this class may
+/// resume at a user-memory accessor's fixup (PORTABILITY §11.5, the table's
+/// `0x24`, `0x25` row).
+pub const fn is_el1_data_abort(esr: u64) -> bool {
+    esr_ec(esr) == EC_DABT_EL1
+}
+
+/// An abort at the kernel's own level, data (EC 0x25) or instruction (EC
+/// 0x21): what a `catch_dabt` window arms for.
+pub const fn is_el1_abort(esr: u64) -> bool {
+    matches!(esr_ec(esr), EC_DABT_EL1 | EC_IABT_EL1)
+}
+
+/// The mnemonic of a fatal synchronous exception in a `#<name>` dump line,
+/// from its class (DESIGN §11.5): instruction and data aborts, the two
+/// alignment faults, debug, and `UNDEF` for every other class.
+pub const fn fault_mnemonic(esr: u64) -> &'static str {
+    match esr_ec(esr) {
+        0x20 | 0x21 => "IABT",
+        0x22 => "PCALIGN",
+        0x24 | 0x25 => "DABT",
+        0x26 => "SPALIGN",
+        0x30..=0x3C => "DEBUG",
+        _ => "UNDEF",
+    }
+}
+
+/// The address a ring-3 fault reports: `far` for a class that sets
+/// `FAR_EL1` (aborts, the PC alignment fault, watchpoints, DDI0487
+/// D17.2.40), `sp` for the SP alignment fault, else `pc`, since `FAR_EL1`
+/// is UNKNOWN for the SP alignment fault, `udf`, `brk` and the rest.
+pub const fn fault_addr(esr: u64, far: u64, pc: u64, sp: u64) -> u64 {
+    match esr_ec(esr) {
+        0x20 | 0x21 | 0x22 | 0x24 | 0x25 | 0x34 | 0x35 => far,
+        0x26 => sp,
+        _ => pc,
+    }
+}
+
 /// Slot kind: bits [1:0] of the 16-entry index.
 const fn slot_group(slot: u8) -> u8 {
     slot & 3
@@ -203,6 +247,48 @@ mod tests {
         u64::from(ec) << ESR_EC_SHIFT
     }
 
+    #[test]
+    fn fault_mnemonic_names_every_class() {
+        // The dump mnemonic of each exception class 0x00 to 0x3F, written out
+        // here rather than derived from the match in `fault_mnemonic`
+        // (DESIGN §11.5). Index is the EC.
+        const WANT: [&str; 64] = [
+            "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF",
+            "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF",
+            "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF",
+            "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "IABT", "IABT", "PCALIGN", "UNDEF",
+            "DABT", "DABT", "SPALIGN", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF",
+            "UNDEF", "UNDEF", "UNDEF", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "DEBUG",
+            "DEBUG", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "UNDEF", "UNDEF",
+            "UNDEF",
+        ];
+        for (ec, want) in (0u8..).zip(WANT.iter()) {
+            assert_eq!(fault_mnemonic(esr(ec)), *want, "EC {ec:#x}");
+        }
+        // The ISS bits do not change the class.
+        assert_eq!(fault_mnemonic(esr(0x25) | 0x1FF_FFFF), "DABT");
+    }
+
+    #[test]
+    fn fault_addr_takes_far_only_where_far_is_valid() {
+        const FAR: u64 = 0xdead_0000;
+        const PC: u64 = 0x40_1000;
+        const SP: u64 = 0x7fff_fff9;
+        for ec in 0..=0x3Fu8 {
+            let want = match ec {
+                0x20 | 0x21 | 0x22 | 0x24 | 0x25 | 0x34 | 0x35 => FAR,
+                0x26 => SP,
+                _ => PC,
+            };
+            assert_eq!(fault_addr(esr(ec), FAR, PC, SP), want, "EC {ec:#x}");
+        }
+        // `udf` (EC 0x00) and `brk` (EC 0x3C) report the pc, and the SP
+        // alignment fault (EC 0x26) the sp, not a stale FAR.
+        assert_eq!(fault_addr(esr(0x00), FAR, PC, SP), PC);
+        assert_eq!(fault_addr(esr(0x3C), FAR, PC, SP), PC);
+        assert_eq!(fault_addr(esr(0x26), FAR, PC, SP), SP);
+    }
+
     fn esr_iss(ec: u8, iss: u32) -> u64 {
         esr(ec) | u64::from(iss) & ESR_ISS_MASK
     }
@@ -319,6 +405,22 @@ mod tests {
                 fetch: true
             }
         );
+    }
+
+    #[test]
+    fn el1_aborts_are_their_own_classes_only() {
+        for ec in 0u8..=0x3F {
+            // The ISS varies too: the class alone decides.
+            for iss in [0, 0x0000_0040, 0x0000_0005] {
+                let e = esr_iss(ec, iss);
+                assert_eq!(is_el1_data_abort(e), ec == 0x25, "data ec {ec:#x}");
+                assert_eq!(
+                    is_el1_abort(e),
+                    ec == 0x21 || ec == 0x25,
+                    "abort ec {ec:#x}"
+                );
+            }
+        }
     }
 
     #[test]

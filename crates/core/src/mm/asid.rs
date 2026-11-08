@@ -237,8 +237,16 @@ impl AsidAlloc {
                 // Relaxed: the allocator lock is held; pairs with nothing.
                 self.reserved[i].store(0, Ordering::Relaxed);
             } else {
+                // A CPU whose slot already reads 0 keeps the reservation it
+                // had. Relaxed: the allocator lock is held; pairs with nothing.
+                let keep = if old == 0 {
+                    // Relaxed: the allocator lock is held; pairs with nothing.
+                    self.reserved[i].load(Ordering::Relaxed)
+                } else {
+                    old
+                };
                 // Relaxed: the allocator lock is held; pairs with nothing.
-                self.reserved[i].store(old, Ordering::Relaxed);
+                self.reserved[i].store(keep, Ordering::Relaxed);
             }
             // Release: pairs with the Acquire load in `flush_pending`.
             self.flush_pending[i].store(true, Ordering::Release);
@@ -271,12 +279,15 @@ impl AsidAlloc {
             .is_some_and(|a| a.load(Ordering::Acquire))
     }
 
-    /// Clear flush-pending after the local `vmalle1` sequence.
-    pub fn clear_flush(&self, cpu: u32) {
-        if let Some(a) = self.flush_pending.get(cpu as usize) {
-            // Release: pairs with the Acquire load in `flush_pending`.
-            a.store(false, Ordering::Release);
-        }
+    /// Clear flush-pending and report whether it was set. The caller runs
+    /// its `tlbi` after this, so a rollover that sets the flag again later
+    /// is seen by the next check instead of being wiped.
+    pub fn take_flush(&self, cpu: u32) -> bool {
+        // AcqRel: Acquire pairs with the Release store in `rollover`; the swap
+        // precedes the caller's `tlbi` in program order.
+        self.flush_pending
+            .get(cpu as usize)
+            .is_some_and(|a| a.swap(false, Ordering::AcqRel))
     }
 
     pub fn active(&self, cpu: u32) -> AsidWord {
@@ -395,6 +406,22 @@ mod tests {
         }
     }
 
+    /// A CPU idle across two rollovers reads 0 in its `active` slot at the
+    /// second one. That must keep the word reserved at the first.
+    #[test]
+    fn idle_cpu_keeps_reservation_across_rollovers() {
+        let a = AsidAlloc::new(2, 2).unwrap();
+        let mut s1 = 0;
+        let w1 = switch(&a, 1, &mut s1);
+        a.with_lock(|| a.rollover());
+        assert_eq!(a.active(1), 0);
+        a.with_lock(|| a.rollover());
+        assert_eq!(a.reserved[1].load(Ordering::Relaxed), w1);
+        assert!(a.is_used(a.asid_of(w1)));
+        let kept = switch(&a, 1, &mut s1);
+        assert_eq!(a.asid_of(kept), a.asid_of(w1));
+    }
+
     #[test]
     fn rollover_preserves_running() {
         let a = AsidAlloc::new(2, 2).unwrap();
@@ -410,7 +437,7 @@ mod tests {
         let w3 = switch(&a, 0, &mut s3);
         assert!(a.flush_pending(0) || a.flush_pending(1) || a.generation() != a.gen_of(w0));
         let n1 = a.asid_of(w1);
-        a.clear_flush(1);
+        a.take_flush(1);
         let again = switch(&a, 1, &mut s1);
         assert_eq!(a.asid_of(again), n1);
         assert_ne!(a.gen_of(again), a.gen_of(w1));
@@ -431,7 +458,7 @@ mod tests {
             let cpu = (i % 2) as u32;
             let slot = i % words.len();
             if a.flush_pending(cpu) {
-                a.clear_flush(cpu);
+                a.take_flush(cpu);
                 if cpu == 0 {
                     seen0 = [(0, usize::MAX); 4];
                     gen0 = a.generation();

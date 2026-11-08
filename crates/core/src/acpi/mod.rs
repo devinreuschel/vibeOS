@@ -333,6 +333,12 @@ pub struct MadtInfo {
     pub ioapics: [IoApic; MAX_IOAPICS],
     pub iso_count: usize,
     pub isos: [Iso; MAX_ISOS],
+    /// Enabled LAPIC records past [`MAX_CPUS`]. Those CPUs are not in `apic_ids`.
+    pub dropped_cpus: u32,
+    /// IOAPIC records past [`MAX_IOAPICS`].
+    pub dropped_ioapics: u32,
+    /// Interrupt source overrides past [`MAX_ISOS`].
+    pub dropped_isos: u32,
 }
 
 impl Default for MadtInfo {
@@ -346,6 +352,9 @@ impl Default for MadtInfo {
             ioapics: [IoApic::default(); MAX_IOAPICS],
             iso_count: 0,
             isos: [Iso::default(); MAX_ISOS],
+            dropped_cpus: 0,
+            dropped_ioapics: 0,
+            dropped_isos: 0,
         }
     }
 }
@@ -381,41 +390,54 @@ pub fn parse_madt(bytes: &[u8]) -> Result<MadtInfo, AcpiError> {
             break;
         };
         // A `get_mut` that finds a slot bounds each count below its array's
-        // length, so the `saturating_add`s below never saturate.
+        // length, so the `saturating_add`s below never saturate. A `None`
+        // is a record past the array's cap, counted in its `dropped_` field.
         match typ {
             MADT_TYPE_LAPIC => {
                 if len >= 8 {
                     let flags = read_unaligned_u32(rec, 4).unwrap_or(0);
-                    if flags & LAPIC_ENABLED != 0
-                        && let Some(slot) = info.apic_ids.get_mut(info.cpu_count)
-                    {
-                        *slot = read_unaligned_u8(rec, 3).unwrap_or(0);
-                        info.cpu_count = info.cpu_count.saturating_add(1);
+                    if flags & LAPIC_ENABLED != 0 {
+                        let apic_id = read_unaligned_u8(rec, 3).unwrap_or(0);
+                        match info.apic_ids.get_mut(info.cpu_count) {
+                            Some(slot) => {
+                                *slot = apic_id;
+                                info.cpu_count = info.cpu_count.saturating_add(1);
+                            }
+                            None => info.dropped_cpus = info.dropped_cpus.saturating_add(1),
+                        }
                     }
                 }
             }
             MADT_TYPE_IOAPIC => {
-                if len >= 12
-                    && let Some(slot) = info.ioapics.get_mut(info.ioapic_count)
-                {
-                    *slot = IoApic {
+                if len >= 12 {
+                    let io = IoApic {
                         id: read_unaligned_u8(rec, 2).unwrap_or(0),
                         addr: read_unaligned_u32(rec, 4).unwrap_or(0),
                         gsi_base: read_unaligned_u32(rec, 8).unwrap_or(0),
                     };
-                    info.ioapic_count = info.ioapic_count.saturating_add(1);
+                    match info.ioapics.get_mut(info.ioapic_count) {
+                        Some(slot) => {
+                            *slot = io;
+                            info.ioapic_count = info.ioapic_count.saturating_add(1);
+                        }
+                        None => info.dropped_ioapics = info.dropped_ioapics.saturating_add(1),
+                    }
                 }
             }
             MADT_TYPE_ISO => {
-                if len >= 10
-                    && let Some(slot) = info.isos.get_mut(info.iso_count)
-                {
-                    *slot = Iso {
+                if len >= 10 {
+                    let iso = Iso {
                         irq: read_unaligned_u8(rec, 3).unwrap_or(0),
                         gsi: read_unaligned_u32(rec, 4).unwrap_or(0),
                         flags: read_unaligned_u16(rec, 8).unwrap_or(0),
                     };
-                    info.iso_count = info.iso_count.saturating_add(1);
+                    match info.isos.get_mut(info.iso_count) {
+                        Some(slot) => {
+                            *slot = iso;
+                            info.iso_count = info.iso_count.saturating_add(1);
+                        }
+                        None => info.dropped_isos = info.dropped_isos.saturating_add(1),
+                    }
                 }
             }
             MADT_TYPE_LAPIC_ADDR_OVERRIDE if len >= 12 => {
@@ -980,6 +1002,44 @@ mod tests {
         let m = parse_madt(&t).unwrap();
         assert_eq!(m.cpu_count, 1);
         assert_eq!(m.apic_ids[0], 3);
+    }
+
+    #[test]
+    fn madt_enabled_lapics_past_the_cpu_cap_are_counted() {
+        let mut rec = Vec::new();
+        // MAX_CPUS + 1 enabled type 0 records: uid i, apic id i, flags enabled
+        for i in 0..=(MAX_CPUS as u8) {
+            rec.extend_from_slice(&[0, 8, i, i]);
+            rec.extend_from_slice(&1u32.to_le_bytes());
+        }
+        let t = madt_bytes(0xFEE0_0000, 0, &rec);
+        let m = parse_madt(&t).unwrap();
+        assert_eq!(m.cpu_count, MAX_CPUS);
+        assert_eq!(m.apic_ids[MAX_CPUS - 1], MAX_CPUS as u8 - 1);
+        assert_eq!(m.dropped_cpus, 1);
+    }
+
+    #[test]
+    fn madt_ioapics_and_isos_past_their_caps_are_counted() {
+        let mut rec = Vec::new();
+        for _ in 0..=MAX_IOAPICS {
+            // type 1 ioapic id 0 addr 0xFEC00000 gsi 0
+            rec.extend_from_slice(&[1, 12, 0, 0]);
+            rec.extend_from_slice(&0xFEC0_0000u32.to_le_bytes());
+            rec.extend_from_slice(&0u32.to_le_bytes());
+        }
+        for _ in 0..=MAX_ISOS {
+            // type 2 iso irq 0 -> gsi 2
+            rec.extend_from_slice(&[2, 10, 0, 0]);
+            rec.extend_from_slice(&2u32.to_le_bytes());
+            rec.extend_from_slice(&0u16.to_le_bytes());
+        }
+        let t = madt_bytes(0xFEE0_0000, 0, &rec);
+        let m = parse_madt(&t).unwrap();
+        assert_eq!(m.ioapic_count, MAX_IOAPICS);
+        assert_eq!(m.dropped_ioapics, 1);
+        assert_eq!(m.iso_count, MAX_ISOS);
+        assert_eq!(m.dropped_isos, 1);
     }
 
     #[test]

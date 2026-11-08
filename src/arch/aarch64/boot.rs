@@ -133,12 +133,15 @@ fn alloc_early_table(kphys: u64, used: &mut usize) -> Option<u64> {
         .map(|off| kphys.wrapping_add(off))
 }
 
-/// After serial: EL marker, ISA floor, early VBAR.
+/// After the first log line: EL marker, ISA info line, early VBAR. The ISA
+/// floor itself is checked in `_start`, before that line.
 pub fn early_init() {
     cpu::note_exception_level();
+    cpu::note_cache();
     super::percpu::set_tpidr_el2(cpu::el2_vhe());
-    cpu::check_isa_floor();
+    cpu::log_isa_floor();
     cpu::set_pan();
+    cpu::clear_tpidrro_el0();
     vectors::init_early();
 }
 

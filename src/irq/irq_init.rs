@@ -312,16 +312,6 @@ pub fn dispatch_intid(intid: u32) {
     let irq_raw = crate::arch::aarch64::gic::lookup(intid);
     let irq = IrqId::from_raw(irq_raw);
     if let Some(i) = irq.slot() {
-        if let Some(slot) = HANDLERS.get(i) {
-            // Acquire: pairs with the Release store in `set_handler`.
-            let p = slot.load(Ordering::Acquire);
-            if p != 0 {
-                // SAFETY: a nonzero `HANDLERS` slot holds a `fn()`;
-                // established by `irq::irq_init::set_handler`.
-                let h: Handler = unsafe { core::mem::transmute(p) };
-                h();
-            }
-        }
         let (top, work, ctx) = with_irq(|s| {
             (
                 s.th.top.get(i).copied().flatten(),
@@ -329,6 +319,7 @@ pub fn dispatch_intid(intid: u32) {
                 s.th.ctx.get(i).cloned().flatten(),
             )
         });
+        // threaded and plain handlers are exclusive, as in `dispatch`
         if work.is_some() || top.is_some() {
             if let Some(h) = top {
                 h(ctx.as_deref());
@@ -344,6 +335,15 @@ pub fn dispatch_intid(intid: u32) {
                 });
             });
             drop(ctx);
+        } else if let Some(slot) = HANDLERS.get(i) {
+            // Acquire: pairs with the Release store in `set_handler`.
+            let p = slot.load(Ordering::Acquire);
+            if p != 0 {
+                // SAFETY: a nonzero `HANDLERS` slot holds a `fn()`;
+                // established by `irq::irq_init::set_handler`.
+                let h: Handler = unsafe { core::mem::transmute(p) };
+                h();
+            }
         }
     } else if let Some(c) = crate::arch::aarch64::gic::chip() {
         // No IrqId: a level SPI would re-pend after EOI forever.
@@ -859,6 +859,11 @@ pub fn cpu_of(irq: IrqId) -> Option<u32> {
 
 /// Ask the chip to move the interrupt, then record dest CPU on success.
 /// The chip call stays outside the IRQ lock so chip code can take it.
+/// Until `set_cpu` lands, `cpu_of` still names the old CPU while the chip
+/// already points at the new one. An `enable_msix` that composes its message
+/// inside that window and registers its live entry after the chip call
+/// keeps the old CPU in the table; closing it needs `enable_msix` to
+/// compose and register under one IRQ lock hold.
 pub fn set_affinity(irq: IrqId, cpu: u32) -> Result<(), IrqError> {
     if in_hard_irq() {
         return Err(IrqError::InIrq);
@@ -869,6 +874,10 @@ pub fn set_affinity(irq: IrqId, cpu: u32) -> Result<(), IrqError> {
 }
 
 fn apic_id(cpu: u32) -> Option<u8> {
+    // An offline CPU is not a destination; its APIC id may be stale.
+    if !per_cpu_init::is_online(cpu) {
+        return None;
+    }
     // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
     per_cpu_init::cpu(cpu).map(|c| c.apic_id.load(Ordering::Relaxed) as u8)
 }
@@ -893,6 +902,7 @@ pub fn enable_msi(bdf: Bdf, cap: u8, irq: IrqId) -> Result<(), IrqError> {
     let msi = pci::read_msi_cap(&mut hw, bdf, cap);
     pci::write_msi_message(&mut hw, bdf, msi, msg.addr as u32, msg.data as u16);
     pci::set_msi_enable(&mut hw, bdf, cap, true);
+    chip.unmask(hwirq);
     if let Some(i) = irq.slot() {
         with_irq(|s| {
             if let Some(r) = s.routes.get_mut(i) {
@@ -1155,7 +1165,7 @@ impl IrqChip for IoApicChip {
     fn set_affinity(&self, hwirq: u32, cpu: u32) -> Result<(), IrqError> {
         let vec = u8::try_from(hwirq).map_err(|_| IrqError::BadVector)?;
         let bind = with_irq(|s| {
-            s.pool.set_affinity(vec, cpu)?;
+            s.pool.cpu_of(vec).ok_or(IrqError::BadVector)?;
             let i = pool_index(vec).ok_or(IrqError::BadVector)?;
             s.gsi_bind
                 .get(i)
@@ -1163,11 +1173,12 @@ impl IrqChip for IoApicChip {
                 .flatten()
                 .ok_or(IrqError::BadVector)
         })?;
+        // The pool moves only once the RTE has, so on failure both still
+        // name the old CPU. The mask bit stays as the caller left it.
         let dest = apic_id(cpu).ok_or(IrqError::BadCpu)?;
-        apic_init::route_gsi(bind.gsi, vec, dest, bind.trigger, bind.polarity)
+        apic_init::retarget_gsi(bind.gsi, vec, dest, bind.trigger, bind.polarity)
             .map_err(|_| IrqError::BadCpu)?;
-        apic_init::unmask_gsi(bind.gsi);
-        Ok(())
+        with_irq(|s| s.pool.set_affinity(vec, cpu))
     }
 
     fn alloc_msi(&self, _n: u8, _cpu: u32, _out: &mut [u32]) -> Result<usize, IrqError> {

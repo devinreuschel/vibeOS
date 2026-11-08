@@ -5,14 +5,14 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+#[cfg(target_arch = "x86_64")]
+use crate::arch::current::syscall_nr::SYS_GETPID;
 use vibeos::elf::ElfError;
 use vibeos::fs::{FsError, O_CREAT, O_TRUNC, O_WRONLY};
 #[cfg(target_arch = "x86_64")]
 use vibeos::kbd::DecodedKey;
 use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::{SIGILL, SIGSEGV, wait_exited, wait_signaled, wexitstatus, wifexited};
-#[cfg(target_arch = "x86_64")]
-use vibeos::syscall::SYS_GETPID;
 use vibeos::vectors;
 
 use super::hooks as exec_testing;

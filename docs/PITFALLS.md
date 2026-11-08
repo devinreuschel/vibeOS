@@ -97,12 +97,14 @@ the bus; mechanism #1 for offsets below `0x100` elsewhere. The two firmware sour
 base differently: an MCFG entry's base corresponds to bus 0 even when its start bus is not 0 (PCI
 Firmware Spec 3.2 §4.1.2), and a device-tree `pci-host-ecam-generic` node's `reg` corresponds to
 the first bus of its `bus-range`. The kernel stores every window by its first bus's address, as the
-device tree gives it and as Linux does for both, so an MCFG base becomes `base + (start_bus << 20)`
-when it is parsed, and `pci::ecam_phys` returns
-`base + ((bus - start_bus) << 20 | dev << 15 | fn << 12 | off)`. Rule; not yet enforced:
-`acpi::parse_mcfg` passes the MCFG base through unchanged, so an entry whose start bus is not 0
-reads bus `b` at bus `b - start_bus`'s configuration space (ROADMAP §20.1, F045). Type-1 headers
-reuse BAR slots as bus-number registers; size-probe only the BAR count for that header type.
+device tree gives it and as Linux does for both. `acpi::parse_mcfg` returns the MCFG base as bus 0's
+configuration space, and `machine::fill_mcfg` applies the shift once, so an MCFG base becomes
+`base + (start_bus << 20)`, and `pci::ecam_phys` returns
+`base + ((bus - start_bus) << 20 | dev << 15 | fn << 12 | off)`. An entry whose window leaves the
+64-bit address space once moved, or whose end bus is below its start bus, is dropped and counted
+(`dropped_mcfg`). `parse_mcfg` still returns one allocation, so the further allocations of a
+multi-entry MCFG are not reached (ROADMAP §20.1, F045). Type-1 headers reuse BAR slots as
+bus-number registers; size-probe only the BAR count for that header type.
 
 **Two subsystems designed for the same virtual address range.**
 The heap and the kernel VA allocator were both specified at `0xFFFF_C000_*` in different documents, and

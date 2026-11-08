@@ -19,18 +19,18 @@ use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::pci::{CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::virtio::{
-    self, COMMON_OFF_DF, COMMON_OFF_DFSEL, COMMON_OFF_DR, COMMON_OFF_DRSEL, COMMON_OFF_MSIX_CFG,
-    COMMON_OFF_NUM_QUEUES, COMMON_OFF_QDESC, COMMON_OFF_QDEVICE, COMMON_OFF_QDRIVER,
-    COMMON_OFF_QENABLE, COMMON_OFF_QMSIX, COMMON_OFF_QNOTIFY, COMMON_OFF_QSEL, COMMON_OFF_QSIZE,
-    COMMON_OFF_STATUS, DESC_F_WRITE, DEV_BLK_LEGACY, DEV_BLK_MODERN, DescBuf, F_EVENT_IDX,
-    MSI_NO_VECTOR, ModernCaps, PciCap, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK,
+    self, COMMON_OFF_MSIX_CFG, COMMON_OFF_NUM_QUEUES, COMMON_OFF_QDESC, COMMON_OFF_QDEVICE,
+    COMMON_OFF_QDRIVER, COMMON_OFF_QENABLE, COMMON_OFF_QMSIX, COMMON_OFF_QNOTIFY, COMMON_OFF_QSEL,
+    COMMON_OFF_QSIZE, COMMON_OFF_STATUS, DESC_F_WRITE, DEV_BLK_LEGACY, DEV_BLK_MODERN, DescBuf,
+    F_EVENT_IDX, MSI_NO_VECTOR, ModernCaps, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK,
     STATUS_FEATURES_OK, SplitLayout, VENDOR_ID, VirtioError, notify_addr,
 };
 use vibeos::virtio_blk::{
-    CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD,
-    F_FLUSH, F_MQ, F_RO, F_TOPOLOGY, MAX_DISKS, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT, disk_name,
-    exhausted_fails_device, logical_capacity, map_status, nq_from_config, pack_discard,
-    pack_header, pick_blk_size, pick_features, queue_size, refuse_read_only, sector_for_lba,
+    CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_BLK_SIZE,
+    F_DISCARD, F_FLUSH, F_MQ, F_RO, F_TOPOLOGY, MAX_DISKS, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT,
+    disk_name, exhausted_fails_device, fit_config, logical_capacity, map_status, nq_from_config,
+    pack_discard, pack_header, pick_blk_size, pick_features, queue_size, refuse_read_only,
+    sector_for_lba,
 };
 
 use crate::arch::{self, current::Arch};
@@ -42,7 +42,9 @@ use crate::pci_init;
 use crate::per_cpu_init;
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
-use crate::virtio_init;
+use crate::virtio_init::{
+    self, r8, r16, r32, r64, read_features, region, w8, w16, w64, write_features,
+};
 
 mod irq;
 mod issue;
@@ -140,95 +142,6 @@ impl VirtioBlk {
     }
 }
 
-fn r8(va: u64, off: u16) -> u8 {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u8) }
-}
-
-fn w8(va: u64, off: u16, v: u8) {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u8, v) }
-}
-
-fn r16(va: u64, off: u16) -> u16 {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        u16::from_le(core::ptr::read_volatile(
-            (va.wrapping_add(off as u64)) as *const u16,
-        ))
-    }
-}
-
-fn w16(va: u64, off: u16, v: u16) {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u16, v.to_le());
-    }
-}
-
-fn r32(va: u64, off: u16) -> u32 {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        u32::from_le(core::ptr::read_volatile(
-            (va.wrapping_add(off as u64)) as *const u32,
-        ))
-    }
-}
-
-fn w32(va: u64, off: u16, v: u32) {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, v.to_le());
-    }
-}
-
-fn r64(va: u64, off: u16) -> u64 {
-    (r32(va, off) as u64) | ((r32(va, off + 4) as u64) << 32)
-}
-
-fn w64(va: u64, off: u16, v: u64) {
-    w32(va, off, v as u32);
-    w32(va, off + 4, (v >> 32) as u32);
-}
-
-/// The VA of capability `cap`'s region, inside a BAR the probe claimed
-/// and mapped (`dev_init::claim_mem_bars`).
-fn region(dev: &DevRef, cap: PciCap) -> Option<u64> {
-    let r = dev.resources.get(cap.bar as usize)?;
-    if (cap.offset as u64) >= r.size {
-        return None;
-    }
-    let va = dev_init::bar_va(dev, cap.bar)?;
-    Some(va.wrapping_add(cap.offset as u64))
-}
-
-fn read_features(common: u64) -> u64 {
-    w32(common, COMMON_OFF_DFSEL, 0);
-    let lo = r32(common, COMMON_OFF_DF) as u64;
-    w32(common, COMMON_OFF_DFSEL, 1);
-    let hi = r32(common, COMMON_OFF_DF) as u64;
-    lo | (hi << 32)
-}
-
-fn write_features(common: u64, feat: u64) {
-    w32(common, COMMON_OFF_DRSEL, 0);
-    w32(common, COMMON_OFF_DR, feat as u32);
-    w32(common, COMMON_OFF_DRSEL, 1);
-    w32(common, COMMON_OFF_DR, (feat >> 32) as u32);
-}
-
 /// The one unwind of a probe that fails once bus mastering is on, in
 /// INTERRUPTS.md §5.4's order: stop the device, turn MSI-X off and free
 /// the first `nvec` of `vecs`, then free `slots`, every queue in `vqs` and
@@ -290,7 +203,10 @@ fn setup(
     let common = region(dev, common_cap).ok_or(VirtioError::NoCaps)?;
     let notify_base = region(dev, notify_cap).ok_or(VirtioError::NoCaps)?;
     let isr = region(dev, isr_cap).ok_or(VirtioError::NoCaps)?;
+    // The config is read no further than its length covers: `fit_config`
+    // refuses a shorter one and drops the features whose fields it lacks.
     let cfg = region(dev, cfg_cap).ok_or(VirtioError::NoCaps)?;
+    let fit = fit_config(u64::MAX, cfg_cap.length).ok_or(VirtioError::NoCaps)?;
     // Memory decode before the first touch, with bus mastering off, which
     // firmware can leave on; bus mastering only once the reset completed
     // (DESIGN §12.3).
@@ -307,7 +223,7 @@ fn setup(
         COMMON_OFF_STATUS,
         STATUS_ACKNOWLEDGE | STATUS_DRIVER,
     );
-    let device_feat = read_features(common);
+    let device_feat = read_features(common) & fit;
     let feat = match pick_features(device_feat) {
         Ok(f) => f,
         Err(e) => {
@@ -327,7 +243,11 @@ fn setup(
     }
 
     let cap_512 = r64(cfg, CFG_CAPACITY);
-    let cfg_bs = r32(cfg, CFG_BLK_SIZE);
+    let cfg_bs = if feat & F_BLK_SIZE != 0 {
+        r32(cfg, CFG_BLK_SIZE)
+    } else {
+        0
+    };
     let Some(blk_size) = pick_blk_size(feat, cfg_bs) else {
         crate::klog!(
             vibeos::log::Level::Error,
@@ -363,7 +283,11 @@ fn setup(
         blk.max_discard
             .store(r32(cfg, CFG_MAX_DISCARD_SECTORS), Ordering::Release);
     }
-    let cfg_nq = r16(cfg, CFG_NUM_QUEUES);
+    let cfg_nq = if feat & F_MQ != 0 {
+        r16(cfg, CFG_NUM_QUEUES)
+    } else {
+        1
+    };
     let common_nq = r16(common, COMMON_OFF_NUM_QUEUES);
     let offered = nq_from_config(feat, cfg_nq, common_nq);
     let nq = offered.min(online_cpus()).min(MAX_VQ as u16).max(1) as usize;
@@ -620,7 +544,13 @@ fn fail_mmio(
     vqs: &mut [Option<Vq>; MAX_VQ],
     cur: Option<DmaBuffer>,
 ) {
-    crate::virtio_mmio_init::reset(base);
+    // No bus master bit on mmio: a reset that times out leaves the device
+    // free to DMA, so its memory is kept (DESIGN §12.3).
+    let stopped = if crate::virtio_mmio_init::reset(base) {
+        virtio_init::Stopped::Reset
+    } else {
+        virtio_init::Stopped::Stuck
+    };
     for &v in vecs.iter().take(nvec) {
         #[expect(
             clippy::let_underscore_must_use,
@@ -628,12 +558,19 @@ fn fail_mmio(
         )]
         let _ = irq_init::free_vector(v);
     }
+    let mut kept = 0usize;
     for b in slots
         .into_iter()
         .chain(vqs.iter_mut().filter_map(|v| v.take().map(|v| v.qdma)))
         .chain(cur)
     {
-        virtio_init::release(virtio_init::Stopped::Reset, b);
+        kept = kept.saturating_add(virtio_init::release(stopped, b));
+    }
+    if stopped == virtio_init::Stopped::Stuck {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "vibeOS: virtio: mmio {base:#x} reset timeout, {kept} frames kept"
+        );
     }
 }
 
@@ -670,7 +607,11 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
 
     let cfg = crate::virtio_mmio_init::config_va(base);
     let cap_512 = r64(cfg, CFG_CAPACITY);
-    let cfg_bs = r32(cfg, CFG_BLK_SIZE);
+    let cfg_bs = if feat & F_BLK_SIZE != 0 {
+        r32(cfg, CFG_BLK_SIZE)
+    } else {
+        0
+    };
     let Some(blk_size) = pick_blk_size(feat, cfg_bs) else {
         fail_mmio(base, &[], 0, None, &mut vqs, None);
         return Err(VirtioError::Failed);
@@ -701,17 +642,24 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
         blk.max_discard
             .store(r32(cfg, CFG_MAX_DISCARD_SECTORS), Ordering::Release);
     }
-    let cfg_nq = r16(cfg, CFG_NUM_QUEUES);
+    let cfg_nq = if feat & F_MQ != 0 {
+        r16(cfg, CFG_NUM_QUEUES)
+    } else {
+        1
+    };
     let offered = nq_from_config(feat, cfg_nq, MAX_VQ as u16);
     let nq = offered.min(online_cpus()).min(MAX_VQ as u16).max(1) as usize;
 
     let mut vecs = [IrqId::NONE; MAX_VQ];
     let mut vcpus = [0u32; MAX_VQ];
-    let spec = crate::virtio_mmio_init::irq_spec(dev).ok_or(VirtioError::Failed)?;
+    let Some(spec) = crate::virtio_mmio_init::irq_spec(dev) else {
+        fail_mmio(base, &[], 0, None, &mut vqs, None);
+        return Err(VirtioError::Failed);
+    };
     let cpu = irq_init::threaded_cpu();
     #[cfg(target_arch = "aarch64")]
     if let vibeos::irq::IrqSpecifier::Gic { intid } = spec {
-        crate::arch::aarch64::gic::set_spi_edge(intid, true);
+        crate::arch::aarch64::gic::set_spi_edge(intid, dev.intid_edge);
     }
     let irq = match irq_init::map_wired(spec) {
         Ok(i) => i,
@@ -782,7 +730,7 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
         );
         crate::virtio_mmio_init::set_queue_ready(base, true);
         if !crate::virtio_mmio_init::queue_ready(base) {
-            fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, None);
+            fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, Some(qdma));
             return Err(VirtioError::BadQueue);
         }
         vqs[qi] = Some(Vq {

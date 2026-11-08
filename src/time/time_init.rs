@@ -158,6 +158,15 @@ pub(super) struct TimeState {
     /// `CNTVCT_EL0` on aarch64.
     cntvct: Option<Counter>,
     rtc: Option<WallOrigin>,
+    /// The VA of the PL031 window `init` ioremapped, for the live read.
+    #[cfg_attr(
+        not(all(target_arch = "aarch64", feature = "kernel_tests")),
+        allow(
+            dead_code,
+            reason = "only the aarch64 in-guest RTC test reads the window"
+        )
+    )]
+    pl031_va: Option<u64>,
 }
 
 impl TimeState {
@@ -174,6 +183,7 @@ impl TimeState {
             pm: None,
             cntvct: None,
             rtc: None,
+            pl031_va: None,
         }
     }
 
@@ -779,7 +789,6 @@ pub(crate) fn read_counter(id: ClocksourceId) -> Option<u64> {
 
 /// Timer interrupts CPU 0 has taken since `time_init::init`.
 pub fn ticks() -> u64 {
-    // Relaxed: as in `on_hw_tick`.
     // Relaxed: a count; pairs with nothing.
     STATE
         .try_get()
@@ -893,8 +902,9 @@ pub fn eoi_pit() {
     unsafe { x86::outb(PIC1_CMD, PIC_EOI) };
 }
 
+/// The PL031 window's VA and the seconds it reads at boot.
 #[cfg(target_arch = "aarch64")]
-fn read_pl031_unix() -> Option<u64> {
+fn read_pl031_unix() -> Option<(u64, u64)> {
     let rtc = machine_init::info()?.rtc?;
     if rtc.size < 4 {
         return None;
@@ -905,6 +915,18 @@ fn read_pl031_unix() -> Option<u64> {
         .as_u64();
     // SAFETY: invariant I54: `va` is the ioremap of the PL031 window;
     // established by `paging_init::ioremap`.
+    let unix = u32::from_le(unsafe { core::ptr::read_volatile(va as *const u32) });
+    Some((va, u64::from(unix)))
+}
+
+/// The PL031 read through the window `init` kept, for the in-guest RTC
+/// test: the device's own count, not the boot origin.
+#[cfg(all(target_arch = "aarch64", feature = "kernel_tests"))]
+pub(crate) fn pl031_live_s() -> Option<u64> {
+    let va = STATE.try_get()?.pl031_va?;
+    // SAFETY: invariant I54: `va` is the ioremap of the PL031 window that
+    // `init` stored in `pl031_va`; `paging_init::ioremap` never reclaims it.
+    // established by `init`.
     let unix = u32::from_le(unsafe { core::ptr::read_volatile(va as *const u32) });
     Some(u64::from(unix))
 }
@@ -928,11 +950,12 @@ pub unsafe fn init() {
     let w = ClockWriter::new(chosen, read_raw(&st, chosen.id), 0);
     publish(&st, w.snapshot());
     WRITER.with(|slot| *slot = Some(w));
-    if let Some(unix) = read_pl031_unix() {
+    if let Some((va, unix)) = read_pl031_unix() {
         st.rtc = Some(WallOrigin {
             unix_s: unix,
             mono_ns: 0,
         });
+        st.pl031_va = Some(va);
         crate::klog!(vibeos::log::Level::Info, "vibeOS: time: pl031 unix={unix}");
     }
     // SAFETY: I22, one write on the BSP before SMP; established here.

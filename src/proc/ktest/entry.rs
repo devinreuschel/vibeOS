@@ -7,12 +7,12 @@ use core::ptr;
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use crate::arch::current::syscall_nr::SYS_KILL;
 use vibeos::addr_space::{UserMemError, UserPerms};
 use vibeos::arch::PageTable;
 use vibeos::kerror::KError;
 use vibeos::paging::{PAGE_SIZE_4K, USER_END};
 use vibeos::proc::{SIGILL, SIGKILL, SIGTRAP, wait_exited, wait_signaled, wexitstatus, wifexited};
-use vibeos::syscall::SYS_KILL;
 use vibeos::thread::ThreadState;
 use vibeos::vectors;
 
@@ -229,14 +229,16 @@ pub(crate) fn test_ring3_hello_exit() -> Outcome {
 }
 
 pub(crate) fn test_syscall_dispatch() -> Outcome {
-    if proc_init::dispatch(vibeos::syscall::SYS_GETPID, [0; 6]) != 0 {
+    if proc_init::dispatch(crate::arch::current::syscall_nr::SYS_GETPID, [0; 6]) != 0 {
         return Outcome::Fail("getpid");
     }
-    if proc_init::dispatch(vibeos::syscall::SYS_SCHED_YIELD, [0; 6]) != 0 {
+    if proc_init::dispatch(crate::arch::current::syscall_nr::SYS_SCHED_YIELD, [0; 6]) != 0 {
         return Outcome::Fail("yield");
     }
-    if proc_init::dispatch(vibeos::syscall::SYS_WRITE, [3, 0, 1, 0, 0, 0])
-        != vibeos::syscall::encode(Err(KError::BadF))
+    if proc_init::dispatch(
+        crate::arch::current::syscall_nr::SYS_WRITE,
+        [3, 0, 1, 0, 0, 0],
+    ) != vibeos::syscall::encode(Err(KError::BadF))
     {
         return Outcome::Fail("ebadf");
     }
@@ -245,11 +247,15 @@ pub(crate) fn test_syscall_dispatch() -> Outcome {
     }
     // The number is `eax` sign-extended (SYSCALL.md §1): the high half of
     // `rax` is ignored, and a negative `eax` names no call.
-    if proc_init::dispatch(0xFFFF_FFFF_0000_0000 | vibeos::syscall::SYS_GETPID, [0; 6]) != 0 {
+    if proc_init::dispatch(
+        0xFFFF_FFFF_0000_0000 | crate::arch::current::syscall_nr::SYS_GETPID,
+        [0; 6],
+    ) != 0
+    {
         return Outcome::Fail("getpid, high half set");
     }
     if proc_init::dispatch(
-        0x1_0000_0000 | vibeos::syscall::SYS_WRITE,
+        0x1_0000_0000 | crate::arch::current::syscall_nr::SYS_WRITE,
         [3, 0, 1, 0, 0, 0],
     ) != vibeos::syscall::encode(Err(KError::BadF))
     {

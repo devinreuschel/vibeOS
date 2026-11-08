@@ -24,10 +24,10 @@ use vibeos::lock::RANK_PT;
 #[cfg(target_arch = "x86_64")]
 use vibeos::marker;
 use vibeos::paging::{
-    self, FrameAlloc, IoremapWindow, MapError, MapMode, PAGE_SIZE_1G, PAGE_SIZE_2M, PAGE_SIZE_4K,
-    PageFlags, PageSize, PhysAddr, VirtAddr,
+    self, FrameAlloc, IoremapWindow, MapError, MapMode, PAGE_SIZE_2M, PAGE_SIZE_4K, PageFlags,
+    PageSize, PhysAddr, VirtAddr,
 };
-use vibeos::physmap::{PhysmapRun, PhysmapSlot, phys_in_slot, walk_physmap};
+use vibeos::physmap::{PhysmapRun, phys_in_slot, phys_range_below, walk_physmap};
 use vibeos::pmm::Frames;
 
 use crate::arch::current::{Arch, Mapper, enable_nx, stack_pointer};
@@ -38,16 +38,28 @@ use vibeos::arch::PageTable;
 
 // ------------------ constants matching DESIGN §4.1 ------------------
 
-/// This port's physmap slot (MEMORY.md §4.1).
-pub fn physmap_slot() -> PhysmapSlot {
-    #[cfg(target_arch = "x86_64")]
-    {
-        vibeos::physmap::PHYSMAP_X86_64
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        vibeos::physmap::PHYSMAP_AARCH64
-    }
+/// One past the highest physical address this CPU can name. `make_pte`
+/// masks the bits above the address field off, and an address past the
+/// CPU's MAXPHYADDR takes a reserved-bit fault on access, so `ioremap` and
+/// `memremap` refuse anything at or above it.
+#[cfg(target_arch = "x86_64")]
+pub fn phys_limit() -> u64 {
+    // CPUID.80000000H:EAX is the highest extended leaf; below 80000008H the
+    // leaf is absent, and `phys_limit_for_maxphyaddr` takes the floor for 0.
+    let bits = if crate::x86::cpuid(0x8000_0000, 0).0 >= 0x8000_0008 {
+        crate::x86::cpuid(0x8000_0008, 0).0 & 0xFF
+    } else {
+        0
+    };
+    vibeos::arch::x86_64::paging::phys_limit_for_maxphyaddr(bits)
+}
+
+/// One past the highest physical address the aarch64 page tables can name.
+/// `make_pte` masks the bits above the address field off, so a higher
+/// address would silently map a lower page.
+#[cfg(target_arch = "aarch64")]
+pub fn phys_limit() -> u64 {
+    (vibeos::arch::aarch64::paging::DESC_ADDR_MASK | (PAGE_SIZE_4K - 1)) + 1
 }
 
 /// Limine's HHDM offset, from the one `BootInfo` capture.
@@ -190,13 +202,15 @@ pub fn empty_user_root() -> u64 {
 /// no aliased mapping through the physmap will be used to touch the
 /// same registers with cacheable attributes.
 pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
+    if !phys_range_below(phys.as_u64(), len, phys_limit()) {
+        return None;
+    }
+    let round_len = paging::page_span(phys.as_u64(), len)?;
     let (mapped, base_va, round_len) = {
         let mut pt = current_mapper();
         let va_offset = pt.window().reserve(phys, len)?;
         let base_va = VirtAddr(va_offset.as_u64() & !(PAGE_SIZE_4K - 1));
         let base_pa = PhysAddr(phys.as_u64() & !(PAGE_SIZE_4K - 1));
-        let head = phys.as_u64() & (PAGE_SIZE_4K - 1);
-        let round_len = paging_align_up(head + len, PAGE_SIZE_4K);
         let mut alloc = BuddyFrames;
         // PT is held, and only the kernel mapper takes table pages, so
         // a change in this count is this call's.
@@ -338,6 +352,7 @@ pub unsafe fn map_4k_locked(
     unsafe {
         pt.map_page(va, pa, flags, PageSize::Size4K, MapMode::Fresh, &mut alloc)?;
     }
+    pt.publish_leaves();
     Arch::flush_local(va);
     Ok(())
 }
@@ -357,7 +372,7 @@ pub unsafe fn map_4k(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(),
 
 /// Whether `phys` aliases inside this port's physmap slot at the HHDM offset.
 pub fn phys_mapped(phys: u64) -> bool {
-    phys_in_slot(physmap_slot(), hhdm_offset(), phys)
+    phys_in_slot(boot::physmap_slot(), hhdm_offset(), phys)
 }
 
 /// Unmap one leaf through `pt`. Local `invlpg` only.
@@ -413,9 +428,14 @@ pub fn dump_ranges_to(w: &mut impl Write) -> core::fmt::Result {
                 flags.0
             );
         };
+        // CR3 on x86_64 also maps the low half: the identity window until
+        // `teardown_identity`, then the trampoline page it keeps.
+        #[cfg(target_arch = "x86_64")]
         mapper.walk_ranges(VirtAddr(0), VirtAddr(0x0000_8000_0000_0000), &mut visit);
+        // TTBR1 on aarch64 holds only the kernel half: it has no low slots,
+        // and `index` ignores the top bits.
         mapper.walk_ranges(
-            VirtAddr(0xFFFF_8000_0000_0000),
+            VirtAddr(Arch::KERNEL_VA_START),
             VirtAddr(u64::MAX),
             &mut visit,
         );
@@ -524,7 +544,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     // ---- 2. RAM-only physmap (MEMORY.md §4.1, ROADMAP §11.2) ----
     let mut map_end = 0u64;
     let walk = walk_physmap(
-        physmap_slot(),
+        boot::physmap_slot(),
         hhdm_offset(),
         info.ram_ranges(),
         info.kernel_phys.clone(),
@@ -547,42 +567,24 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         let uart = crate::machine_init::info()
             .and_then(|d| d.console_uart())
             .unwrap_or(0x0900_0000);
-        let va = VirtAddr(hhdm_offset().wrapping_add(uart & !0xFFF));
-        let pa = PhysAddr(uart & !0xFFF);
-        // SAFETY: one Device page for the console UART, mapped in the new
-        // root before `set_root`; established here.
-        let uart_map = unsafe {
-            mapper.map_page(
-                va,
-                pa,
-                paging::mmio_flags(),
-                PageSize::Size4K,
-                MapMode::Fresh,
-                &mut alloc,
-            )
-        };
-        if uart_map.is_err() {
+        if !map_device_window(
+            &mut mapper,
+            &mut alloc,
+            uart,
+            crate::serial::raw::PL011_SPAN,
+        ) {
             boot::halt_with("vibeOS: paging: uart map failed");
         }
         let fw = crate::machine_init::info()
             .and_then(|d| d.fw_cfg)
             .map(|d| d.base)
             .unwrap_or(0x0902_0000);
-        let va = VirtAddr(hhdm_offset().wrapping_add(fw & !0xFFF));
-        let pa = PhysAddr(fw & !0xFFF);
-        // SAFETY: one Device page for fw_cfg, mapped in the new root
-        // before `set_root`; established here.
-        let fw_map = unsafe {
-            mapper.map_page(
-                va,
-                pa,
-                paging::mmio_flags(),
-                PageSize::Size4K,
-                MapMode::Fresh,
-                &mut alloc,
-            )
-        };
-        if fw_map.is_err() {
+        if !map_device_window(
+            &mut mapper,
+            &mut alloc,
+            fw,
+            crate::boot::fw_cfg_init::MMIO_SPAN,
+        ) {
             boot::halt_with("vibeOS: paging: fw_cfg map failed");
         }
     }
@@ -691,12 +693,14 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         let uart = crate::machine_init::info()
             .and_then(|d| d.console_uart())
             .unwrap_or(0x0900_0000);
-        crate::serial::raw::set_mmio(hhdm_offset().wrapping_add(uart & !0xFFF));
+        // The mapped page starts at `uart & !0xFFF`; the registers sit at
+        // `uart`, so the in-page offset is kept.
+        crate::serial::raw::set_mmio(hhdm_offset().wrapping_add(uart));
         let fw = crate::machine_init::info()
             .and_then(|d| d.fw_cfg)
             .map(|d| d.base)
             .unwrap_or(0x0902_0000);
-        crate::boot::fw_cfg_init::set_mmio_va(hhdm_offset().wrapping_add(fw & !0xFFF));
+        crate::boot::fw_cfg_init::set_mmio_va(hhdm_offset().wrapping_add(fw));
     }
     // Release: pairs with the Acquire load in `identity_covers`.
     #[cfg(target_arch = "x86_64")]
@@ -711,6 +715,46 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         kernel_data_bytes: data_bytes,
         duplicated_stack_entry: duplicated,
     }
+}
+
+/// Maps the Device pages under the `span` bytes at physical `base` into the
+/// new root. `base` may start mid-page, so the window can reach into the
+/// page after its first. False when the window wraps, an offset overflows,
+/// or a map fails.
+#[cfg(target_arch = "aarch64")]
+fn map_device_window(mapper: &mut Mapper, alloc: &mut BuddyFrames, base: u64, span: u64) -> bool {
+    let Some(pages) = paging::mmio_pages(base, span) else {
+        return false;
+    };
+    let first = base & !(PAGE_SIZE_4K - 1);
+    for k in 0..pages {
+        let Some(off) = k.checked_mul(PAGE_SIZE_4K) else {
+            return false;
+        };
+        let Some(pa) = first.checked_add(off) else {
+            return false;
+        };
+        let Some(va) = hhdm_offset().checked_add(pa) else {
+            return false;
+        };
+        // SAFETY: one Device page of the window, mapped in the new root
+        // before `set_root`; established here.
+        let mapped = unsafe {
+            mapper.map_page(
+                VirtAddr(va),
+                PhysAddr(pa),
+                paging::mmio_flags(),
+                PageSize::Size4K,
+                MapMode::Fresh,
+                alloc,
+            )
+        };
+        if mapped.is_err() {
+            return false;
+        }
+    }
+    mapper.publish_leaves();
+    true
 }
 
 /// The low identity window's range, virtual and physical alike (DESIGN
@@ -892,8 +936,9 @@ fn have_1g_pages() -> bool {
     }
 }
 
-/// Map one coalesced physmap run. 1 GiB uses `map_page`; 4 KiB / 2 MiB use
-/// `map_range`.
+/// Map one coalesced physmap run. 1 GiB and 4 KiB use `map_page` at the
+/// run's size, so a 4 KiB span (the kernel image's) is never covered by a
+/// 2 MiB leaf; 2 MiB uses `map_range`.
 ///
 /// # Safety
 /// Same contract as `Mapper::map_page` / `map_range` for `run`.
@@ -903,7 +948,8 @@ unsafe fn map_physmap_run(
     run: PhysmapRun,
 ) -> Result<(), MapError> {
     let flags = paging::physmap_flags();
-    if run.size == PageSize::Size1G {
+    if run.size != PageSize::Size2M {
+        let step = run.size.bytes();
         let mut off = 0u64;
         while off < run.len {
             // SAFETY: this fn's `# Safety` contract, established here.
@@ -912,13 +958,14 @@ unsafe fn map_physmap_run(
                     VirtAddr(run.va.as_u64() + off),
                     PhysAddr(run.pa.as_u64() + off),
                     flags,
-                    PageSize::Size1G,
+                    run.size,
                     MapMode::Fresh,
                     alloc,
                 )?;
             }
-            off = off.saturating_add(PAGE_SIZE_1G);
+            off = off.saturating_add(step);
         }
+        mapper.publish_leaves();
         return Ok(());
     }
     // SAFETY: this fn's `# Safety` contract, established here.

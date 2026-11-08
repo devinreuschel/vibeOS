@@ -86,27 +86,46 @@ pub const fn feat_fgt(mmfr0: u64) -> bool {
     (mmfr0 >> 56) & 0xF != 0
 }
 
+/// `ID_AA64DFR0_EL1.PMUVer` (bits 11:8) names an architected PMUv3. Zero
+/// means no PMU, and 0b1111 is IMPLEMENTATION DEFINED, so neither has
+/// `PMUSERENR_EL0` (Arm ARM DDI0487).
+pub const fn feat_pmuv3(dfr0: u64) -> bool {
+    let pmuver = (dfr0 >> 8) & 0xF;
+    pmuver != 0 && pmuver != 0xF
+}
+
+/// `ID_AA64PFR0_EL1.AMU` (bits 47:44) is not zero: FEAT_AMUv1 exists.
+pub const fn feat_amu(pfr0: u64) -> bool {
+    (pfr0 >> 44) & 0xF != 0
+}
+
+/// `HAFGRTR_EL2` is implemented only when FEAT_FGT and FEAT_AMUv1 both
+/// exist, and an access is UNDEFINED otherwise (Arm ARM DDI0487).
+pub const fn feat_hafgrtr(mmfr0: u64, pfr0: u64) -> bool {
+    feat_fgt(mmfr0) && feat_amu(pfr0)
+}
+
+/// `ID_AA64PFR0_EL1.GIC` (bits 27:24) is not zero: the GICv3 system-register
+/// interface exists, so `ICC_SRE_EL2` is implemented (Arm ARM DDI0487).
+pub const fn feat_gic_sysreg(pfr0: u64) -> bool {
+    (pfr0 >> 24) & 0xF != 0
+}
+
 /// `CNTKCTL_EL1` at EL1, and `CNTHCTL_EL2` when `HCR_EL2.E2H` is 1.
 ///
 /// Bit 1 is `EL0VCTEN`: EL0 reads `CNTVCT_EL0`. Bit 0 is `EL0PCTEN` and
 /// stays clear, so an EL0 read of `CNTPCT_EL0` traps (DESIGN §11.4).
-/// With E2H=1 those are the names of `CNTHCTL_EL2` bits 0 and 1. The
-/// E2H=0 names, `EL1PCTEN` and `EL1PCEN`, are [`cnthctl_el2`]; writing
-/// that `0b11` under VHE sets `EL0PCTEN`.
+/// With E2H=1 those are the names of `CNTHCTL_EL2` bits 0 and 1, so this
+/// one value is what the kernel writes to `CNTHCTL_EL2` under VHE.
 pub const fn cntkctl_el1() -> u64 {
     const EL0VCTEN: u64 = 1 << 1;
     EL0VCTEN
 }
 
-/// `CNTHCTL_EL2` when `HCR_EL2.E2H` is 0 (Arm ARM CNTHCTL_EL2).
-///
-/// Bit 0 is `EL1PCTEN` and bit 1 is `EL1PCEN`: EL1 accesses the physical
-/// counter and timer. With E2H=1 those bits are `EL0PCTEN` and `EL0VCTEN`;
-/// that regime writes [`cntkctl_el1`] instead.
-pub const fn cnthctl_el2() -> u64 {
-    const EL1PCTEN: u64 = 1 << 0;
-    const EL1PCEN: u64 = 1 << 1;
-    EL1PCTEN | EL1PCEN
+/// Smallest data-cache line in bytes, from `CTR_EL0.DminLine` (bits 19:16;
+/// Arm ARM DDI0487): the line is `4 << DminLine` bytes.
+pub const fn dcache_line_bytes(ctr: u64) -> usize {
+    4 << ((ctr >> 16) & 0xF)
 }
 
 /// `PMUSERENR_EL0`: no EL0 PMU access.
@@ -211,6 +230,44 @@ mod tests {
     }
 
     #[test]
+    fn amu_field() {
+        assert!(!feat_amu(0));
+        assert!(feat_amu(1 << 44));
+        assert!(feat_amu(0xF << 44));
+        // SVE (35:32) and GIC (27:24) sit outside the AMU field.
+        assert!(!feat_amu((0xF << 32) | (0xF << 24)));
+    }
+
+    #[test]
+    fn hafgrtr_needs_fgt_and_amu() {
+        assert!(!feat_hafgrtr(0, 0));
+        assert!(!feat_hafgrtr(0, 1 << 44));
+        assert!(!feat_hafgrtr(1 << 56, 0));
+        assert!(feat_hafgrtr(1 << 56, 1 << 44));
+    }
+
+    #[test]
+    fn pmuv3_field() {
+        assert!(!feat_pmuv3(0));
+        assert!(feat_pmuv3(1 << 8));
+        assert!(feat_pmuv3(0x9 << 8));
+        // 0b1111 is IMPLEMENTATION DEFINED, not architected PMUv3.
+        assert!(!feat_pmuv3(0xF << 8));
+        // PMSVer (bits 35:32) and DebugVer (bits 3:0) sit outside the field.
+        assert!(!feat_pmuv3((0xF << 32) | 0xF));
+    }
+
+    #[test]
+    fn gic_sysreg_field() {
+        assert!(!feat_gic_sysreg(0));
+        assert!(feat_gic_sysreg(1 << 24));
+        assert!(feat_gic_sysreg(0xF << 24));
+        // AdvSIMD (23:20), RAS (31:28) and SVE (35:32) sit outside the GIC field.
+        assert!(!feat_gic_sysreg(0xF << 20));
+        assert!(!feat_gic_sysreg((0xF << 28) | (0xF << 32)));
+    }
+
+    #[test]
     fn others_are_whole_values() {
         assert_eq!(pmuserenr_el0(), 0);
         assert_eq!(cpacr_el1() >> 20 & 0b11, 0b11);
@@ -225,12 +282,17 @@ mod tests {
         const EL0VCTEN: u64 = 1 << 1;
         assert_eq!(cntkctl_el1(), EL0VCTEN);
         assert_eq!(cntkctl_el1() & EL0PCTEN, 0);
-        // CNTHCTL_EL2 when E2H is 0. The same bits under E2H=1 are
-        // EL0PCTEN and EL0VCTEN, so this value must not be written then.
-        const EL1PCTEN: u64 = 1 << 0;
-        const EL1PCEN: u64 = 1 << 1;
-        assert_eq!(cnthctl_el2(), EL1PCTEN | EL1PCEN);
-        assert_ne!(cnthctl_el2(), cntkctl_el1());
+    }
+
+    #[test]
+    fn dcache_line_from_dminline() {
+        // DminLine 4 is 64-byte lines.
+        assert_eq!(dcache_line_bytes(4 << 16), 64);
+        assert_eq!(dcache_line_bytes(0), 4);
+        assert_eq!(dcache_line_bytes(0xF << 16), 4 << 15);
+        // Bits outside DminLine (IminLine in 3:0, the rest above) do not count.
+        assert_eq!(dcache_line_bytes(0xFFF0_FFFF), 4);
+        assert_eq!(dcache_line_bytes((4 << 16) | 0xF | (0xF << 32)), 64);
     }
 
     #[test]

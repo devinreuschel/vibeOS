@@ -12,7 +12,9 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use vibeos::fb::{CHUNK, MAX_CELLS, TextGrid, glyph_origin, pack_bgrx, pixel_offset};
+use vibeos::fb::{
+    CHUNK, MAX_CELLS, TextGrid, glyph_origin, pack_bgrx, pixel_offset, span_contains,
+};
 use vibeos::font::{self, FONT_H, FONT_W};
 use vibeos::lock::RANK_DEVICE;
 
@@ -71,6 +73,22 @@ pub fn ready() -> bool {
     READY.load(Ordering::Acquire)
 }
 
+/// Write `color` at `(x, y)`, read it back, put the old pixel back, and
+/// read that back too, under the console lock so no console write lands in
+/// between. Returns `(old, written, restored)`. `None` with no framebuffer
+/// or off its edge. `kernel_tests` only (AGENTS.md rule 9).
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub(crate) fn pixel_round_trip(x: u32, y: u32, color: u32) -> Option<(u32, u32, u32)> {
+    let c = CONSOLE.lock();
+    let fb = c.fb.as_ref()?;
+    let old = fb.get_pixel(x, y)?;
+    fb.put_pixel(x, y, color);
+    let got = fb.get_pixel(x, y);
+    fb.put_pixel(x, y, old);
+    let restored = fb.get_pixel(x, y);
+    Some((old, got?, restored?))
+}
+
 /// Physical `[base, base+len)` of the console framebuffer, if any.
 /// Atomically readable so PCI BAR mapping can skip a UC patch without
 /// taking RANK_DEVICE (ioremap needs PT, which ranks below DEVICE).
@@ -85,8 +103,10 @@ pub fn overlaps_phys(phys: u64, len: u64) -> bool {
     phys < base.saturating_add(span) && base < phys.saturating_add(len)
 }
 
-/// Kernel VA of `phys` inside the console framebuffer mapping, if any.
-pub fn va_for_phys(phys: u64) -> Option<u64> {
+/// Kernel VA of `[phys, phys + len)` inside the console framebuffer
+/// mapping, if the whole range lies in the framebuffer's span. A range that
+/// runs past the span gets `None`: the mapping ends there.
+pub fn va_for_phys(phys: u64, len: u64) -> Option<u64> {
     // Acquire: pairs with the Release store in `init`.
     let span = FB_LEN.load(Ordering::Acquire);
     if span == 0 {
@@ -94,12 +114,12 @@ pub fn va_for_phys(phys: u64) -> Option<u64> {
     }
     // Acquire: pairs with the Release store in `init`.
     let base = FB_PHYS.load(Ordering::Acquire);
-    if phys < base || phys >= base.saturating_add(span) {
+    if !span_contains(base, span, phys, len) {
         return None;
     }
     // Acquire: pairs with the Release store in `init`.
     let virt = FB_VIRT.load(Ordering::Acquire);
-    Some(virt.saturating_add(phys - base))
+    virt.checked_add(phys.checked_sub(base)?)
 }
 
 /// Attach the first framebuffer [`Fb::new`] accepts.
@@ -196,7 +216,7 @@ impl Fb {
     }
 
     /// The pixel at `(x, y)`; the in-guest tests' read-back.
-    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    #[cfg(feature = "kernel_tests")]
     pub(super) fn get_pixel(&self, x: u32, y: u32) -> Option<u32> {
         let p = self.pixel_ptr(x, y)?;
         // SAFETY: invariant: as in `put_pixel`; established by

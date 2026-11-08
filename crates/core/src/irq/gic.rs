@@ -158,6 +158,64 @@ pub const fn v2m_typer_spi_count(typer: u32) -> u32 {
     typer & V2M_TYPER_MASK
 }
 
+/// INTIDs the distributor implements, from `GICD_TYPER.ITLinesNumber`
+/// (bits [4:0]): 32 for each step, so 32 to 1024 (IHI 0069).
+pub const fn gicd_lines(typer: u32) -> u32 {
+    ((typer & 0x1F) + 1) * 32
+}
+
+/// GICv2m frame MSI range: `count` SPIs from `base` (`MSI_TYPER`, or the
+/// device tree). Every INTID must be an SPI, so the two ends decide it, since
+/// the SPI range is one interval. The last one must also be below `lines`, the
+/// distributor's [`gicd_lines`]. `count` 0 has no INTIDs to check.
+pub const fn v2m_range_ok(base: u32, count: u32, lines: u32) -> bool {
+    let Some(span) = count.checked_sub(1) else {
+        return true;
+    };
+    match base.checked_add(span) {
+        Some(last) => is_spi(base) && is_spi(last) && last < lines,
+        None => false,
+    }
+}
+
+/// Counter value after reserving `want` slots from a counter at `next`, when
+/// all of them are below `limit`. `None` leaves the counter where it is, so a
+/// refused range does not spend slots a later, smaller one could take.
+pub const fn slots_reserve(next: u32, want: u32, limit: u32) -> Option<u32> {
+    match next.checked_add(want) {
+        Some(end) if end <= limit => Some(end),
+        _ => None,
+    }
+}
+
+/// GICR_TYPER.VLPIS (bit 1): the frame carries the VLPI pages too, so it
+/// spans 0x40000 (IHI 0069). Without it the frame is 0x20000.
+const GICR_TYPER_VLPIS: u64 = 1 << 1;
+
+/// Stride from one redistributor frame to the next, from that frame's own
+/// `GICR_TYPER`.
+pub const fn gicr_frame_stride(typer: u64) -> u64 {
+    if typer & GICR_TYPER_VLPIS != 0 {
+        0x4_0000
+    } else {
+        0x2_0000
+    }
+}
+
+/// Shareability field (bits [11:10]) of GICR_PROPBASER, GICR_PENDBASER,
+/// GITS_BASER and GITS_CBASER (IHI 0069).
+const XBASER_SHARE_SHIFT: u32 = 10;
+const XBASER_SHARE_MASK: u64 = 0b11;
+
+/// `true` when a table register written as shareable (`0b01` or `0b10`)
+/// reads back non-shareable (`0b00`): the implementation dropped the
+/// shareability, so the CPU must clean the tables it writes to PoC.
+pub const fn shareability_dropped(written: u64, read: u64) -> bool {
+    let w = (written >> XBASER_SHARE_SHIFT) & XBASER_SHARE_MASK;
+    let r = (read >> XBASER_SHARE_SHIFT) & XBASER_SHARE_MASK;
+    w != 0 && r == 0
+}
+
 /// MSI address and data for a GICv2m SPI (SETSPI_NS).
 pub fn v2m_compose(frame: u64, spi: u32) -> (u64, u32) {
     (frame.saturating_add(u64::from(V2M_MSI_SETSPI_NS)), spi)
@@ -171,17 +229,20 @@ pub fn its_compose(its_base: u64, event_id: u32) -> (u64, u32) {
     )
 }
 
-/// Aff0 ≥ 16 while `ICC_CTLR_EL1.RSS` is clear (ARM ARM).
+/// Aff0 ≥ 16 while `ICC_CTLR_EL1.RSS` is clear (ARM ARM); Aff3 ≠ 0 in a CPU
+/// id the kernel keeps in 32 bits (`PerCpuRemote::apic_id`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
 pub enum SgiError {
     Aff0,
+    Aff3,
 }
 
 impl SgiError {
     pub const fn as_str(self) -> &'static str {
         match self {
             SgiError::Aff0 => "aff0 needs ICC_CTLR_EL1.RSS",
+            SgiError::Aff3 => "aff3 is not 0; the kernel keeps 32 bits of CPU id",
         }
     }
 }
@@ -189,8 +250,18 @@ impl SgiError {
 impl From<SgiError> for crate::kerror::KError {
     fn from(e: SgiError) -> Self {
         match e {
-            SgiError::Aff0 => Self::Inval,
+            SgiError::Aff0 | SgiError::Aff3 => Self::Inval,
         }
+    }
+}
+
+/// `Ok` when MPIDR Aff3 (bits [39:32]) is 0. The kernel stores a CPU's id in
+/// 32 bits, so a CPU with Aff3 set would be started or signalled as another CPU.
+pub const fn aff3_ok(mpidr: u64) -> Result<(), SgiError> {
+    if (mpidr >> 32) & 0xFF == 0 {
+        Ok(())
+    } else {
+        Err(SgiError::Aff3)
     }
 }
 
@@ -350,6 +421,11 @@ mod tests {
         assert_eq!(sgi1r(0, 16, false), Err(SgiError::Aff0));
         assert_eq!(sgi1r(0, 63, false), Err(SgiError::Aff0));
         assert_eq!(sgi1r(0, 255, false), Err(SgiError::Aff0));
+        assert_eq!(aff3_ok(0x00FF_FFFF), Ok(()));
+        assert_eq!(aff3_ok(0x0000_0001_0000_0000), Err(SgiError::Aff3));
+        assert_eq!(aff3_ok(0x0000_00FF_0000_0000), Err(SgiError::Aff3));
+        // Bit 40 is outside Aff3 (bits 39:32).
+        assert_eq!(aff3_ok(0x0000_0100_0000_0000), Ok(()));
     }
 
     #[test]
@@ -358,5 +434,77 @@ mod tests {
         assert_eq!(v2m_typer_spi_count(0x0040_0020), 0x20);
         assert_eq!(v2m_compose(0x802_0000, 64), (0x802_0040, 64));
         assert_eq!(its_compose(0x808_0000, 3), (0x808_0000 + 0x1_0040, 3));
+    }
+
+    #[test]
+    fn v2m_range_must_be_spis() {
+        // SPIs are 32..=1019; the range is checked at both ends.
+        const LINES: u32 = 1024;
+        assert!(v2m_range_ok(32, 988, LINES));
+        assert!(!v2m_range_ok(32, 989, LINES));
+        assert!(v2m_range_ok(0x40, 0x20, LINES));
+        assert!(v2m_range_ok(32, 0, LINES));
+        assert!(!v2m_range_ok(31, 1, LINES));
+        assert!(!v2m_range_ok(1019, 2, LINES));
+        assert!(!v2m_range_ok(16, 4, LINES));
+        assert!(!v2m_range_ok(u32::MAX, 2, LINES));
+        assert!(!v2m_range_ok(u32::MAX - 1, 4, LINES));
+    }
+
+    #[test]
+    fn v2m_range_must_fit_the_distributor() {
+        // GICD_TYPER.ITLinesNumber 1: 64 lines, so SPIs 32..=63 exist.
+        let lines = gicd_lines(1);
+        assert_eq!(lines, 64);
+        assert!(v2m_range_ok(32, 32, lines));
+        assert!(v2m_range_ok(63, 1, lines));
+        assert!(!v2m_range_ok(64, 1, lines));
+        // A frame advertising SPIs 96..=127 on a 64-line GIC is refused.
+        assert!(!v2m_range_ok(96, 32, lines));
+        assert!(!v2m_range_ok(32, 33, lines));
+        // The ITLinesNumber field is bits [4:0] only.
+        assert_eq!(gicd_lines(0), 32);
+        assert_eq!(gicd_lines(0x1F), 1024);
+        assert_eq!(gicd_lines(0xFFFF_FFE1), 64);
+    }
+
+    #[test]
+    fn slots_reserve_moves_only_when_all_fit() {
+        // A v2m frame with two SPIs: a three-slot request is refused and
+        // leaves the counter at 0, so a later one-slot request still gets slot 0.
+        let mut next = 0u32;
+        assert_eq!(slots_reserve(next, 3, 2), None);
+        assert_eq!(next, 0);
+        next = slots_reserve(next, 1, 2).unwrap_or(next);
+        assert_eq!(next, 1);
+        next = slots_reserve(next, 1, 2).unwrap_or(next);
+        assert_eq!(next, 2);
+        assert_eq!(slots_reserve(next, 1, 2), None);
+        // A request that would overflow the counter is refused, not wrapped.
+        assert_eq!(slots_reserve(u32::MAX, 1, u32::MAX), None);
+        assert_eq!(slots_reserve(0, 0, 0), Some(0));
+    }
+
+    #[test]
+    fn gicr_stride_follows_vlpis() {
+        // IHI 0069: 0x20000 without VLPIS, 0x40000 with it (GICR_TYPER bit 1).
+        assert_eq!(gicr_frame_stride(0), 0x2_0000);
+        assert_eq!(gicr_frame_stride(1 << 4), 0x2_0000);
+        assert_eq!(gicr_frame_stride(1 << 1), 0x4_0000);
+        assert_eq!(gicr_frame_stride((1 << 1) | (1 << 4)), 0x4_0000);
+    }
+
+    #[test]
+    fn shareability_drop_is_shareable_to_non_shareable() {
+        const IS: u64 = 0b01 << 10;
+        const OS: u64 = 0b10 << 10;
+        // Written inner shareable, read back non-shareable: dropped.
+        assert!(shareability_dropped(IS | 0x1000, 0x1000));
+        assert!(shareability_dropped(OS, 0));
+        // Kept, or changed to another shareable domain, is not a drop.
+        assert!(!shareability_dropped(IS | 0x1000, IS | 0x1000));
+        assert!(!shareability_dropped(IS, OS));
+        // Nothing was asked for, so nothing was dropped.
+        assert!(!shareability_dropped(0x1000, 0));
     }
 }

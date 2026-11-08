@@ -37,6 +37,8 @@ fn canonical_check() {
     // Middle of the non-canonical hole.
     assert!(!is_canonical(0x0000_8000_0000_0000));
     assert!(!is_canonical(0xFFFF_7FFF_FFFF_FFFF));
+    // A firmware entry with bit 56 set: the HHDM copy of it is refused.
+    assert!(!is_canonical(0x0100_0000_0000_0000));
 }
 
 #[test]
@@ -72,6 +74,35 @@ fn map_translate_unmap_4k() {
     assert_eq!(unm_pa, pa);
     assert_eq!(unm_size, PageSize::Size4K);
     assert!(m.translate(va).is_none());
+}
+
+#[test]
+fn non_canonical_va_neither_translates_nor_unmaps() {
+    let mut pool = Pool::new(64);
+    let mut m = fresh_mapper(&mut pool);
+    let va = VirtAddr(0xFFFF_C000_0010_0000);
+    let pa = PhysAddr(0x0080_0000);
+    // SAFETY: `Mapper::map_page`'s contract; the host never touches the leaf's frame, and
+    // the tables are the pool's (`fresh_mapper`), established here.
+    unsafe {
+        m.map_page(
+            va,
+            pa,
+            physmap_flags(),
+            PageSize::Size4K,
+            MapMode::Fresh,
+            &mut pool,
+        )
+        .unwrap();
+    }
+    // Same table indices, top 16 bits neither all 0 nor all 1.
+    let alias = VirtAddr(0x0001_C000_0010_0000);
+    assert!(!is_canonical(alias.0));
+    assert!(m.translate(alias).is_none());
+    // SAFETY: a rejected VA touches no leaf, established by
+    // `vibeos::paging::Mapper::unmap_page`.
+    assert!(unsafe { m.unmap_page(alias) }.is_none());
+    assert_eq!(m.translate(va).unwrap().0, pa);
 }
 
 #[test]
@@ -432,6 +463,31 @@ fn ioremap_bumps_and_bounds() {
 }
 
 #[test]
+fn ioremap_refuses_firmware_lengths_that_overflow() {
+    let mut w = IoremapWindow::new();
+    let next = w.next();
+    for len in [
+        u64::MAX,
+        u64::MAX - 0xFFF,
+        u64::MAX - 0xFFE,
+        0xFFFF_FFFF_FFFF_F000,
+    ] {
+        for phys in [0, 0x123, 0x0900_0000, u64::MAX - 0xFFF] {
+            assert!(
+                w.reserve(PhysAddr(phys), len).is_none(),
+                "{phys:#x} {len:#x}"
+            );
+        }
+    }
+    // A range that wraps the physical address space.
+    assert!(w.reserve(PhysAddr(u64::MAX - 0x10), 0x100).is_none());
+    assert_eq!(w.next(), next);
+    assert_eq!(page_span(0x123, 0x1000), Some(0x2000));
+    assert_eq!(page_span(0, u64::MAX - 0xFFE), None);
+    assert_eq!(page_span(0x1000, u64::MAX), None);
+}
+
+#[test]
 fn ioremap_unreserve_returns_only_the_latest() {
     let mut w = IoremapWindow::new();
     let a = w.reserve(PhysAddr(0xFEB0_0000), 0x2000).unwrap();
@@ -538,4 +594,72 @@ fn invalidate_runs_break_then_make() {
     let log = stub::take_events();
     assert_eq!(log.dropped(), 0);
     assert_eq!(log.as_slice(), &[Event::BbmBreak(va.0), Event::BbmMake]);
+}
+
+#[test]
+fn fresh_tables_publish_before_their_link_and_batch_after_its_stores() {
+    stub::reset();
+    let mut pool = Pool::new(64);
+    let mut m = fresh_mapper(&mut pool);
+    stub::reset();
+    // Two 4 KiB pages under a kernel VA with no tables yet: PDPT, PD and PT
+    // are linked for the first page and reused for the second.
+    let va = VirtAddr(0xFFFF_C000_0000_0000);
+    let pa = PhysAddr(0x0080_0000);
+    // SAFETY: host tables; the leaf frames are never touched; established
+    // here.
+    unsafe {
+        m.map_range(
+            va,
+            pa,
+            2 * PAGE_SIZE_4K,
+            physmap_flags(),
+            MapMode::Fresh,
+            &mut pool,
+        )
+        .unwrap();
+    }
+    let log = stub::take_events();
+    assert_eq!(log.dropped(), 0);
+    let ev = log.as_slice();
+    let links = ev
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, Event::TableLink(_)))
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    assert_eq!(links.len(), 3, "events {ev:?}");
+    for i in links {
+        assert_eq!(
+            ev.get(i.wrapping_sub(1)),
+            Some(&Event::PublishTable),
+            "table linked at event {i} before its words were published: {ev:?}"
+        );
+    }
+    // The batch is published once, after its last store.
+    assert_eq!(
+        ev.iter().filter(|e| **e == Event::PublishLeaves).count(),
+        1,
+        "events {ev:?}"
+    );
+    assert_eq!(ev.last(), Some(&Event::PublishLeaves), "events {ev:?}");
+}
+
+#[test]
+fn mmio_pages_counts_the_pages_a_window_touches() {
+    // A 0x1C-byte window, the PL011's FR at +0x18 included.
+    // Aligned: one page.
+    assert_eq!(mmio_pages(0x0900_0000, 0x1C), Some(1));
+    // Offset that stays inside its page.
+    assert_eq!(mmio_pages(0x0900_0010, 0x1C), Some(1));
+    // Last byte is the page's last byte: still one page.
+    assert_eq!(mmio_pages(0x0900_0FE4, 0x1C), Some(1));
+    // One byte further reaches into the next page.
+    assert_eq!(mmio_pages(0x0900_0FE5, 0x1C), Some(2));
+    // A zero-length window touches no page.
+    assert_eq!(mmio_pages(0x0900_0FF0, 0), Some(0));
+    // The top page of the address space is one page.
+    assert_eq!(mmio_pages(u64::MAX - 0xFFF, 0x1000), Some(1));
+    // A last byte past the top of the address space is refused.
+    assert_eq!(mmio_pages(u64::MAX - 0x10, 0x1C), None);
 }

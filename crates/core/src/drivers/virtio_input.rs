@@ -19,6 +19,11 @@ pub const EV_ABS: u16 = 3;
 /// virtio 1.2 §5.8.6 event size.
 pub const EVENT_SIZE: usize = 8;
 
+/// Whether a used element of `len` bytes is too short to hold one event.
+pub const fn is_short_event(len: usize) -> bool {
+    len < EVENT_SIZE
+}
+
 /// One virtio-input event, host endian after a little-endian load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Event {
@@ -251,6 +256,13 @@ mod tests {
             code,
             value: KEY_RELEASE,
         }
+    }
+
+    #[test]
+    fn short_event_predicate_is_strict_below_event_size() {
+        assert!(is_short_event(0));
+        assert!(is_short_event(EVENT_SIZE - 1));
+        assert!(!is_short_event(EVENT_SIZE));
     }
 
     #[test]

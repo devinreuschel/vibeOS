@@ -74,8 +74,10 @@ def parse_db(text: str) -> MakeDb:
 
 @functools.cache
 def make_db() -> MakeDb:
+    # ARCH is pinned: VARIANTS and the x86 ISO names describe the x86_64 build,
+    # whatever ARCH the caller set (the Makefile exports it as VIBEOS_ARCH).
     proc = subprocess.run(
-        ["make", "-pRrq", "-f", "Makefile", ":"],
+        ["make", "-pRrq", "-f", "Makefile", "ARCH=x86_64", ":"],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -139,12 +141,12 @@ class NamedOutputsTest(unittest.TestCase):
         self.assertEqual(
             elfs,
             [
-                "build/kernels/vibeos-default.elf",
-                "build/kernels/vibeos-panic.elf",
-                "build/kernels/vibeos-ktest.elf",
+                "build/aarch64/kernels/vibeos-default.elf",
+                "build/aarch64/kernels/vibeos-panic.elf",
+                "build/aarch64/kernels/vibeos-ktest.elf",
             ],
         )
-        self.assertNotIn("build/kernels/vibeos-gp.elf", elfs)
+        self.assertNotIn("build/aarch64/kernels/vibeos-gp.elf", elfs)
 
     def test_iso_reads_only_its_own_elf(self) -> None:
         db = make_db()

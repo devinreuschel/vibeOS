@@ -4,6 +4,8 @@ use core::arch::global_asm;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::arch::aarch64::trap;
+
 use super::vectors::TrapFrame;
 
 const ST_OFF: u8 = 0;
@@ -39,6 +41,10 @@ pub struct Caught {
 }
 
 static KIND: AtomicU8 = AtomicU8::new(ST_OFF);
+/// The arming CPU's index plus one (see [`armed_token`]); 0 when no window is armed.
+/// One slot for every CPU, so catch windows must not overlap across CPUs: a second
+/// CPU's arm replaces this value and its end stores 0, so the first CPU's fault
+/// misses its window and falls through to a halt.
 static ARMED: AtomicU32 = AtomicU32::new(0);
 static GOT_FAR: AtomicU64 = AtomicU64::new(0);
 static GOT_ESR: AtomicU64 = AtomicU64::new(0);
@@ -109,11 +115,17 @@ pub fn catch<F: FnOnce()>(f: F) -> Option<Caught> {
     catch_kind(ST_VECTOR, f)
 }
 
+/// This CPU's value in `ARMED`. The window is armed with IRQs off, so the
+/// index is exact on the CPU that calls this.
+fn armed_token() -> u32 {
+    super::percpu::cpu_id_hint().saturating_add(1)
+}
+
 fn catch_kind<F: FnOnce()>(kind: u8, f: F) -> Option<Caught> {
     // Release: pairs with the Acquire load in `overflow` / `intercept`.
     KIND.store(kind, Ordering::Release);
-    // Release: pairs with the Acquire load in `overflow`.
-    ARMED.store(1, Ordering::Release);
+    // Release: pairs with the Acquire load in `overflow` / `intercept` / `on_panic`.
+    ARMED.store(armed_token(), Ordering::Release);
     // SAFETY: `vibeos_jmpbuf` is this CPU's catch buffer; the test holds
     // IRQs off; established here.
     let rc = unsafe { vibeos_setjmp(BUF.0.get()) };
@@ -146,6 +158,11 @@ pub fn intercept(frame: &mut TrapFrame) -> bool {
     if KIND.load(Ordering::Acquire) != ST_DABT {
         return false;
     }
+    // Acquire: pairs with the Release store in `catch_kind`. A fault on another
+    // CPU, or one the window did not arm for, goes to the uaccess fixup.
+    if ARMED.load(Ordering::Acquire) != armed_token() || !trap::is_el1_abort(frame.esr) {
+        return false;
+    }
     // Relaxed: pairs with the Relaxed loads in `catch_dabt` on this CPU.
     GOT_FAR.store(frame.far, Ordering::Relaxed);
     // Relaxed: pairs with the Relaxed loads in `catch_dabt` on this CPU.
@@ -161,6 +178,10 @@ pub fn intercept(frame: &mut TrapFrame) -> bool {
 pub fn overflow(far: u64, esr: u64, elr: u64, sp: u64) -> bool {
     // Acquire: pairs with the Release store in `catch`.
     if KIND.load(Ordering::Acquire) != ST_VECTOR {
+        return false;
+    }
+    // Acquire: pairs with the Release store in `catch_kind`.
+    if ARMED.load(Ordering::Acquire) != armed_token() {
         return false;
     }
     // Relaxed: pairs with the Relaxed loads in `catch` on this CPU.
@@ -202,6 +223,11 @@ pub fn on_panic() {
     if KIND.load(Ordering::Acquire) != ST_PANIC {
         return;
     }
+    // Acquire: pairs with the Release store in `catch_kind`. A panic on another
+    // CPU is not this window's to catch.
+    if ARMED.load(Ordering::Acquire) != armed_token() {
+        return;
+    }
     // Release: pairs with the Acquire load in `overflow` / `intercept`.
     KIND.store(ST_OFF, Ordering::Release);
     // Release: pairs with nothing.
@@ -217,6 +243,10 @@ pub fn on_panic() {
 pub fn on_alloc_error(_layout: core::alloc::Layout) {
     // Acquire: pairs with the Release store in `catch_kind`.
     if KIND.load(Ordering::Acquire) != ST_ALLOC {
+        return;
+    }
+    // Acquire: pairs with the Release store in `catch_kind`.
+    if ARMED.load(Ordering::Acquire) != armed_token() {
         return;
     }
     // Release: pairs with the Acquire load in `catch_kind` after the longjmp.

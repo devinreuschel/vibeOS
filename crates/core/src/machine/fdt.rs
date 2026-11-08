@@ -4,6 +4,17 @@
 //! [`pick_pl011`] is the one console chooser: `/aliases` `serial0`, else the
 //! first okay `arm,pl011` in tree order. [`parse`] fills [`MachineDesc`]
 //! and calls it. `/chosen` is ignored. `memory@` is not RAM.
+//!
+//! Limits. `reg` is read with the parent's cell counts, keeping the low 64
+//! bits, and no `ranges` translation is applied. Each `interrupt-map` row is
+//! read as two parent address cells and three parent interrupt cells, without
+//! resolving the parent; a map whose length is not a whole number of rows is
+//! left empty and counted (`refused_interrupt_maps`). Rows past the host's
+//! cap are counted (`dropped_interrupt_rows` for `interrupt-map`,
+//! `dropped_msi_rows` for `msi-map`). A node keeps its first 32 properties
+//! and the first four `arm,pl011` nodes; the rest are counted (`dropped_props`,
+//! `dropped_uarts`). A `/reserved-memory` past its table, or a walk past its
+//! caps, refuses the tree.
 
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
@@ -15,6 +26,7 @@ use super::{
     push_reserved, push_timer, push_virtio,
 };
 use crate::irq::gic::gic_intid;
+use crate::limits::MAX_DT_REG_BYTES;
 
 /// FDT magic (`dt_spec` v0.4 §5.2).
 const FDT_MAGIC: u32 = 0xd00d_feed;
@@ -25,6 +37,8 @@ const FDT_NOP: u32 = 0x4;
 const FDT_END: u32 = 0x9;
 
 const HDR_LEN: usize = 40;
+/// Newest `last_comp_version` this walker reads (`dt_spec` v0.4 §5.2).
+const LAST_COMP_VERSION: u32 = 17;
 const DEPTH: usize = 16;
 const PATH_CAP: usize = 128;
 const PROP_CAP: usize = 32;
@@ -38,9 +52,12 @@ pub enum FdtError {
     Truncated,
     BadMagic,
     BadToken,
-    /// A reserved range would not fit in [`super::MAX_RESERVED`], or its
+    /// `last_comp_version` is past the version this walker reads.
+    BadVersion,
+    /// A reserved range would not fit in [`super::MAX_RESERVED`], its
     /// start is the last address of the space so it cannot be a half-open
-    /// range.
+    /// range, or a property under `/reserved-memory` would not fit in the
+    /// property table, so its range could not be read as reserved.
     Reserved,
 }
 
@@ -50,6 +67,7 @@ impl FdtError {
             FdtError::Truncated => "truncated",
             FdtError::BadMagic => "bad magic",
             FdtError::BadToken => "bad token",
+            FdtError::BadVersion => "bad version",
             FdtError::Reserved => "reserved",
         }
     }
@@ -125,6 +143,9 @@ fn parse_header(dtb: &[u8]) -> Result<Header, FdtError> {
     if (totalsize as usize) > dtb.len() || (totalsize as usize) < HDR_LEN {
         return Err(FdtError::Truncated);
     }
+    if be_u32(h, 24).ok_or(FdtError::Truncated)? > LAST_COMP_VERSION {
+        return Err(FdtError::BadVersion);
+    }
     Ok(Header {
         totalsize,
         off_dt_struct: be_u32(h, 8).ok_or(FdtError::Truncated)?,
@@ -171,24 +192,27 @@ fn cell(val: &[u8], i: usize) -> Option<u32> {
     be_u32(val, off)
 }
 
-/// First GIC INTID from a 3-cell `interrupts` specifier, or 0.
-fn first_gic_intid(props: &[Prop<'_>]) -> u32 {
+/// First GIC INTID and whether its trigger is edge (flags cell, bits 0-1:
+/// 1 rising, 2 falling; 4 and 8 are level), from a 3-cell `interrupts`
+/// specifier. `(0, false)` when absent.
+fn first_gic_irq(props: &[Prop<'_>]) -> (u32, bool) {
     prop_named(props, b"interrupts")
         .and_then(|v| {
-            let ty = cell(v, 0)?;
-            let num = cell(v, 1)?;
-            gic_intid(ty, num)
+            let intid = gic_intid(cell(v, 0)?, cell(v, 1)?)?;
+            Some((intid, cell(v, 2)? & 3 != 0))
         })
-        .unwrap_or(0)
+        .unwrap_or((0, false))
 }
 
 fn addr_cells(val: &[u8], start: usize, ncells: u32) -> Option<u64> {
     match ncells {
         0 => Some(0),
         1 => Some(u64::from(cell(val, start)?)),
-        _ => {
-            let hi = cell(val, start)?;
-            let lo = cell(val, start.checked_add(1)?)?;
+        // The low two cells, as the big-endian number's low 64 bits.
+        n => {
+            let hi_at = start.checked_add(n as usize)?.checked_sub(2)?;
+            let hi = cell(val, hi_at)?;
+            let lo = cell(val, hi_at.checked_add(1)?)?;
             Some(u64::from(hi).wrapping_shl(32) | u64::from(lo))
         }
     }
@@ -197,7 +221,9 @@ fn addr_cells(val: &[u8], start: usize, ncells: u32) -> Option<u64> {
 fn first_reg(val: &[u8], addr_c: u32, size_c: u32) -> Option<PhysRange> {
     let start = addr_cells(val, 0, addr_c)?;
     let size = addr_cells(val, addr_c as usize, size_c)?;
-    Some(PhysRange { start, size })
+    let r = PhysRange { start, size };
+    // A device window the kernel would map: no wrap, no absurd length.
+    (size <= MAX_DT_REG_BYTES && r.end().is_some()).then_some(r)
 }
 
 /// Every `(addr, size)` pair in a `reg` property. A partial trailing pair
@@ -339,12 +365,33 @@ fn path_starts(path: &[u8], prefix: &[u8]) -> bool {
     path.get(..prefix.len()) == Some(prefix) && path.get(prefix.len()).is_none_or(|&c| c == b'/')
 }
 
-/// The one UART chooser. `/aliases` `serial0`, else the first okay `arm,pl011`.
-pub fn pick_pl011(dtb: &[u8]) -> Option<u64> {
-    pick_pl011_full(dtb).map(|c| c.base)
+/// The first component of an absolute node path, and whether a component follows it.
+fn first_component(path: &[u8]) -> Option<(&[u8], bool)> {
+    let rest = path.strip_prefix(b"/")?;
+    match rest.iter().position(|&c| c == b'/') {
+        Some(i) => Some((rest.get(..i)?, true)),
+        None => Some((rest, false)),
+    }
 }
 
-fn pick_pl011_full(dtb: &[u8]) -> Option<UartCand> {
+/// `/reserved-memory`, `/reserved-memory@…`, or a node below either.
+fn in_reserved_memory(path: &[u8]) -> bool {
+    first_component(path).is_some_and(|(c, _)| is_reserved_memory(c))
+}
+
+/// A node below `/reserved-memory` or `/reserved-memory@…`.
+fn below_reserved_memory(path: &[u8]) -> bool {
+    first_component(path).is_some_and(|(c, below)| below && is_reserved_memory(c))
+}
+
+/// The one UART chooser. `/aliases` `serial0`, else the first okay `arm,pl011`.
+pub fn pick_pl011(dtb: &[u8]) -> Option<u64> {
+    let mut dropped = 0u32;
+    pick_pl011_full(dtb, &mut dropped).map(|c| c.base)
+}
+
+/// `dropped` counts the `arm,pl011` nodes past [`UART_CAP`].
+fn pick_pl011_full(dtb: &[u8], dropped: &mut u32) -> Option<UartCand> {
     let mut alias = [0u8; PATH_CAP];
     let mut alias_len = 0usize;
     let mut cands = [UartCand {
@@ -369,17 +416,21 @@ fn pick_pl011_full(dtb: &[u8]) -> Option<UartCand> {
         if compatible_has(props, b"arm,pl011")
             && let Some(r) =
                 prop_named(props, b"reg").and_then(|v| first_reg(v, inh.addr_cells, inh.size_cells))
-            && let Some(slot) = cands.get_mut(n)
         {
-            let plen = path.len().min(PATH_CAP);
-            if let Some(dst) = slot.path.get_mut(..plen) {
-                dst.copy_from_slice(path.get(..plen).unwrap_or(&[]));
+            match cands.get_mut(n) {
+                Some(slot) => {
+                    let plen = path.len().min(PATH_CAP);
+                    if let Some(dst) = slot.path.get_mut(..plen) {
+                        dst.copy_from_slice(path.get(..plen).unwrap_or(&[]));
+                    }
+                    slot.path_len = plen;
+                    slot.base = r.start;
+                    slot.size = r.size;
+                    slot.okay = status_okay(props);
+                    n = n.saturating_add(1);
+                }
+                None => *dropped = dropped.saturating_add(1),
             }
-            slot.path_len = plen;
-            slot.base = r.start;
-            slot.size = r.size;
-            slot.okay = status_okay(props);
-            n = n.saturating_add(1);
         }
         Ok(())
     })
@@ -420,15 +471,16 @@ pub fn parse_dtb(dtb: &[u8]) -> Result<Parsed, FdtError> {
         take_reserved(&mut d, path, props, inh)
     })?;
     match walk(dtb, false, |path, props, inh| {
-        if path_starts(path, b"/reserved-memory") || path_is(path, b"/chosen") {
+        if in_reserved_memory(path) || path_is(path, b"/chosen") {
             return Ok(());
         }
         fill_node(&mut d, path, props, inh);
         Ok(())
     }) {
-        Ok(nodes) => {
-            d.node_count = nodes;
-            if let Some(c) = pick_pl011_full(dtb) {
+        Ok(walked) => {
+            d.node_count = walked.nodes;
+            d.dropped_props = walked.dropped_props;
+            if let Some(c) = pick_pl011_full(dtb, &mut d.dropped_uarts) {
                 push_console(
                     &mut d,
                     ConsoleDesc {
@@ -458,7 +510,7 @@ fn take_reserved(
     props: &[Prop<'_>],
     inh: Inherit,
 ) -> Result<(), FdtError> {
-    if path_starts(path, b"/reserved-memory") && !path_is(path, b"/reserved-memory") {
+    if below_reserved_memory(path) {
         let no_map = has_empty(props, b"no-map");
         if let Some(v) = prop_named(props, b"reg") {
             each_reg(v, inh.addr_cells, inh.size_cells, |r| {
@@ -517,12 +569,13 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
         || compatible_has(props, b"arm,psci-1.0")
         || compatible_has(props, b"arm,psci-0.2")
     {
-        let hvc = match prop_named(props, b"method").map(cstr) {
-            Some(b"hvc") => true,
-            Some(b"smc") => false,
-            _ => true,
+        // A missing or unknown `method` names no conduit: no CPU can be
+        // started through it, so it is not taken for HVC.
+        let m = match prop_named(props, b"method").map(cstr) {
+            Some(b"hvc") => EnableMethod::Psci { hvc: true },
+            Some(b"smc") => EnableMethod::Psci { hvc: false },
+            _ => EnableMethod::None,
         };
-        let m = EnableMethod::Psci { hvc };
         d.psci = Some(m);
         d.enable = m;
     }
@@ -613,24 +666,28 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
     if compatible_has(props, b"arm,pl031")
         && let Some(r) = reg
     {
+        let (irq, irq_edge) = first_gic_irq(props);
         d.rtc = Some(MmioDev {
             base: r.start,
             size: r.size,
             dma_coherent: dma,
             msi_parent,
-            irq: first_gic_intid(props),
+            irq,
+            irq_edge,
         });
     }
 
     if compatible_has(props, b"qemu,fw-cfg-mmio")
         && let Some(r) = reg
     {
+        let (irq, irq_edge) = first_gic_irq(props);
         d.fw_cfg = Some(MmioDev {
             base: r.start,
             size: r.size,
             dma_coherent: dma,
             msi_parent,
-            irq: first_gic_intid(props),
+            irq,
+            irq_edge,
         });
     }
 
@@ -638,6 +695,7 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
         && status_okay(props)
         && let Some(r) = reg
     {
+        let (irq, irq_edge) = first_gic_irq(props);
         push_virtio(
             d,
             MmioDev {
@@ -645,7 +703,8 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
                 size: r.size,
                 dma_coherent: dma,
                 msi_parent,
-                irq: first_gic_intid(props),
+                irq,
+                irq_edge,
             },
         );
     }
@@ -668,13 +727,16 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
             msi_parent,
             ..PciHost::default()
         };
-        fill_msi_map(&mut host, props);
-        fill_interrupt_map(&mut host, props);
+        fill_msi_map(&mut host, props, &mut d.dropped_msi_rows);
+        if fill_interrupt_map(&mut host, props, &mut d.dropped_interrupt_rows) {
+            d.refused_interrupt_maps = d.refused_interrupt_maps.saturating_add(1);
+        }
         push_pci(d, host);
     }
 }
 
-fn fill_msi_map(host: &mut PciHost, props: &[Prop<'_>]) {
+/// Rows past [`MAX_MSI_MAP`] are added to `dropped`.
+fn fill_msi_map(host: &mut PciHost, props: &[Prop<'_>], dropped: &mut u32) {
     let Some(v) = prop_named(props, b"msi-map") else {
         return;
     };
@@ -704,22 +766,35 @@ fn fill_msi_map(host: &mut PciHost, props: &[Prop<'_>]) {
             None => break,
         };
     }
+    // Each row is four 32-bit cells; the rows less the ones the cap let in.
+    let rows = v.len().checked_div(4 * 4).unwrap_or(0);
+    let past_cap = rows.saturating_sub(host.msi_map_len);
+    *dropped = dropped.saturating_add(u32::try_from(past_cap).unwrap_or(u32::MAX));
 }
 
-fn fill_interrupt_map(host: &mut PciHost, props: &[Prop<'_>]) {
+/// `true` when the map is refused: its length is not a whole number of rows.
+/// Rows past [`MAX_INTERRUPT_MAP`] are added to `dropped`.
+fn fill_interrupt_map(host: &mut PciHost, props: &[Prop<'_>], dropped: &mut u32) -> bool {
     let Some(v) = prop_named(props, b"interrupt-map") else {
-        return;
+        return false;
     };
     // Child unit address + interrupt + phandle + parent address + parent
     // interrupt. PCI virt: 3 + 1 + 1. GICv2/v3: 2 + 3 parent cells.
     let child_addr = u32_prop(props, b"#address-cells").unwrap_or(3);
     let child_irq = u32_prop(props, b"#interrupt-cells").unwrap_or(1);
     let Some(child_span) = child_addr.checked_add(child_irq) else {
-        return;
+        return true;
     };
     let Some(stride) = child_span.checked_add(6) else {
-        return;
+        return true;
     };
+    // Any other length is not a whole number of rows of this shape.
+    let Some(row_bytes) = (stride as usize).checked_mul(4) else {
+        return true;
+    };
+    if v.len().checked_rem(row_bytes) != Some(0) {
+        return true;
+    }
     let mut i = 0usize;
     while host.interrupt_map_len < host.interrupt_map.len() {
         let Some(child_hi) = cell(v, i) else { break };
@@ -761,13 +836,25 @@ fn fill_interrupt_map(host: &mut PciHost, props: &[Prop<'_>]) {
             None => break,
         };
     }
+    // The map's rows less the ones the cap let in.
+    let rows = v.len().checked_div(row_bytes).unwrap_or(0);
+    let past_cap = rows.saturating_sub(host.interrupt_map_len);
+    *dropped = dropped.saturating_add(u32::try_from(past_cap).unwrap_or(u32::MAX));
+    false
+}
+
+#[derive(Clone, Copy)]
+struct WalkTotals {
+    nodes: u32,
+    /// Properties past [`PROP_CAP`] on the nodes visited, not passed on.
+    dropped_props: u32,
 }
 
 fn walk(
     dtb: &[u8],
     skip_unrelated: bool,
     mut visit: impl FnMut(&[u8], &[Prop<'_>], Inherit) -> Result<(), FdtError>,
-) -> Result<u32, FdtError> {
+) -> Result<WalkTotals, FdtError> {
     let h = parse_header(dtb)?;
     let st = struct_blob(dtb, &h)?;
     let strings = strings_blob(dtb, &h)?;
@@ -782,6 +869,7 @@ fn walk(
     let mut depth = 0usize;
     let mut reserved_depth: Option<usize> = None;
     let mut nodes = 0u32;
+    let mut dropped_props = 0u32;
     let mut props_buf = [Prop {
         name: &[],
         value: &[],
@@ -792,7 +880,15 @@ fn walk(
         off = off.checked_add(4).ok_or(FdtError::Truncated)?;
         match tok {
             FDT_NOP => {}
-            FDT_END => return Ok(nodes),
+            FDT_END => {
+                if depth != 0 {
+                    return Err(FdtError::BadToken);
+                }
+                return Ok(WalkTotals {
+                    nodes,
+                    dropped_props,
+                });
+            }
             FDT_BEGIN_NODE => {
                 let name = cstr(st.get(off..).ok_or(FdtError::Truncated)?);
                 let raw = name.len().checked_add(1).ok_or(FdtError::Truncated)?;
@@ -818,6 +914,8 @@ fn walk(
                     return Err(FdtError::BadToken);
                 }
                 // Collect this node's properties before visiting.
+                let in_reserved =
+                    reserved_depth.is_some() || (depth == 1 && is_reserved_memory(name));
                 let mut np = 0usize;
                 loop {
                     let t = be_u32(st, off).ok_or(FdtError::Truncated)?;
@@ -839,6 +937,10 @@ fn walk(
                     if let Some(slot) = props_buf.get_mut(np) {
                         *slot = Prop { name: pname, value };
                         np = np.saturating_add(1);
+                    } else if in_reserved {
+                        return Err(FdtError::Reserved);
+                    } else {
+                        dropped_props = dropped_props.saturating_add(1);
                     }
                 }
                 let props = props_buf.get(..np).unwrap_or(&[]);
@@ -917,287 +1019,5 @@ fn skip_node(st: &[u8], off: &mut usize) -> Result<(), FdtError> {
     clippy::arithmetic_side_effects,
     reason = "host test fixtures"
 )]
-mod tests {
-    use super::*;
-    use crate::machine::IrqController;
-    use crate::pmm::clip_usable;
-
-    const VIRT_82: &[u8] = include_bytes!("testdata/virt-8.2.dtb");
-    const VIRT_82_SEC: &[u8] = include_bytes!("testdata/virt-8.2-secure.dtb");
-    const VIRT_CUR: &[u8] = include_bytes!("testdata/virt-current.dtb");
-    const RESERVED: &[u8] = include_bytes!("testdata/reserved-both.dtb");
-    const TWO_REG: &[u8] = include_bytes!("testdata/reserved-two-reg.dtb");
-    const RESERVED_33: &[u8] = include_bytes!("testdata/reserved-33.dtb");
-    const RESERVED_32: &[u8] = include_bytes!("testdata/reserved-32.dtb");
-    const OVERFLOW: &[u8] = include_bytes!("testdata/reserved-overflow.dtb");
-    const DEEP: &[u8] = include_bytes!("testdata/reserved-deep.dtb");
-    const TIMER5: &[u8] = include_bytes!("testdata/timer-5irq.dtb");
-    const ECAM_RANGE: &[u8] = include_bytes!("testdata/ecam-bus-range.dtb");
-
-    #[test]
-    fn virt_dumpdtb_picks_uart_9000000() {
-        assert_eq!(pick_pl011(VIRT_82), Some(0x900_0000));
-        assert_eq!(pick_pl011(VIRT_82_SEC), Some(0x900_0000));
-        assert_eq!(pick_pl011(VIRT_CUR), Some(0x900_0000));
-        for blob in [VIRT_82, VIRT_82_SEC, VIRT_CUR] {
-            let d = parse(blob).unwrap();
-            assert_eq!(d.console_uart(), Some(0x900_0000));
-        }
-    }
-
-    #[test]
-    fn virt_8_2_secure_skips_disabled_uart() {
-        // The disabled secure UART is first; pick must not take 0x9040000.
-        let d = parse(VIRT_82_SEC).unwrap();
-        assert_eq!(d.console_uart(), Some(0x900_0000));
-        assert_ne!(d.console_uart(), Some(0x904_0000));
-    }
-
-    #[test]
-    fn virt_current_uses_aliases_serial0() {
-        let d = parse(VIRT_CUR).unwrap();
-        assert_eq!(d.console_uart(), Some(0x900_0000));
-        // /chosen is present and names the same UART; pick still goes
-        // through aliases, not stdout-path.
-        assert!(pick_pl011(VIRT_CUR).is_some());
-    }
-
-    fn check_virt(d: &MachineDesc) {
-        assert_eq!(d.cpu_count(), 1);
-        assert_eq!(d.cpus()[0].hw_id, 0);
-        assert_eq!(d.enable, EnableMethod::Psci { hvc: true });
-        assert!(d.psci.is_some());
-        assert!(
-            d.irq_controllers.iter().take(d.irq_controller_count).any(
-                |c| matches!(c, IrqController::GicV3 { dist, .. } if dist.start == 0x800_0000)
-            )
-        );
-        assert!(
-            d.irq_controllers.iter().take(d.irq_controller_count).any(
-                |c| matches!(c, IrqController::GicIts { mmio, .. } if mmio.start == 0x808_0000)
-            )
-        );
-        match d.arm_timer() {
-            Some(TimerDesc::ArmGeneric { irqs, nirq, .. }) => {
-                assert_eq!(nirq, 4);
-                assert_eq!(&irqs[..4], &[0xd, 0xe, 0xb, 0xa]);
-            }
-            other => panic!("timer {other:?}"),
-        }
-        let pci = d.pci_hosts();
-        assert_eq!(pci.len(), 1);
-        assert_eq!(pci[0].ecam_base, 0x40_1000_0000);
-        assert_eq!(pci[0].ecam_size, 0x1000_0000);
-        assert_eq!(pci[0].first_bus, 0);
-        assert_eq!(pci[0].last_bus, 0xff);
-        assert_eq!(
-            crate::pci::scan_range(pci[0].first_bus, pci[0].last_bus, pci[0].ecam_size),
-            Some((0, 0xff))
-        );
-        assert!(pci[0].dma_coherent);
-        assert_eq!(pci[0].msi_map_len, 1);
-        assert_eq!(pci[0].msi_map[0].length, 0x1_0000);
-        assert_eq!(pci[0].interrupt_map_len, 16);
-        assert_eq!(pci[0].interrupt_map[0].pin, 1);
-        assert_eq!(pci[0].interrupt_map[0].irq, 3);
-        assert_eq!(d.virtio_mmio_count, 32);
-        assert!(d.virtio_mmio[0].dma_coherent);
-        assert_eq!(d.virtio_mmio[0].base, 0xa00_0000);
-        // QEMU virt: SPI 16 → INTID 48 (GIC_SPI + 16).
-        assert_eq!(d.virtio_mmio[0].irq, 48);
-        assert_eq!(d.virtio_mmio[1].irq, 49);
-        let fw = d.fw_cfg.unwrap();
-        assert_eq!(fw.base, 0x902_0000);
-        assert!(fw.dma_coherent);
-        let rtc = d.rtc.unwrap();
-        assert_eq!(rtc.base, 0x901_0000);
-        assert!(d.node_count >= 40);
-        // memory@ must not become reserved or a console.
-        assert!(!d.reserved_ranges().any(|r| r.start == 0x4000_0000));
-    }
-
-    #[test]
-    fn virt_trees_fill_machine_desc() {
-        check_virt(&parse(VIRT_82).unwrap());
-        check_virt(&parse(VIRT_CUR).unwrap());
-        let sec = parse(VIRT_82_SEC).unwrap();
-        assert_eq!(sec.console_uart(), Some(0x900_0000));
-        assert_eq!(sec.cpu_count(), 1);
-    }
-
-    #[test]
-    fn reserved_memory_both_kinds() {
-        let d = parse(RESERVED).unwrap();
-        assert_eq!(d.reserved_count, 2);
-        let mut rs: Vec<_> = d.reserved_ranges().collect();
-        rs.sort_by_key(|r| r.start);
-        assert_eq!(rs[0], 0x8000_0000..0x8000_1000);
-        assert_eq!(rs[1], 0x8100_0000..0x8100_2000);
-        assert_eq!(d.console_uart(), Some(0x900_0000));
-        // The memreserve block has no no-map flag. Only the reserved node does.
-        let nomap: Vec<_> = d.nomap_ranges().collect();
-        assert_eq!(nomap, vec![0x8100_0000..0x8100_2000]);
-    }
-
-    #[test]
-    fn reserved_reg_keeps_every_pair() {
-        let d = parse(TWO_REG).unwrap();
-        let mut rs: Vec<_> = d.reserved_ranges().collect();
-        rs.sort_by_key(|r| r.start);
-        assert_eq!(
-            rs,
-            vec![
-                0x8000_0000..0x8000_1000,
-                0x8100_0000..0x8100_2000,
-                0x8200_0000..0x8200_1000,
-            ]
-        );
-        let mut nomap: Vec<_> = d.nomap_ranges().collect();
-        nomap.sort_by_key(|r| r.start);
-        assert_eq!(
-            nomap,
-            vec![0x8000_0000..0x8000_1000, 0x8100_0000..0x8100_2000]
-        );
-        let mut phys = Vec::new();
-        clip_usable(
-            0x7FF0_0000..0x8300_0000,
-            || d.nomap_ranges(),
-            |p| {
-                phys.push(p);
-            },
-        );
-        assert_eq!(
-            phys,
-            vec![
-                0x7FF0_0000..0x8000_0000,
-                0x8000_1000..0x8100_0000,
-                0x8100_2000..0x8300_0000,
-            ]
-        );
-        let mut buddy = Vec::new();
-        clip_usable(
-            0x7FF0_0000..0x8300_0000,
-            || d.reserved_ranges(),
-            |p| {
-                buddy.push(p);
-            },
-        );
-        assert!(
-            buddy
-                .iter()
-                .all(|p| rs.iter().all(|e| p.end <= e.start || p.start >= e.end))
-        );
-        assert!(buddy.contains(&(0x8200_1000..0x8300_0000)));
-    }
-
-    #[test]
-    fn reserved_past_cap_is_refused() {
-        assert_eq!(parse(RESERVED_33).err(), Some(FdtError::Reserved));
-        assert_eq!(parse_dtb(RESERVED_33).err(), Some(FdtError::Reserved));
-        let d = parse(RESERVED_32).unwrap();
-        assert_eq!(d.reserved_count, 32);
-        assert_eq!(d.reserved_ranges().count(), 32);
-    }
-
-    #[test]
-    fn reserved_overflow_is_saturated() {
-        let d = parse(OVERFLOW).unwrap();
-        let rs: Vec<_> = d.reserved_ranges().collect();
-        assert_eq!(rs, vec![0xFFFF_FFFF_FFF0_0000..u64::MAX]);
-        let mut out = Vec::new();
-        clip_usable(
-            0xFFFF_FFFF_FFE0_0000..u64::MAX,
-            || d.reserved_ranges(),
-            |p| out.push(p),
-        );
-        assert_eq!(out, vec![0xFFFF_FFFF_FFE0_0000..0xFFFF_FFFF_FFF0_0000]);
-    }
-
-    #[test]
-    fn reserved_survives_a_walk_past_the_caps() {
-        let parsed = parse_dtb(DEEP).unwrap();
-        let Parsed::Incomplete(d, e) = parsed else {
-            panic!("device walk should fail");
-        };
-        assert_ne!(e, FdtError::Reserved);
-        assert!(parse(DEEP).is_err());
-        let mut rs: Vec<_> = d.reserved_ranges().collect();
-        rs.sort_by_key(|r| r.start);
-        assert_eq!(rs, vec![0x8000_0000..0x8000_1000, 0x9000_0000..0x9000_1000]);
-    }
-
-    #[test]
-    fn ecam_bus_range_reg_is_first_bus() {
-        let d = parse(ECAM_RANGE).unwrap();
-        let pci = d.pci_hosts();
-        assert_eq!(pci.len(), 1);
-        let h = &pci[0];
-        assert_eq!(h.segment, 0);
-        assert_eq!(h.first_bus, 0x10);
-        assert_eq!(h.last_bus, 0x1f);
-        const R: u64 = 0x4000_0000;
-        assert_eq!(h.ecam_base, R);
-        assert_eq!(h.ecam_size, 0x0100_0000);
-        assert_eq!(
-            crate::pci::ecam_phys(h.ecam_base, h.first_bus, h.last_bus, 0x10, 0, 0, 0),
-            Some(R)
-        );
-        assert_eq!(
-            crate::pci::ecam_phys(h.ecam_base, h.first_bus, h.last_bus, 0x1f, 0, 0, 0),
-            Some(R + (0xf << 20))
-        );
-        assert_eq!(
-            crate::pci::ecam_phys(h.ecam_base, h.first_bus, h.last_bus, 0x0f, 0, 0, 0),
-            None
-        );
-        assert_eq!(
-            crate::pci::ecam_phys(h.ecam_base, h.first_bus, h.last_bus, 0x20, 0, 0, 0),
-            None
-        );
-    }
-
-    #[test]
-    fn timer_five_entry() {
-        let d = parse(TIMER5).unwrap();
-        match d.arm_timer() {
-            Some(TimerDesc::ArmGeneric { irqs, nirq, .. }) => {
-                assert_eq!(nirq, 5);
-                assert_eq!(&irqs[..5], &[0xd, 0xe, 0xb, 0xa, 0x9]);
-            }
-            other => panic!("timer {other:?}"),
-        }
-        assert_eq!(pick_pl011(TIMER5), Some(0x900_0000));
-    }
-
-    #[test]
-    fn pick_is_the_one_console_function() {
-        // parse must not invent a second chooser: console == pick_pl011.
-        for blob in [VIRT_82, VIRT_82_SEC, VIRT_CUR, RESERVED, TIMER5] {
-            assert_eq!(parse(blob).unwrap().console_uart(), pick_pl011(blob));
-        }
-    }
-
-    #[test]
-    fn bad_magic_is_an_error() {
-        assert_eq!(parse(&[0; 64]).err(), Some(FdtError::BadMagic));
-        assert_eq!(pick_pl011(&[0; 64]), None);
-    }
-
-    /// A tree whose first PL011 is disabled and which has no `/aliases`.
-    #[test]
-    fn first_okay_pl011_in_tree_order() {
-        // Build: disabled @0x9040000, then okay @0x9000000. No aliases.
-        let dtb = tiny_two_uarts(false);
-        assert_eq!(pick_pl011(&dtb), Some(0x900_0000));
-        let with_alias = tiny_two_uarts(true);
-        assert_eq!(pick_pl011(&with_alias), Some(0x900_0000));
-    }
-
-    fn tiny_two_uarts(aliases: bool) -> Vec<u8> {
-        if aliases {
-            include_bytes!("testdata/two-uarts-alias.dtb").to_vec()
-        } else {
-            include_bytes!("testdata/two-uarts.dtb").to_vec()
-        }
-    }
-}
+#[path = "fdt_tests.rs"]
+mod tests;

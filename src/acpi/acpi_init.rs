@@ -11,6 +11,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use vibeos::acpi::{self, AcpiError, AcpiInfo, MAX_IOAPICS, PhysMem};
 use vibeos::paging::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
+use vibeos::physmap::page_bounds;
 
 use crate::cell::BootCell;
 use crate::kva_init;
@@ -76,20 +77,15 @@ impl PhysMem for HhdmPhys {
     }
 }
 
-fn align_down(x: u64, a: u64) -> u64 {
-    x & !(a - 1)
-}
-fn align_up(x: u64, a: u64) -> u64 {
-    (x + a - 1) & !(a - 1)
-}
-
-/// True when the RAM-only physmap already covers `[phys, phys+len)`.
+/// True when the RAM-only physmap already covers `[phys, phys+len)`. A
+/// range whose end wraps the 64-bit space is not covered.
 fn physmap_covers(phys: u64, len: u64) -> bool {
     if len == 0 {
         return true;
     }
-    let start = align_down(phys, PAGE_SIZE_4K);
-    let end = align_up(phys.saturating_add(len), PAGE_SIZE_4K);
+    let Some((start, end)) = page_bounds(phys, len) else {
+        return false;
+    };
     let mut p = start;
     while p < end {
         let va = VirtAddr(paging_init::hhdm_offset().wrapping_add(p));
@@ -104,8 +100,14 @@ fn physmap_covers(phys: u64, len: u64) -> bool {
     true
 }
 
+/// Whether `[phys, phys+len)` overlaps RAM. An ACPI register page is device
+/// MMIO, so RAM there would get a UC alias of a write-back leaf (invariant I17).
+fn overlaps_ram(phys: u64, len: u64) -> bool {
+    vibeos::dev::overlaps_any(phys, len, crate::boot::info().ram_ranges())
+}
+
 fn ioremap_page(phys: u64) -> Option<u64> {
-    if phys == 0 {
+    if phys == 0 || overlaps_ram(phys, PAGE_SIZE_4K) {
         return None;
     }
     // SAFETY: invariant I49: `[phys, phys+4K)` is a device register page
@@ -121,6 +123,9 @@ fn ioremap_page(phys: u64) -> Option<u64> {
 fn map_reg_page(phys: u64) -> Option<u64> {
     if physmap_covers(phys, PAGE_SIZE_4K) {
         return paging_init::hhdm_offset().checked_add(phys);
+    }
+    if overlaps_ram(phys, PAGE_SIZE_4K) {
+        return None;
     }
     // SAFETY: invariant I17: `physmap_covers` found no leaf, so `phys` is
     // device MMIO. It is the page of a FADT reset or sleep SystemMemory

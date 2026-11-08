@@ -228,6 +228,13 @@ pub trait PageTable {
     /// Barriers after the new store of break-before-make. aarch64 runs
     /// `BBM_AFTER_MAKE` (`dsb ishst`, `isb`).
     fn bbm_make() {}
+    /// Publish a new table's zeroed words before the descriptor that links
+    /// it is stored: a walker must not read that descriptor and then the
+    /// frame's old contents. aarch64 runs `dsb ishst`.
+    fn publish_table() {}
+    /// Publish a batch of Fresh stores (leaves and table descriptors) before
+    /// the mapping is used. aarch64 runs `dsb ishst`, `isb`, as `bbm_make`.
+    fn publish_leaves() {}
 }
 
 /// Frame allocator abstraction. Hands out order-0 [`Frames`], one
@@ -385,6 +392,7 @@ impl<A: PageTable> Mapper<A> {
                 // frame the token above owned, reached at `hhdm_offset` as
                 // `FrameAlloc`'s contract (`mm::paging::FrameAlloc`) says.
                 unsafe { self.zero_frame(new) };
+                A::publish_table();
                 // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract);
                 // `&mut self` makes this the root's one writer, and for the
                 // kernel root the page-table lock is held (invariant I48,
@@ -503,6 +511,7 @@ impl<A: PageTable> Mapper<A> {
             return Err(MapError::Misaligned);
         }
         let mut off: u64 = 0;
+        let mut done = Ok(());
         while off < len {
             let cur_va = VirtAddr(va.0 + off);
             let cur_pa = PhysAddr(pa.0 + off);
@@ -517,10 +526,22 @@ impl<A: PageTable> Mapper<A> {
             };
             // SAFETY: `map_page`'s contract, which this fn's `# Safety`
             // passes on for the whole range, established here.
-            unsafe { self.map_page(cur_va, cur_pa, flags, size, mode, alloc)? };
+            if let Err(e) = unsafe { self.map_page(cur_va, cur_pa, flags, size, mode, alloc) } {
+                done = Err(e);
+                break;
+            }
             off += step;
         }
-        Ok(())
+        // The stores made before a failure are published too.
+        self.publish_leaves();
+        done
+    }
+
+    /// Publish the Fresh stores a batch of `map_page` calls made, so the
+    /// mapping is visible to the walker before the caller uses it. Callers
+    /// that map a range page by page call this once, after the last page.
+    pub fn publish_leaves(&self) {
+        A::publish_leaves();
     }
 
     /// Unmap one 4 KiB or 2 MiB page. Returns the physical frame that
@@ -533,6 +554,9 @@ impl<A: PageTable> Mapper<A> {
     /// Caller is responsible for TLB invalidation: `invlpg` on this CPU and,
     /// for a kernel-half VA, `tlb_shootdown_others` (DESIGN §4.3, §7.9).
     pub unsafe fn unmap_page(&mut self, va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
+        if !A::va_ok(va.0) {
+            return None;
+        }
         let mut table_phys = self.root;
         let mut level = A::LEVELS;
         while level >= 1 {
@@ -565,6 +589,9 @@ impl<A: PageTable> Mapper<A> {
     /// Return the physical address a VA translates to, or `None` if
     /// unmapped. Does not consult the TLB (host-testable).
     pub fn translate(&self, va: VirtAddr) -> Option<(PhysAddr, PageSize, PageFlags)> {
+        if !A::va_ok(va.0) {
+            return None;
+        }
         let mut table_phys = self.root;
         let mut level = A::LEVELS;
         while level >= 1 {
@@ -851,7 +878,7 @@ impl IoremapWindow {
             return None;
         }
         let page_off = phys.0 & (PAGE_SIZE_4K - 1);
-        let pages = align_up(page_off + len, PAGE_SIZE_4K);
+        let pages = page_span(phys.0, len)?;
         let va = align_up(self.next, PAGE_SIZE_4K);
         let end = va.checked_add(pages)?;
         if end > IOREMAP_BASE + IOREMAP_LEN {
@@ -893,6 +920,17 @@ impl Default for IoremapWindow {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Bytes of whole pages covering `len` bytes at `phys`. `None` when the
+/// range runs past the address space or the page count overflows, which a
+/// firmware-supplied `len` can force.
+pub fn page_span(phys: u64, len: u64) -> Option<u64> {
+    phys.checked_add(len)?;
+    let n = (phys & (PAGE_SIZE_4K - 1))
+        .checked_add(len)?
+        .checked_add(PAGE_SIZE_4K - 1)?;
+    Some(n & !(PAGE_SIZE_4K - 1))
 }
 
 #[inline]
@@ -942,6 +980,23 @@ pub const fn mmio_flags() -> PageFlags {
             | PageFlags::PCD
             | PageFlags::PWT,
     )
+}
+
+/// Device pages that hold the `span` bytes at physical `base`. `base` need
+/// not be page aligned (a DT `reg` is not), so the window can reach into the
+/// page after its first. `None` when the window's last byte leaves the
+/// 64-bit address space.
+pub const fn mmio_pages(base: u64, span: u64) -> Option<u64> {
+    let Some(span_last) = span.checked_sub(1) else {
+        return Some(0);
+    };
+    let Some(last) = base.checked_add(span_last) else {
+        return None;
+    };
+    match (last >> PAGE_SHIFT).checked_sub(base >> PAGE_SHIFT) {
+        Some(d) => d.checked_add(1),
+        None => None,
+    }
 }
 
 /// Physmap leaf flags: writable, NX, global.

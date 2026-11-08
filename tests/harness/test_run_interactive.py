@@ -279,7 +279,7 @@ class TestDebugTarget(unittest.TestCase):
     def test_make_n_debug(self) -> None:
         env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
         out = subprocess.run(
-            ["make", "-n", "-o", "build/vibeos.iso",
+            ["make", "-n", "ARCH=x86_64", "-o", "build/vibeos.iso",
              "-o", "build/kernels/vibeos-default.elf",
              "-o", str(ROOT / "build/user/.stamp"), "debug"],
             cwd=ROOT, env=env, capture_output=True, text=True, check=True,

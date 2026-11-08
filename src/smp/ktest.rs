@@ -1,6 +1,9 @@
 //! In-guest tests for smp (kernel_tests only). Rows: [`TESTS`].
 
 #[cfg(target_arch = "x86_64")]
+pub(crate) mod stall;
+
+#[cfg(target_arch = "x86_64")]
 use vibeos::acpi::MAX_CPUS;
 #[cfg(target_arch = "x86_64")]
 use vibeos::apic::TimerMode;
@@ -294,8 +297,9 @@ pub(crate) fn late_ap_agrees() -> Outcome {
 }
 
 /// Opt-in: `vibeos.ktest=stalled_ap_leak` holds the first AP past the ready
-/// timeout, then releases it. It must park, stay offline, and leave the
-/// online mask equal to the worker set (ROADMAP §11.4, F032).
+/// timeout, then releases it. It must park, stay offline, leave the online
+/// mask equal to the worker set, and keep every frame its allocation took
+/// (ROADMAP §11.4, F032).
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn test_stalled_ap_leak() -> Outcome {
     if !smp_init::stalled_ap_leaked() {
@@ -323,6 +327,21 @@ pub(crate) fn test_stalled_ap_leak() -> Outcome {
     if online + 1 != n as u32 {
         return crate::fail_fmt!("online {online} of {n}, want one hole");
     }
+    // The frames its allocation recorded are still allocated: none is on a
+    // buddy free list or in a stack cache, when its stall path ended and
+    // now, so its stall path freed nothing of its own (ROADMAP §11.4, F032).
+    let (recorded, free, free_at_stall) = stall::stalled_ap_frames();
+    if recorded == 0 {
+        return Outcome::Fail("stalled AP's allocation recorded no frames");
+    }
+    if free_at_stall != 0 {
+        return crate::fail_fmt!(
+            "stalled AP's stall path left {free_at_stall} of its {recorded} frames free"
+        );
+    }
+    if let Some(base) = free {
+        return crate::fail_fmt!("stalled AP's frame {base:#x} is free");
+    }
     let n0 = quiescent_free_frames();
     if !exercise_fail_cleanup() {
         return Outcome::Fail("pre-SIPI free alloc failed");
@@ -335,7 +354,9 @@ pub(crate) fn test_stalled_ap_leak() -> Outcome {
     if !matches!(agreed, Outcome::Ok) {
         return agreed;
     }
-    crate::ktest_info!("stalled AP leaked and parked; online {online}/{n}");
+    crate::ktest_info!(
+        "stalled AP leaked and parked; online {online}/{n}; holds {recorded} frames"
+    );
     Outcome::Ok
 }
 

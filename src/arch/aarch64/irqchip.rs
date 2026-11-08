@@ -44,6 +44,16 @@ pub fn route_gsi(
     Ok(())
 }
 
+pub fn retarget_gsi(
+    gsi: u32,
+    vec: u8,
+    dest: u8,
+    trig: Trigger,
+    pol: Polarity,
+) -> Result<(), IpiError> {
+    route_gsi(gsi, vec, dest, trig, pol)
+}
+
 pub fn mask_gsi(_gsi: u32) {}
 pub fn unmask_gsi(_gsi: u32) {}
 
@@ -67,9 +77,9 @@ pub fn send_ipi_all_ex_self(_vec: u8) -> Result<(), IpiError> {
 
 /// # Safety
 /// This CPU's GIC interface is unused; IRQs masked.
-pub unsafe fn enable_ap() {
+pub unsafe fn enable_ap() -> bool {
     // SAFETY: this fn's `# Safety`; established here.
-    unsafe { gic::enable_ap() };
+    unsafe { gic::enable_ap() }
 }
 
 pub fn arm_ap() {
@@ -79,7 +89,10 @@ pub fn arm_ap() {
 pub fn on_timer_irq() {
     // Relaxed: a count; pairs with nothing.
     TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    crate::time_init::on_hw_tick();
+    // cpu 0 alone publishes the clock, as on x86
+    if super::percpu::cpu_id_hint() == 0 {
+        crate::time_init::on_hw_tick();
+    }
     timer::on_tick();
     crate::sched_init::on_timer_tick();
 }

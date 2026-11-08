@@ -136,7 +136,8 @@ pub struct BootInfo {
     /// above frame 0 and below 1 MiB, or `None` when the map has none.
     pub trampoline_page: Option<u64>,
     pub rsdp_phys: u64,
-    /// Flattened device tree, HHDM-mapped, when Limine gave one.
+    /// Flattened device tree, HHDM-mapped, when Limine gave one. Read only
+    /// before `paging_init::install`.
     pub dtb: Option<&'static [u8]>,
     memmap: &'static [&'static Entry],
     fb: Option<&'static FramebufferResponse>,
@@ -295,14 +296,22 @@ fn dtb_bytes() -> Option<&'static [u8]> {
         return None;
     }
     // SAFETY: Limine's protocol, trusted here (DESIGN §2.10): `dtb_ptr`
-    // is an HHDM address of the DTB that stays mapped while the kernel
-    // runs. The header is 40 bytes; `totalsize` then names the rest.
-    // Established here.
+    // is an HHDM address of the DTB, mapped until `paging_init::install`
+    // swaps in the RAM-only physmap (a DTB in a non-RAM memmap entry is
+    // unmapped after it). The header is 40 bytes; `totalsize` then names
+    // the rest. Established here.
     let hdr = unsafe { core::slice::from_raw_parts(ptr, 40) };
     let total = {
         let b = hdr.get(4..8).and_then(|s| <[u8; 4]>::try_from(s).ok())?;
         u32::from_be_bytes(b) as usize
     };
+    if total > 2_097_152 {
+        let magic = hdr.get(0..4).and_then(|s| <[u8; 4]>::try_from(s).ok());
+        if magic.map(u32::from_be_bytes) == Some(0xd00d_feed) {
+            halt_with("vibeOS: dt: refused");
+        }
+        return None;
+    }
     if !(40..=2_097_152).contains(&total) {
         return None;
     }
@@ -515,7 +524,10 @@ where
     fn fill(&mut self, span: Range<u64>) {
         self.part = 0;
         self.npart = 0;
-        let holes = self.holes.clone();
+        // Borrowed, not copied: this runs under `pci_init::map_mmio` on
+        // the 16 KiB bootstrap stack (DESIGN §4.5).
+        let holes = &self.holes;
+        let parts = &mut self.parts;
         let nh = self.nh;
         let mut n = 0usize;
         let mut overflow = false;
@@ -523,7 +535,7 @@ where
             span,
             || holes.iter().take(nh).cloned(),
             |p| {
-                if let Some(slot) = self.parts.get_mut(n) {
+                if let Some(slot) = parts.get_mut(n) {
                     *slot = p;
                     n = n.saturating_add(1);
                 } else {

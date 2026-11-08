@@ -294,7 +294,17 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
             return Err(e);
         }
     };
-    match with_current_space(|s| addr_space_init::mmap(s, &req)) {
+    let exec = req.perms.is_some_and(|p| p.exec);
+    let mapped = with_current_space(|s| {
+        let va = addr_space_init::mmap(s, &req)?;
+        // The pages are zero frames just mapped: fetch must not see a dead
+        // process's code in them. No thread knows `va` yet.
+        if exec {
+            fill_init::sync_code(&s.mm(), va, req.len).map_err(|_| AsError::NotMapped)?;
+        }
+        Ok(va)
+    });
+    match mapped {
         None => Err(KError::Inval),
         Some(Ok(va)) => Ok(va as usize),
         Some(Err(AsError::Overlap)) => Err(KError::Exist),

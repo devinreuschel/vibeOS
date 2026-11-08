@@ -1,8 +1,8 @@
 //! In-guest tests for the sleeps a signal ends (kernel_tests only). Rows:
 //! the parent `ktest.rs`'s `TESTS`.
 
+use crate::arch::current::syscall_nr::SYS_KILL;
 use vibeos::proc::{SIGKILL, wait_signaled};
-use vibeos::syscall::SYS_KILL;
 
 use crate::ktest::user::{self, DEFAULT, Image, x86_user_code};
 use crate::ktest::{Outcome, sleep_for};

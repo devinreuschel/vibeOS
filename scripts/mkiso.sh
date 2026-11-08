@@ -49,7 +49,7 @@ mkdir -p "$staging/boot" "$staging/EFI/BOOT"
 mkdir -p "$staging/LICENSES"
 cp "$root/LICENSE" "$staging/LICENSES/LICENSE"
 python3 "$root/scripts/gen_notices.py" --out "$staging/LICENSES/THIRD-PARTY-NOTICES.txt" \
-    --limine-dir "$limine_dir"
+    --arch "${VIBEOS_ARCH:-x86_64}" --limine-dir "$limine_dir"
 # The image's kernel is the ELF without its DWARF sections: Limine reads the
 # whole executable into one buffer before it loads it, and with 13 MB of debug
 # info a 128 MiB guest under current OVMF runs Limine out of memory

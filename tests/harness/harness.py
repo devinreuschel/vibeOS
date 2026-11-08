@@ -863,13 +863,16 @@ _VARIANT_RE = re.compile(r"[a-z0-9-]+")
 def default_iso(variant: str = "default") -> str:
     """The ISO the Makefile builds for `variant` (C-BUILD-OUTPUTS).
 
-    `build/vibeos.iso` for `default`, `build/vibeos-<variant>.iso` otherwise.
+    `build/vibeos.iso` for `default`, `build/vibeos-<variant>.iso` otherwise;
+    under `VIBEOS_ARCH=aarch64` the same names live in `build/aarch64/`, as
+    the Makefile's `BUILD_OUT` puts them.
     """
     if not _VARIANT_RE.fullmatch(variant):
         raise ValueError(f"default_iso: bad variant {variant!r}")
+    out = "build/aarch64" if os.environ.get("VIBEOS_ARCH") == "aarch64" else "build"
     if variant == "default":
-        return "build/vibeos.iso"
-    return f"build/vibeos-{variant}.iso"
+        return f"{out}/vibeos.iso"
+    return f"{out}/vibeos-{variant}.iso"
 
 
 def env_firmware(environ: Mapping[str, str], arch: str = "x86_64") -> Firmware | None:

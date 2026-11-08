@@ -160,6 +160,14 @@ class TestFileErrors(unittest.TestCase):
         e = errs("use core::sync::atomic::Ordering::*;\n")
         self.assertEqual(len(e), 1, e)
 
+    def test_bare_import_in_brace_with_glob_fails(self) -> None:
+        e = errs("use core::sync::atomic::Ordering::{*};\n")
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("bare name", e[0])
+        e = errs("use core::sync::atomic::Ordering::{self, *};\n")
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("bare name", e[0])
+
     def test_rename_must_end_in_ordering(self) -> None:
         e = errs("use core::sync::atomic::Ordering as Ord;\n")
         self.assertEqual(len(e), 1, e)
@@ -168,6 +176,99 @@ class TestFileErrors(unittest.TestCase):
             errs("use core::sync::atomic::Ordering as AtomicOrdering;\n"),
             [],
         )
+
+    def test_self_alias_must_end_in_ordering(self) -> None:
+        e = errs("use core::sync::atomic::Ordering::{self as O};\n")
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("renames `Ordering` to `O`", e[0])
+        text = (
+            "use core::sync::atomic::Ordering::{self as AcqOrdering};\n"
+            "// Acquire: pairs with the Release store in unlock.\n"
+            "X.load(AcqOrdering::Acquire);\n"
+        )
+        self.assertEqual(errs(text), [])
+
+    def test_grouped_self_alias_must_end_in_ordering(self) -> None:
+        for head in (
+            "use core::sync::atomic::{AtomicU32, Ordering::{self as O}};\n",
+            "use core::sync::atomic::{Ordering::{self as O}, AtomicU32};\n",
+        ):
+            text = head + "fn f(x: &AtomicU32) -> u32 {\n    x.load(O::Relaxed)\n}\n"
+            e = errs(text)
+            self.assertEqual(len(e), 1, e)
+            self.assertIn("renames `Ordering` to `O`", e[0])
+
+    def test_module_alias_then_rename_must_end_in_ordering(self) -> None:
+        text = (
+            "use core::sync::atomic as a;\n"
+            "use a::Ordering as O;\n"
+            "fn f(x: &a::AtomicU32) -> u32 {\n"
+            "    x.load(O::Relaxed)\n"
+            "}\n"
+        )
+        e = errs(text)
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("renames `Ordering` to `O`", e[0])
+
+    def test_grouped_ordering_alias_ending_in_ordering_is_a_site(self) -> None:
+        text = (
+            "use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};\n"
+            "fn f(x: &AtomicU32) -> u32 {\n"
+            "    x.load(AtomicOrdering::Relaxed)\n"
+            "}\n"
+        )
+        e, n = file_errors("src/a.rs", text)
+        self.assertEqual(n, 1, e)
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("Relaxed without a comment", e[0])
+
+    def test_cmp_ordering_is_not_atomic(self) -> None:
+        self.assertEqual(errs("type Sign = core::cmp::Ordering;\n"), [])
+        self.assertEqual(
+            errs("const D: core::cmp::Ordering = core::cmp::Ordering::Less;\n"),
+            [],
+        )
+        self.assertEqual(errs("use core::cmp::Ordering as Cmp;\n"), [])
+        e = errs(
+            "use core::{cmp::Ordering as Cmp, sync::atomic::{AtomicU32, Ordering as O}};\n"
+        )
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("renames `Ordering` to `O`", e[0])
+
+    def test_type_alias_must_end_in_ordering(self) -> None:
+        e = errs("type X = core::sync::atomic::Ordering;\n")
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("renames `Ordering` to `X`", e[0])
+
+    def test_ordering_constant_fails(self) -> None:
+        text = (
+            "// Acquire: pairs with the Release store in unlock.\n"
+            "const ACQ: Ordering = Ordering::Acquire;\n"
+            "X.load(ACQ);\n"
+        )
+        e = errs(text)
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("binds an ordering", e[0])
+        e = errs("static ACQ: AtomicOrdering = AtomicOrdering::Acquire;\n")
+        self.assertIn("binds an ordering", e[-1])
+
+    def test_metavariable_ordering_fails(self) -> None:
+        text = (
+            "macro_rules! load {\n"
+            "    ($x:expr, $o:ident) => { $x.load(Ordering::$o) };\n"
+            "}\n"
+        )
+        e = errs(text)
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("macro metavariable", e[0])
+        text = (
+            "macro_rules! load {\n"
+            "    ($x:expr, $ord:expr) => { $x.load($ord) };\n"
+            "}\n"
+            "// Acquire: pairs with the Release store in unlock.\n"
+            "load!(X, Ordering::Acquire);\n"
+        )
+        self.assertEqual(errs(text), [])
 
     def test_one_line_rule(self) -> None:
         text = (

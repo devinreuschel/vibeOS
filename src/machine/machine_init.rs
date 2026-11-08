@@ -44,6 +44,7 @@ pub fn init_from_dtb(boot: &BootInfo) {
         }
         Err(e) => refuse_dt(e),
     };
+    warn_dropped(&d);
     if boot.rsdp_phys == 0 {
         let n = d.node_count;
         // SAFETY: invariant I22, established at `cell::BootCell::set`: this
@@ -91,15 +92,53 @@ fn refuse_dt(e: vibeos::machine::fdt::FdtError) -> ! {
     crate::boot::halt_with("vibeOS: dt: refused");
 }
 
+/// One warning line per kind a cap or a row check dropped or refused in
+/// `d`, CPUs first. A record holds `MSG_CAP` bytes, so one line naming every
+/// kind would cut off its tail.
+fn warn_dropped(d: &MachineDesc) {
+    let kinds = [
+        (
+            d.dropped_cpus,
+            "dropped",
+            "CPUs past the cap, which do not boot",
+        ),
+        (d.dropped_props, "dropped", "props"),
+        (d.dropped_uarts, "dropped", "uarts"),
+        (d.dropped_mcfg, "dropped", "mcfg allocations"),
+        (d.dropped_pci_hosts, "dropped", "pci hosts"),
+        (d.dropped_interrupt_rows, "dropped", "interrupt-map rows"),
+        (d.dropped_msi_rows, "dropped", "msi-map rows"),
+        (d.dropped_irq_controllers, "dropped", "irq controllers"),
+        (d.dropped_isos, "dropped", "interrupt overrides"),
+        (d.dropped_timers, "dropped", "timers"),
+        (d.dropped_consoles, "dropped", "consoles"),
+        (d.dropped_virtio_mmio, "dropped", "virtio-mmio devices"),
+        (d.refused_interrupt_maps, "refused", "interrupt maps"),
+    ];
+    for (n, verb, what) in kinds {
+        if n != 0 {
+            crate::klog!(
+                vibeos::log::Level::Warn,
+                "vibeOS: machine: {} {} {}",
+                verb,
+                n,
+                what
+            );
+        }
+    }
+}
+
 /// MADT / HPET / MCFG. No-op when a DTB already filled the cell.
 pub fn set_from_acpi(info: &AcpiInfo) {
     if DESC.try_get().is_some() {
         return;
     }
+    let d = MachineDesc::from_acpi(info);
+    warn_dropped(&d);
     // SAFETY: invariant I22, established at `cell::BootCell::set`: this is
     // the one write, on the BSP in `acpi::acpi_init::init` before SMP, and
     // no reader of `DESC` runs until it returns.
-    unsafe { DESC.set(MachineDesc::from_acpi(info)) };
+    unsafe { DESC.set(d) };
 }
 
 /// DTB reserved ranges, from `DESC` or the early stash when ACPI owns the cell.

@@ -53,8 +53,11 @@ global_asm!(
     "    msr hstr_el2, x1",
     "    ldr x1, [x0, #{mdcr}]",
     "    msr mdcr_el2, x1",
+    "    ldr x1, [x0, #{sre_ok}]",
+    "    cbz x1, 23f",
     "    ldr x1, [x0, #{sre}]",
     "    msr icc_sre_el2, x1",
+    "23:",
     "    ldr x1, [x0, #{hcrx_ok}]",
     "    cbz x1, 21f",
     "    ldr x1, [x0, #{hcrx}]",
@@ -72,6 +75,9 @@ global_asm!(
     "    msr s3_4_c3_c1_4, x1",
     "    ldr x1, [x0, #{hdfgwtr}]",
     "    msr s3_4_c3_c1_5, x1",
+    // HAFGRTR_EL2 needs FEAT_AMUv1 as well as FEAT_FGT.
+    "    ldr x1, [x0, #{hafgrtr_ok}]",
+    "    cbz x1, 22f",
     "    ldr x1, [x0, #{hafgrtr}]",
     "    msr s3_4_c3_c1_6, x1",
     "22:",
@@ -90,8 +96,11 @@ global_asm!(
     "    ldr x1, [x0, #{cntkctl}]",
     "    msr cntkctl_el1, x1",
     "31:",
+    "    ldr x1, [x0, #{pmu_ok}]",
+    "    cbz x1, 25f",
     "    ldr x1, [x0, #{pmuserenr}]",
     "    msr pmuserenr_el0, x1",
+    "25:",
     "    ldr x1, [x0, #{cpacr}]",
     "    msr cpacr_el1, x1",
     "    ldr x1, [x0, #{mair}]",
@@ -157,6 +166,7 @@ global_asm!(
     hstr = const SecondaryParam::HSTR_EL2,
     mdcr = const SecondaryParam::MDCR_EL2,
     sre = const SecondaryParam::ICC_SRE_EL2,
+    sre_ok = const SecondaryParam::ICC_SRE_VALID,
     hcrx = const SecondaryParam::HCRX_EL2,
     hcrx_ok = const SecondaryParam::HCRX_VALID,
     fgt_ok = const SecondaryParam::FGT_VALID,
@@ -166,10 +176,12 @@ global_asm!(
     hdfgrtr = const SecondaryParam::HDFGRTR_EL2,
     hdfgwtr = const SecondaryParam::HDFGWTR_EL2,
     hafgrtr = const SecondaryParam::HAFGRTR_EL2,
+    hafgrtr_ok = const SecondaryParam::HAFGRTR_VALID,
     sctlr_el2 = const SecondaryParam::SCTLR_EL2,
     sctlr_early_clear = const sysreg::SCTLR_EL2_EARLY_CLEAR,
     cntkctl = const SecondaryParam::CNTKCTL,
     pmuserenr = const SecondaryParam::PMUSERENR,
+    pmu_ok = const SecondaryParam::PMU_VALID,
     cpacr = const SecondaryParam::CPACR,
     mair = const SecondaryParam::MAIR,
     tcr = const SecondaryParam::TCR,
@@ -224,16 +236,24 @@ pub(crate) fn alloc_zeroed_page() -> Option<u64> {
     Some(pa)
 }
 
-fn table_slot(root_pa: u64, va: u64, level: u8) -> Option<*mut u64> {
+/// # Safety
+/// `root_pa` is a table page the HHDM maps (I14), and no other writer
+/// reaches the returned slot while the caller holds it.
+unsafe fn table_slot(root_pa: u64, va: u64, level: u8) -> Option<*mut u64> {
     let hhdm = crate::paging_init::hhdm_offset();
     let idx = paging::index(VirtAddr(va), level);
     let va = hhdm.wrapping_add(root_pa);
-    // SAFETY: `root_pa` is a table page we allocated. established here.
+    // SAFETY: `root_pa` is a table page the HHDM maps, per this fn's `# Safety`;
+    // `idx` is a 9-bit table index, so the slot stays in that page. established here.
     unsafe { (va as *mut u64).add(idx).as_mut().map(|p| p as *mut u64) }
 }
 
 /// Map `va` → `pa` as a 4 KiB leaf in `l0_pa` (TTBR0) with `flags`.
-pub fn map_va(
+///
+/// # Safety
+/// `l0_pa` is a root table page the HHDM maps (I14), and the tables under
+/// it are only written through this fn or by the caller's own tracking.
+pub unsafe fn map_va(
     l0_pa: u64,
     va: u64,
     pa: u64,
@@ -244,7 +264,9 @@ pub fn map_va(
     let mut table = l0_pa;
     let mut level = 4u8;
     while level > 1 {
-        let Some(slot) = table_slot(table, va, level) else {
+        // SAFETY: `table` is `l0_pa` or a table `alloc_zeroed_page` gave us,
+        // both HHDM-mapped table pages per map_va's `# Safety`. established here.
+        let Some(slot) = (unsafe { table_slot(table, va, level) }) else {
             return false;
         };
         // SAFETY: slot in a table we own. established here.
@@ -253,9 +275,9 @@ pub fn map_va(
             let Some(next) = alloc_zeroed_page() else {
                 return false;
             };
-            if *n < tables.len() {
-                tables[*n] = next;
-                *n += 1;
+            // an untracked table is never cleaned to PoC, so don't link it
+            if !paging::track_table(tables, n, next) {
+                return false;
             }
             // SAFETY: slot in a table we own. established here.
             unsafe { slot.write(make_table(PhysAddr(next))) };
@@ -265,7 +287,9 @@ pub fn map_va(
         }
         level -= 1;
     }
-    let Some(slot) = table_slot(table, va, 1) else {
+    // SAFETY: `table` is the level-1 table the loop above reached, an
+    // HHDM-mapped table page per map_va's `# Safety`. established here.
+    let Some(slot) = (unsafe { table_slot(table, va, 1) }) else {
         return false;
     };
     // SAFETY: leaf slot we own. established here.
@@ -274,44 +298,55 @@ pub fn map_va(
 }
 
 /// Identity-map `pa` as a 4 KiB RW global page in `l0_pa` (TTBR0).
-pub fn map_identity(l0_pa: u64, pa: u64, tables: &mut [u64], n: &mut usize) -> bool {
-    map_va(
-        l0_pa,
-        pa,
-        pa,
-        tables,
-        n,
-        PageFlags::empty()
-            .with(PageFlags::PRESENT)
-            .with(PageFlags::WRITABLE)
-            .with(PageFlags::GLOBAL),
-    )
+///
+/// # Safety
+/// `l0_pa` is a root table page the HHDM maps, as [`map_va`] requires.
+pub unsafe fn map_identity(l0_pa: u64, pa: u64, tables: &mut [u64], n: &mut usize) -> bool {
+    // SAFETY: `l0_pa` meets map_identity's `# Safety`. established here.
+    unsafe {
+        map_va(
+            l0_pa,
+            pa,
+            pa,
+            tables,
+            n,
+            PageFlags::empty()
+                .with(PageFlags::PRESENT)
+                .with(PageFlags::WRITABLE)
+                .with(PageFlags::GLOBAL),
+        )
+    }
 }
+
+/// Table pages [`build_identity_into`] can track: the roots, the stub's
+/// tables, and up to three more for each CPU's param page (`map_identity`).
+pub(crate) const IDENTITY_TABLES: usize = 16 + 3 * vibeos::acpi::MAX_CPUS;
 
 /// Build a TTBR0 identity root covering `pas` into `tables` (no heap).
 ///
 /// Returns `(l0, empty, count)`. `empty` is a zero root. `tables[..count]`
-/// holds `l0` and the tables under it. Paging install calls this before
-/// the heap exists.
+/// holds `l0`, `empty` and the tables under `l0`, which the caller cleans
+/// to PoC before a secondary loads them. None when `tables` is too small.
+/// Paging install calls this before the heap exists.
 pub(crate) fn build_identity_into(pas: &[u64], tables: &mut [u64]) -> Option<(u64, u64, usize)> {
-    if tables.is_empty() {
-        return None;
-    }
     let l0 = alloc_zeroed_page()?;
     let empty = alloc_zeroed_page()?;
     let mut n = 0usize;
-    tables[n] = l0;
-    n += 1;
+    if !paging::track_table(tables, &mut n, l0) || !paging::track_table(tables, &mut n, empty) {
+        return None;
+    }
     for &pa in pas {
         let page = pa & !0xFFFu64;
-        if !map_identity(l0, page, tables, &mut n) {
+        // SAFETY: `l0` is the root this fn allocated, an HHDM-mapped table page. established here.
+        if !unsafe { map_identity(l0, page, tables, &mut n) } {
             return None;
         }
     }
     let mut i = 0;
     while i < n {
         let pa = tables[i];
-        if pa != 0 && !map_identity(l0, pa, tables, &mut n) {
+        // SAFETY: `l0` is the root this fn allocated, an HHDM-mapped table page. established here.
+        if pa != 0 && !unsafe { map_identity(l0, pa, tables, &mut n) } {
             return None;
         }
         i += 1;
@@ -320,22 +355,24 @@ pub(crate) fn build_identity_into(pas: &[u64], tables: &mut [u64]) -> Option<(u6
 }
 
 /// Build a TTBR0 identity root covering `pas`, plus `empty` TTBR0.
-pub fn build_identity(pas: &[u64]) -> Option<(u64, u64, TryBox<[u64; 8]>)> {
-    let mut tables = TryBox::try_new([0u64; 8]).ok()?;
+pub fn build_identity(pas: &[u64]) -> Option<(u64, u64, TryBox<[u64; IDENTITY_TABLES]>)> {
+    let mut tables = TryBox::try_new([0u64; IDENTITY_TABLES]).ok()?;
     let (l0, empty, _) = build_identity_into(pas, &mut *tables)?;
     Some((l0, empty, tables))
 }
 
-/// `dc cvac` over `[va, va+len)`, then `dsb sy`.
+/// `dc cvac` over `[va, va+len)`, one op per `CTR_EL0.DminLine` line, then
+/// `dsb sy`.
 pub fn clean_poc(va: u64, len: usize) {
-    let start = va & !63;
+    let line = sysreg::dcache_line_bytes(crate::arch::aarch64::cpu::read_ctr_el0()) as u64;
+    let start = va & !(line - 1);
     let end = va.saturating_add(len as u64);
     let mut p = start;
     while p < end {
         // SAFETY: clean a cache line of kernel memory we own to PoC.
         // established here.
         unsafe { asm!("dc cvac, {0}", in(reg) p, options(nostack, preserves_flags)) };
-        p = p.saturating_add(64);
+        p = p.saturating_add(line);
     }
     // SAFETY: `dsb sy` after the cleans. established here.
     unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
@@ -345,6 +382,9 @@ pub fn fill_computed(p: &mut SecondaryParam) {
     p.sctlr = sysreg::sctlr_el1();
     p.cntkctl = sysreg::cntkctl_el1();
     p.pmuserenr = sysreg::pmuserenr_el0();
+    if sysreg::feat_pmuv3(super::cpu::id_aa64dfr0_el1()) {
+        p.pmu_valid = 1;
+    }
     p.cpacr = sysreg::cpacr_el1();
     // The stub writes CNTHCTL_EL2 only after setting E2H, when bits 0 and 1
     // are EL0PCTEN and EL0VCTEN. capture_el2 stores this same value.
@@ -375,8 +415,14 @@ pub fn capture_el2(p: &mut SecondaryParam) {
         asm!("mrs {0}, cptr_el2", out(reg) p.cptr_el2, options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, hstr_el2", out(reg) p.hstr_el2, options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, mdcr_el2", out(reg) p.mdcr_el2, options(nomem, nostack, preserves_flags));
-        asm!("mrs {0}, icc_sre_el2", out(reg) p.icc_sre_el2, options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, sctlr_el2", out(reg) sctlr, options(nomem, nostack, preserves_flags));
+    }
+    if sysreg::feat_gic_sysreg(super::cpu::id_aa64pfr0_el1()) {
+        p.icc_sre_valid = 1;
+        // SAFETY: ICC_SRE_EL2 exists (`ID_AA64PFR0_EL1.GIC` is nonzero); established here.
+        unsafe {
+            asm!("mrs {0}, icc_sre_el2", out(reg) p.icc_sre_el2, options(nomem, nostack, preserves_flags));
+        }
     }
     // M, C, and I stay clear until the stub's later SCTLR_EL1 write.
     p.sctlr_el2 = sysreg::sctlr_el2_early(sctlr);
@@ -399,6 +445,12 @@ pub fn capture_el2(p: &mut SecondaryParam) {
             asm!("mrs {0}, s3_4_c1_c1_6", out(reg) p.hfgitr_el2, options(nomem, nostack, preserves_flags));
             asm!("mrs {0}, s3_4_c3_c1_4", out(reg) p.hdfgrtr_el2, options(nomem, nostack, preserves_flags));
             asm!("mrs {0}, s3_4_c3_c1_5", out(reg) p.hdfgwtr_el2, options(nomem, nostack, preserves_flags));
+        }
+    }
+    if sysreg::feat_hafgrtr(mmfr0, super::cpu::id_aa64pfr0_el1()) {
+        p.hafgrtr_valid = 1;
+        // SAFETY: FEAT_FGT with FEAT_AMUv1 gives HAFGRTR_EL2. established here.
+        unsafe {
             asm!("mrs {0}, s3_4_c3_c1_6", out(reg) p.hafgrtr_el2, options(nomem, nostack, preserves_flags));
         }
     }
@@ -446,19 +498,24 @@ pub fn snapshot_sysregs() -> [u64; SNAP_LEN] {
             asm!("mrs {0}, cnthctl_el2", out(reg) v[10], options(nomem, nostack, preserves_flags));
             asm!("mrs {0}, hstr_el2", out(reg) v[11], options(nomem, nostack, preserves_flags));
             asm!("mrs {0}, mdcr_el2", out(reg) v[12], options(nomem, nostack, preserves_flags));
-            asm!("mrs {0}, icc_sre_el2", out(reg) v[13], options(nomem, nostack, preserves_flags));
+            if sysreg::feat_gic_sysreg(super::cpu::id_aa64pfr0_el1()) {
+                asm!("mrs {0}, icc_sre_el2", out(reg) v[13], options(nomem, nostack, preserves_flags));
+            }
             asm!("mrs {0}, sctlr_el2", out(reg) v[14], options(nomem, nostack, preserves_flags));
             asm!("mrs {0}, cntvoff_el2", out(reg) v[15], options(nomem, nostack, preserves_flags));
             let (mmfr0, mmfr1) = id_mmfr();
             if sysreg::feat_hcx(mmfr1) {
                 asm!("mrs {0}, s3_4_c1_c2_2", out(reg) v[16], options(nomem, nostack, preserves_flags));
             }
+            let pfr0 = super::cpu::id_aa64pfr0_el1();
             if sysreg::feat_fgt(mmfr0) {
                 asm!("mrs {0}, s3_4_c1_c1_4", out(reg) v[17], options(nomem, nostack, preserves_flags));
                 asm!("mrs {0}, s3_4_c1_c1_5", out(reg) v[18], options(nomem, nostack, preserves_flags));
                 asm!("mrs {0}, s3_4_c1_c1_6", out(reg) v[19], options(nomem, nostack, preserves_flags));
                 asm!("mrs {0}, s3_4_c3_c1_4", out(reg) v[20], options(nomem, nostack, preserves_flags));
                 asm!("mrs {0}, s3_4_c3_c1_5", out(reg) v[21], options(nomem, nostack, preserves_flags));
+            }
+            if sysreg::feat_hafgrtr(mmfr0, pfr0) {
                 asm!("mrs {0}, s3_4_c3_c1_6", out(reg) v[22], options(nomem, nostack, preserves_flags));
             }
         } else {

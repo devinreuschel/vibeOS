@@ -276,19 +276,57 @@ user_code!(
     "
 );
 
+// Spill V0-V31 whole (128 bits each) to 512 bytes at sp, then exit 1 if any
+// of its 64 doublewords is P's pattern, and 0 otherwise. The soft-float kernel
+// cannot assemble `str qN`, so each store is its encoding (as in fp_save).
 user_code!(
     FP_PROBE,
     "
-    .inst 0x4e083c00
+    sub sp, sp, #512
+    .inst 0x3d8003e0   // str q0, [sp, #0]
+    .inst 0x3d8007e1   // str q1, [sp, #16]
+    .inst 0x3d800be2   // str q2, [sp, #32]
+    .inst 0x3d800fe3   // str q3, [sp, #48]
+    .inst 0x3d8013e4   // str q4, [sp, #64]
+    .inst 0x3d8017e5   // str q5, [sp, #80]
+    .inst 0x3d801be6   // str q6, [sp, #96]
+    .inst 0x3d801fe7   // str q7, [sp, #112]
+    .inst 0x3d8023e8   // str q8, [sp, #128]
+    .inst 0x3d8027e9   // str q9, [sp, #144]
+    .inst 0x3d802bea   // str q10, [sp, #160]
+    .inst 0x3d802feb   // str q11, [sp, #176]
+    .inst 0x3d8033ec   // str q12, [sp, #192]
+    .inst 0x3d8037ed   // str q13, [sp, #208]
+    .inst 0x3d803bee   // str q14, [sp, #224]
+    .inst 0x3d803fef   // str q15, [sp, #240]
+    .inst 0x3d8043f0   // str q16, [sp, #256]
+    .inst 0x3d8047f1   // str q17, [sp, #272]
+    .inst 0x3d804bf2   // str q18, [sp, #288]
+    .inst 0x3d804ff3   // str q19, [sp, #304]
+    .inst 0x3d8053f4   // str q20, [sp, #320]
+    .inst 0x3d8057f5   // str q21, [sp, #336]
+    .inst 0x3d805bf6   // str q22, [sp, #352]
+    .inst 0x3d805ff7   // str q23, [sp, #368]
+    .inst 0x3d8063f8   // str q24, [sp, #384]
+    .inst 0x3d8067f9   // str q25, [sp, #400]
+    .inst 0x3d806bfa   // str q26, [sp, #416]
+    .inst 0x3d806ffb   // str q27, [sp, #432]
+    .inst 0x3d8073fc   // str q28, [sp, #448]
+    .inst 0x3d8077fd   // str q29, [sp, #464]
+    .inst 0x3d807bfe   // str q30, [sp, #480]
+    .inst 0x3d807fff   // str q31, [sp, #496]
     movz x1, #0x5a5a
     movk x1, #0x5a5a, lsl #16
     movk x1, #0x5a5a, lsl #32
     movk x1, #0x5a5a, lsl #48
-    cmp x0, x1
+    mov x2, sp
+    mov x3, #64
+1:
+    ldr x4, [x2], #8
+    cmp x4, x1
     b.eq 9f
-    .inst 0x4e083fe0
-    cmp x0, x1
-    b.eq 9f
+    subs x3, x3, #1
+    b.ne 1b
     mov x0, xzr
     mov x8, #93
     svc #0
@@ -299,11 +337,72 @@ user_code!(
     "
 );
 
+// The aarch64 form of `fp_migrate_counter` (ROADMAP §10.6): the counter is
+// the low doubleword of v0, added to v1 = {1, 0} each iteration, checked
+// against a counter in memory; getpid every 4,096 iterations so a kill lands.
+// The `.inst` words are `movi`, `mov v1.d[0], x1`, `add v0.2d, v0.2d, v1.2d`
+// and `mov x3, v0.d[0]`.
+user_code!(
+    FP_MIGRATE_COUNTER,
+    "
+    sub sp, sp, #16
+    str xzr, [sp]
+    mov x1, #1
+    .inst 0x6f00e400
+    .inst 0x6f00e401
+    .inst 0x4e081c21
+    mov x12, xzr
+1:
+    .inst 0x4ee18400
+    ldr x2, [sp]
+    add x2, x2, #1
+    str x2, [sp]
+    .inst 0x4e083c03
+    cmp x3, x2
+    b.ne 9f
+    add x12, x12, #1
+    tst x12, #0xfff
+    b.ne 1b
+    mov x8, #172
+    svc #0
+    b 1b
+9:
+    mov x0, #1
+    mov x8, #93
+    svc #0
+    "
+);
+
+/// ROADMAP §10.6, aarch64 form: a thread the requeue hook moves each time
+/// it is preempted keeps its V state across every migration (F069).
+pub(crate) fn test_el0_fp_migrate_counter() -> Outcome {
+    crate::sched::ktest::fp_migrate_counter_run(FP_MIGRATE_COUNTER)
+}
+
 user_code!(
     SVE_PTRUE,
     "
     .inst 0x2518e3e0
     mov x0, xzr
+    mov x8, #93
+    svc #0
+    "
+);
+
+// Same page, different code: the second load reuses the first's frames.
+user_code!(
+    RECYCLE_A,
+    "
+    mov x0, #3
+    mov x8, #93
+    svc #0
+    "
+);
+
+user_code!(
+    RECYCLE_B,
+    "
+    mov x0, #5
     mov x8, #93
     svc #0
     "
@@ -511,7 +610,8 @@ fn fp_spawner() {
     FP_SPAWNED.store(true, Ordering::Release);
 }
 
-/// Q's first instruction does not hold P's V-register pattern (F069).
+/// No V register Q reads at its first instruction holds P's pattern in any
+/// of its 128 bits (F069); `FP_PROBE` checks every doubleword of V0-V31.
 pub(crate) fn test_el0_fp_no_leak() -> Outcome {
     // Release: pairs with the Acquire load below.
     FP_SPAWNED.store(false, Ordering::Release);
@@ -528,19 +628,6 @@ pub(crate) fn test_el0_fp_no_leak() -> Outcome {
         [Some(p), Some(q)] => crate::fail_fmt!("P {p:#x} Q {q:#x}"),
         _ => Outcome::Fail("spawn"),
     }
-}
-
-fn id_aa64pfr0_el1() -> u64 {
-    let v: u64;
-    // SAFETY: ID_AA64PFR0_EL1 is readable at EL1 and at EL2 under VHE; established here.
-    unsafe {
-        asm!(
-            "mrs {0}, ID_AA64PFR0_EL1",
-            out(reg) v,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    v
 }
 
 fn id_aa64pfr1_el1() -> u64 {
@@ -561,7 +648,7 @@ fn id_aa64pfr1_el1() -> u64 {
 /// either way. SME absent does not: `ptrue` is still SVE, and no named
 /// model that has SME boots AAVMF 2025.11.
 pub(crate) fn test_el0_sve_sigill() -> Outcome {
-    let sve = vibeos::arch::aarch64::sysreg::pfr0_sve(id_aa64pfr0_el1());
+    let sve = vibeos::arch::aarch64::sysreg::pfr0_sve(arch::aarch64::cpu::id_aa64pfr0_el1());
     let sme = vibeos::arch::aarch64::sysreg::pfr1_sme(id_aa64pfr1_el1());
     if sve == 0 {
         return Outcome::Skip(if sme == 0 { "no SVE or SME" } else { "no SVE" });
@@ -819,6 +906,47 @@ pub(crate) fn test_el0_pan_every_cpu() -> Outcome {
     Outcome::Ok
 }
 
+static TPIDRRO_BAD: AtomicU64 = AtomicU64::new(0);
+static TPIDRRO_SEEN: AtomicU64 = AtomicU64::new(0);
+
+fn tpidrro_on_ap(_: *mut ()) {
+    let id = per_cpu_init::current().cpu_id;
+    if id >= 64 {
+        return;
+    }
+    if arch::aarch64::cpu::tpidrro_el0() != 0 {
+        // Release: pairs with the Acquire load in `test_tpidrro_zero`.
+        TPIDRRO_BAD.fetch_or(1u64 << id, Ordering::Release);
+    }
+    // Release: pairs with the Acquire load in `test_tpidrro_zero`.
+    TPIDRRO_SEEN.fetch_or(1u64 << id, Ordering::Release);
+}
+
+/// `TPIDRRO_EL0` is zero on this CPU and on every AP: the overflow stub's
+/// stash must not outlive the catch that reads it (DESIGN §11.5 rule 6).
+/// Red only if `kstack_overflow` ran earlier in this boot; QEMU resets the register to 0, so boot and AP clears go unseen.
+pub(crate) fn test_tpidrro_zero() -> Outcome {
+    if arch::aarch64::cpu::tpidrro_el0() != 0 {
+        return Outcome::Fail("bsp tpidrro set");
+    }
+    TPIDRRO_BAD.store(0, Ordering::SeqCst);
+    TPIDRRO_SEEN.store(0, Ordering::SeqCst);
+    let aps = super::ktest::ap_mask();
+    if aps == 0 {
+        return Outcome::Skip("no AP");
+    }
+    crate::ipi_init::call_mask(aps, tpidrro_on_ap, core::ptr::null_mut(), true);
+    // Acquire: pairs with the Release stores in `tpidrro_on_ap`.
+    if TPIDRRO_SEEN.load(Ordering::Acquire) != aps {
+        return Outcome::Fail("ap did not read tpidrro");
+    }
+    // Acquire: pairs with the Release stores in `tpidrro_on_ap`.
+    if TPIDRRO_BAD.load(Ordering::Acquire) != 0 {
+        return Outcome::Fail("ap tpidrro set");
+    }
+    Outcome::Ok
+}
+
 static ENV_ST: AtomicU32 = AtomicU32::new(0);
 static ENV_DONE: AtomicBool = AtomicBool::new(false);
 
@@ -856,6 +984,28 @@ pub(crate) fn test_el0_env_every_cpu() -> Outcome {
             return crate::fail_fmt!("cpu{i} status {st:#x}");
         }
         i += 1;
+    }
+    Outcome::Ok
+}
+
+/// A process loaded over frames a dead one's code just left runs its own
+/// code, not the old (ROADMAP §11.2: I-cache maintenance on ELF load). TCG
+/// refetches after any guest write, so this cannot see a missing `ic ivau`;
+/// on HVF or hardware with `DIC` clear it can. Here it proves the loader's
+/// maintenance runs without faulting, and the host test of
+/// `tlb::sync_range` proves the sequence.
+pub(crate) fn test_el0_code_recycle() -> Outcome {
+    for round in 0..4 {
+        let (code, want) = if round % 2 == 0 {
+            (RECYCLE_A, 3)
+        } else {
+            (RECYCLE_B, 5)
+        };
+        match user::run(&Image::Code(code, DEFAULT), &["recycle"]) {
+            Ok(st) if vibeos::proc::wifexited(st) && vibeos::proc::wexitstatus(st) == want => {}
+            Ok(st) => return crate::fail_fmt!("round {round}: status {st:#x}"),
+            Err(e) => return crate::fail_fmt!("round {round}: spawn: {}", e.as_str()),
+        }
     }
     Outcome::Ok
 }

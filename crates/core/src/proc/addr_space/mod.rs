@@ -488,6 +488,8 @@ impl<A: PageTable, C> AddressSpace<A, C> {
             unsafe { self.unmap_pages(va, mapped, alloc, &mut |_| {})? };
             return Err(err);
         }
+        // The Fresh leaves are published before the caller runs them.
+        self.mapper.publish_leaves();
         Ok(())
     }
 

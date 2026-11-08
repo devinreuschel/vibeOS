@@ -57,6 +57,11 @@ static HALT_HOOK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 const PL011_DR: u64 = 0x00;
 #[cfg(target_arch = "aarch64")]
 const PL011_FR: u64 = 0x18;
+/// Bytes from the PL011's base through its last register this module
+/// touches, FR (a 32-bit register). `paging_init` maps the pages this span
+/// reaches, since the base need not be page aligned.
+#[cfg(target_arch = "aarch64")]
+pub const PL011_SPAN: u64 = PL011_FR + 4;
 #[cfg(target_arch = "aarch64")]
 const PL011_TXFF: u32 = 1 << 5;
 #[cfg(target_arch = "aarch64")]
@@ -139,6 +144,15 @@ fn write_byte(b: u8) {
         }
         spin -= 1;
     }
+}
+
+/// Write `content` as one framed kernel line with no lock and no atomic
+/// read-modify-write. [`put_line`]'s `swap` is an LSE instruction on the
+/// aarch64 build, so a CPU without LSE cannot use it. The boot CPU calls
+/// this for an ISA-floor refusal, before SMP and before the log path.
+#[cfg(target_arch = "aarch64")]
+pub fn put_boot_line(content: &[u8]) {
+    line::kernel_line(true, content, write_byte);
 }
 
 /// Write `content` as one framed kernel line (`line::kernel_line`). No

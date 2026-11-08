@@ -140,10 +140,15 @@ fn cf8_write32(bdf: Bdf, offset: u16, val: u32) {
 
 /// Map `[phys, phys + len)` uncached through `ioremap`, except a range
 /// that overlaps the framebuffer, which stays write-back on the mapping
-/// `fb_init` already installed. `None` for a range that overlaps a
-/// RAM-typed range of the boot memory map, checked before anything is
-/// mapped (DESIGN §12.3 rule 8). Reached only from [`map_bar`], through a
-/// live claim (invariant I58), from `ecam_va`, and from the in-guest tests.
+/// `fb_init` already installed. A range inside the framebuffer's span gets
+/// that mapping's VA; one that only partly overlaps it gets `None` and no
+/// `ioremap`, because `ioremap` would map the framebuffer's frames that
+/// `fb_init` maps write-back a second time, uncached (a conflicting alias).
+/// `None` also for a range that overlaps a RAM-typed range of the boot
+/// memory map, checked before anything is mapped (DESIGN §12.3 rule 8).
+/// Reached only from [`map_bar`], through a live claim (invariant I58),
+/// from `ecam_va`, from `virtio_mmio_init::peek`'s probe of a DT window
+/// (no claim, I58), and from the in-guest tests.
 pub(crate) fn map_mmio(phys: u64, len: u64) -> Option<u64> {
     if phys == 0 || len == 0 {
         return None;
@@ -152,12 +157,14 @@ pub(crate) fn map_mmio(phys: u64, len: u64) -> Option<u64> {
         return None;
     }
     if fb_init::overlaps_phys(phys, len) {
-        return fb_init::va_for_phys(phys);
+        return fb_init::va_for_phys(phys, len);
     }
     // SAFETY: invariant I58: the range is a BAR its caller holds a
-    // claim on, which overlaps no other claim and no RAM, or an ECAM
-    // page, which only this mapping reaches; established by
-    // `dev::Registry::claim` and `pci_init::ecam_va`.
+    // claim on, which overlaps no other claim and no RAM, an ECAM
+    // page, which only this mapping reaches, or a DT virtio-mmio window
+    // that `virtio_mmio_init::peek` maps and unmaps before `publish`
+    // registers it; established by `dev::Registry::claim`,
+    // `pci_init::ecam_va`, and `virtio_mmio_init::peek`.
     unsafe { paging_init::ioremap(PhysAddr(phys), len) }.map(|v| v.as_u64())
 }
 

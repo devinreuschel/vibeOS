@@ -17,6 +17,8 @@ pub mod catch;
 pub mod cpu;
 pub mod gdt;
 pub(crate) mod gic;
+pub(crate) mod gic_common;
+pub(crate) mod gic_its;
 pub mod gs;
 pub mod idt;
 pub(crate) mod ipi;
@@ -34,6 +36,19 @@ pub(crate) mod irqchip;
     reason = "kernel_tests-only in-guest tests: a failure ends a test, not the kernel"
 )]
 pub mod ktest;
+#[cfg(feature = "kernel_tests")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::let_underscore_must_use,
+    clippy::unused_result_ok,
+    clippy::disallowed_types,
+    clippy::disallowed_macros,
+    reason = "kernel_tests-only in-guest tests: a failure ends a test, not the kernel"
+)]
+pub(crate) mod ktest_asid;
 #[cfg(feature = "kernel_tests")]
 #[allow(
     clippy::unwrap_used,
@@ -221,12 +236,14 @@ impl Barriers for Arch {
     /// Device against Normal; herd7 does not model Device memory.
     #[inline]
     unsafe fn mmio_read<W: MmioWidth>(reg: *const W) -> W {
-        compiler_fence(Ordering::SeqCst);
         // SAFETY: `reg` is a mapped device register, the `# Safety`
         // contract of `vibeos::arch::Barriers::mmio_read`; established
         // here by the caller's unsafe call.
         let v = unsafe { core::ptr::read_volatile(reg) };
-        compiler_fence(Ordering::SeqCst);
+        // SAFETY: `dmb oshld` orders the load above against later
+        // device-visible loads. Without `nomem`, the asm is also a compiler
+        // barrier for the volatile access. established here.
+        unsafe { core::arch::asm!("dmb oshld", options(nostack, preserves_flags)) };
         v
     }
 
@@ -234,10 +251,12 @@ impl Barriers for Arch {
     /// Normal against Device; herd7 does not model Device memory.
     #[inline]
     unsafe fn mmio_write<W: MmioWidth>(reg: *mut W, v: W) {
-        compiler_fence(Ordering::SeqCst);
+        // SAFETY: `dmb oshst` orders earlier device-visible stores before
+        // the store below. Without `nomem`, the asm is also a compiler
+        // barrier for the volatile access. established here.
+        unsafe { core::arch::asm!("dmb oshst", options(nostack, preserves_flags)) };
         // SAFETY: `reg` is a mapped device register the caller owns. established here.
         unsafe { core::ptr::write_volatile(reg, v) };
-        compiler_fence(Ordering::SeqCst);
     }
 
     #[inline]
@@ -245,6 +264,12 @@ impl Barriers for Arch {
 
     #[inline]
     unsafe fn sync_for_cpu(_start: *const u8, _len: usize) {}
+    unsafe fn sync_icache(start: *const u8, len: usize) {
+        // SAFETY: the range is mapped and readable, the `# Safety` contract
+        // of `vibeos::arch::Barriers::sync_icache`; established here by the
+        // caller's unsafe call.
+        unsafe { cpu::sync_icache(start as u64, len as u64) };
+    }
 }
 
 impl PerCpuBase for Arch {

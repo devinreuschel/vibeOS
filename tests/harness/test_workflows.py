@@ -15,6 +15,7 @@ from scripts.check_workflows import (
     Problem,
     Tree,
     Unsupported,
+    build_out,
     check,
     job_lanes,
     lane_map,
@@ -23,6 +24,7 @@ from scripts.check_workflows import (
     parse,
     rule_aarch64_arm,
     rule_action_pins,
+    rule_arch_output_paths,
     rule_budget_doc,
     rule_ci_triggers,
     rule_concurrency_group,
@@ -608,6 +610,113 @@ class TestAarch64Arm(unittest.TestCase):
         )
         t = Tree(workflows={CI: parse(text, CI)})
         self.assertEqual(rule_aarch64_arm(t), [])
+
+
+class TestAarch64ArmAxis(unittest.TestCase):
+    """A matrix `arch` axis that reaches the guest through `ARCH:` boots aarch64 on
+    the job's runner, so the runner must be arm64 unless it varies with the axis."""
+
+    def job(self, runs_on: str, arch: str = "[x86_64, aarch64]", env: bool = True,
+            run: str = "make test-kernel") -> str:
+        text = (
+            f"jobs:\n  boot:\n    runs-on: {runs_on}\n"
+            f"    strategy:\n      matrix:\n        arch: {arch}\n"
+        )
+        if env:
+            text += "    env:\n      ARCH: ${{ matrix.arch }}\n"
+        return text + f"    steps:\n      - run: {run}\n"
+
+    def problems(self, text: str) -> list[str]:
+        t = Tree(workflows={CI: parse(text, CI)})
+        return [p.rule for p in rule_aarch64_arm(t)]
+
+    def test_axis_aarch64_on_x86_runner_fails(self) -> None:
+        self.assertEqual(self.problems(self.job("ubuntu-26.04")), ["aarch64_arm"])
+
+    def test_axis_aarch64_on_arm_runner_passes(self) -> None:
+        self.assertEqual(self.problems(self.job("ubuntu-26.04-arm")), [])
+
+    def test_runner_axis_with_an_x86_value_fails(self) -> None:
+        text = self.job("${{ matrix.runner }}").replace(
+            "        arch: [x86_64, aarch64]\n",
+            "        arch: [x86_64, aarch64]\n        runner: [ubuntu-26.04, ubuntu-26.04-arm]\n",
+        )
+        self.assertEqual(self.problems(text), ["aarch64_arm"])
+
+    def test_axis_without_a_boot_passes(self) -> None:
+        self.assertEqual(self.problems(self.job("ubuntu-26.04", run="make prebuilt")), [])
+
+    def test_axis_without_aarch64_passes(self) -> None:
+        self.assertEqual(self.problems(self.job("ubuntu-26.04", arch="[x86_64]")), [])
+
+    def test_axis_not_passed_to_the_guest_passes(self) -> None:
+        self.assertEqual(self.problems(self.job("ubuntu-26.04", env=False)), [])
+
+    def test_axis_with_an_include_on_x86_runner_fails(self) -> None:
+        text = self.job("ubuntu-26.04").replace(
+            "    env:\n", "        include:\n          - foo: bar\n    env:\n", 1
+        )
+        self.assertEqual(self.problems(text), ["aarch64_arm"])
+
+    def test_axis_with_an_include_naming_arm_runner_passes(self) -> None:
+        text = (
+            "jobs:\n  boot:\n    runs-on: ${{ matrix.runner }}\n"
+            "    strategy:\n      matrix:\n        arch: [x86_64, aarch64]\n"
+            "        include:\n"
+            "          - {arch: x86_64, runner: ubuntu-26.04}\n"
+            "          - {arch: aarch64, runner: ubuntu-26.04-arm}\n"
+            "    env:\n      ARCH: ${{ matrix.arch }}\n"
+            "    steps:\n      - run: make test-kernel\n"
+        )
+        self.assertEqual(self.problems(text), [])
+
+    def test_fromjson_matrix_passing_an_arch_fails(self) -> None:
+        text = (
+            "jobs:\n  boot:\n    runs-on: ubuntu-26.04-arm\n"
+            "    strategy:\n      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}\n"
+            "    env:\n      ARCH: ${{ matrix.arch }}\n"
+            "    steps:\n      - run: make test-kernel\n"
+        )
+        self.assertEqual(self.problems(text), ["aarch64_arm"])
+
+
+class TestAarch64ArmReusable(unittest.TestCase):
+    """A reusable workflow takes its arch as an input the rule cannot bind to the
+    caller's matrix, so both the caller's `with:` and the callee's boot are flagged."""
+
+    CALLEE = "/".join(CI.split("/")[:-1]) + "/boot.yml"
+
+    def problems(self, files: dict[str, str]) -> list[tuple[str, str]]:
+        t = Tree(workflows={p: parse(s, p) for p, s in files.items()})
+        return [(p.path.rsplit("/", 1)[-1], p.rule) for p in rule_aarch64_arm(t)]
+
+    def test_caller_passing_matrix_arch_fails(self) -> None:
+        caller = (
+            "jobs:\n  boot:\n    strategy:\n      matrix:\n        arch: [x86_64, aarch64]\n"
+            "    uses: ./.github/workflows/boot.yml\n"
+            "    with:\n      arch: ${{ matrix.arch }}\n"
+        )
+        got = self.problems({CI: caller})
+        self.assertEqual(got, [("ci.yml", "aarch64_arm")], got)
+
+    def test_callee_reading_an_input_fails(self) -> None:
+        callee = (
+            "on:\n  workflow_call:\n    inputs:\n      arch:\n        type: string\n"
+            "jobs:\n  boot:\n    runs-on: ubuntu-26.04\n"
+            "    env:\n      ARCH: ${{ inputs.arch }}\n"
+            "    steps:\n      - run: make test-kernel\n"
+        )
+        got = self.problems({self.CALLEE: callee})
+        self.assertEqual(got, [("boot.yml", "aarch64_arm")], got)
+
+    def test_dispatch_input_in_a_boot_passes(self) -> None:
+        dispatch = (
+            "on:\n  workflow_dispatch:\n    inputs:\n      arch:\n        type: string\n"
+            "jobs:\n  boot:\n    runs-on: ubuntu-26.04-arm\n"
+            "    env:\n      ARCH: ${{ inputs.arch }}\n"
+            "    steps:\n      - run: make test-kernel\n"
+        )
+        self.assertEqual(self.problems({CI: dispatch}), [])
 
 
 class TestBudgetDoc(unittest.TestCase):
@@ -1505,6 +1614,91 @@ class TestMatrixArtifactNames(unittest.TestCase):
 
     def test_tree_workflows_pass(self) -> None:
         self.assertEqual(rule_matrix_artifact_names(load_tree(ROOT)), [])
+
+
+_BUILD_OUT_MK = "BUILD_OUT := $(if $(filter aarch64,$(ARCH)),build/aarch64,build)\n"
+
+
+def _arch_upload(path: str, matrix: str = "", env: str = "      ARCH: ${{ matrix.arch }}\n") -> str:
+    strategy = f"    strategy:\n      matrix:\n{matrix}" if matrix else ""
+    return (
+        "jobs:\n"
+        "  build:\n"
+        f"{strategy}"
+        "    env:\n"
+        f"{env}"
+        "    steps:\n"
+        f"      - uses: actions/upload-artifact@{SHA} # v4\n"
+        "        with:\n"
+        "          name: vibeos-${{ matrix.arch }}.iso\n"
+        f"          path: {path}\n"
+    )
+
+
+_TWO_OUTS = (
+    "        include:\n"
+    "          - {arch: x86_64, build_out: build}\n"
+    "          - {arch: aarch64, build_out: build/aarch64}\n"
+)
+
+
+class TestArchOutputPaths(unittest.TestCase):
+    """An uploaded image lies under the Makefile's BUILD_OUT for its leg's ARCH."""
+
+    def problems(self, text: str, makefile: str = _BUILD_OUT_MK) -> list[Problem]:
+        return rule_arch_output_paths(tree(text, makefile=makefile))
+
+    def test_x86_path_on_aarch64_leg_fails(self) -> None:
+        got = self.problems(_arch_upload("build/vibeos.iso", _TWO_OUTS))
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0].rule, "arch_output_paths")
+        self.assertIn("ARCH=aarch64", got[0].message)
+        self.assertIn("build/aarch64/", got[0].message)
+
+    def test_matrix_out_dir_passes(self) -> None:
+        text = _arch_upload("${{ matrix.build_out }}/vibeos.iso", _TWO_OUTS)
+        self.assertEqual(self.problems(text), [])
+
+    def test_swapped_out_dirs_fail_on_both_legs(self) -> None:
+        swapped = (
+            "        include:\n"
+            "          - {arch: x86_64, build_out: build/aarch64}\n"
+            "          - {arch: aarch64, build_out: build}\n"
+        )
+        got = self.problems(_arch_upload("${{ matrix.build_out }}/vibeos.iso", swapped))
+        self.assertEqual(len(got), 2)
+
+    def test_job_env_arch_without_matrix(self) -> None:
+        text = _arch_upload("build/kernels/vibeos-default.elf", env="      ARCH: aarch64\n")
+        self.assertEqual(len(self.problems(text)), 1)
+        ok = _arch_upload("build/aarch64/kernels/vibeos-default.elf", env="      ARCH: aarch64\n")
+        self.assertEqual(self.problems(ok), [])
+
+    def test_default_arch_is_x86(self) -> None:
+        text = _arch_upload("build/aarch64/vibeos.iso", env="      CI: '1'\n")
+        self.assertEqual(len(self.problems(text)), 1)
+
+    def test_shared_paths_are_not_arch_outputs(self) -> None:
+        for p in ("build/prebuilt.tar", "build/results/", "build/cores/", "build/runner.json"):
+            self.assertEqual(self.problems(_arch_upload(p, _TWO_OUTS)), [], p)
+
+    def test_arch_if_leaves_one_leg(self) -> None:
+        text = _arch_upload("build/vibeos.iso", _TWO_OUTS).replace(
+            "        with:\n", "        if: matrix.arch == 'x86_64'\n        with:\n"
+        )
+        self.assertEqual(self.problems(text), [])
+
+    def test_unreadable_build_out_fails(self) -> None:
+        got = self.problems(_arch_upload("build/vibeos.iso", _TWO_OUTS), makefile="")
+        self.assertEqual([(p.path, p.rule) for p in got], [("Makefile", "arch_output_paths")])
+
+    def test_build_out_reads_the_makefile(self) -> None:
+        self.assertEqual(build_out(_BUILD_OUT_MK), {"aarch64": "build/aarch64", "x86_64": "build"})
+        self.assertEqual(build_out((ROOT / "Makefile").read_text(encoding="utf-8")),
+                         {"aarch64": "build/aarch64", "x86_64": "build"})
+
+    def test_tree_workflows_pass(self) -> None:
+        self.assertEqual(rule_arch_output_paths(load_tree(ROOT)), [])
 
 
 class TestLimineCache(unittest.TestCase):

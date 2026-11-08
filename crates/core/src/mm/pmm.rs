@@ -436,6 +436,12 @@ impl Buddy {
         unsafe { self.deallocate(base, order) };
     }
 
+    /// Whether the order-`order` block at `phys` lies in a free block or run.
+    pub fn block_is_free(&self, phys: PhysAddr, order: u8) -> bool {
+        // SAFETY: `covered_by_free_block`'s contract; invariant I46, `mm::pmm::Buddy::insert_region`.
+        unsafe { self.covered_by_free_block(phys, order) }
+    }
+
     /// Take a block of `order` off the free lists, splitting down from a
     /// larger order if none is free at `order` directly. `None` on
     /// exhaustion. [`Buddy::alloc`] wraps the block in its token.

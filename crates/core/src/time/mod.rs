@@ -84,6 +84,13 @@ pub fn next_deadline(now: Instant) -> Instant {
     }
 }
 
+/// `CNTx_TVAL` for `ns` at `hz`. The register is signed 32-bit: a negative
+/// value fires at once, so the delay tops out at `i32::MAX` counts.
+pub fn tval_for_ns(ns: u64, hz: u64) -> u32 {
+    let ticks = u128::from(ns) * u128::from(hz) / 1_000_000_000;
+    ticks.min(i32::MAX as u128) as u32
+}
+
 pub const fn hpet_period_ok(period_fs: u32) -> bool {
     period_fs >= HPET_PERIOD_FS_MIN && period_fs <= HPET_PERIOD_FS_MAX
 }
@@ -423,6 +430,14 @@ impl ClockWriter {
     /// wrap keeps every wrap counted.
     pub fn advance(&mut self, raw: u64) -> Snapshot {
         let d = self.counter.delta(raw, self.last_raw);
+        // On a counter of 56 bits or more, which no gap between reads gets
+        // half way round, a delta past half the range is a read that went
+        // backward, not a wrap: it counts nothing and moves no state, so one
+        // such read cannot pin `ext` or rewind `last_raw`. On a narrower
+        // counter it is a late forward read inside one wrap and counts.
+        if self.counter.width >= 56 && d > self.counter.mask() / 2 + 1 {
+            return self.snapshot();
+        }
         self.ext = self.ext.saturating_add(d);
         self.last_raw = raw & self.counter.mask();
         self.snapshot()
@@ -762,6 +777,18 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn tval_never_reads_negative() {
+        let hz = 62_500_000;
+        assert_eq!(tval_for_ns(10_000_000, hz), 625_000);
+        assert_eq!(tval_for_ns(0, hz), 0);
+        // 40 s is 2.5e9 counts, past i32::MAX
+        for ns in [40_000_000_000, u64::MAX] {
+            assert_eq!(tval_for_ns(ns, hz) as i32, i32::MAX);
+        }
+        assert_eq!(tval_for_ns(u64::MAX, u64::MAX) as i32, i32::MAX);
+    }
 
     #[test]
     fn pit_divisor_is_1khz() {
@@ -1197,9 +1224,37 @@ mod tests {
         };
         assert_eq!(ns_at(s, c, 1), u64::MAX);
         assert_eq!(ns_at(s, c, 0), u64::MAX - 5);
+        // A read half the range on is still a forward read and saturates.
         let mut w = ClockWriter::new(c, 0, u64::MAX - 1);
-        assert_eq!(w.advance(u64::MAX).ns, u64::MAX);
+        assert_eq!(w.advance(u64::MAX / 2).ns, u64::MAX);
         assert_eq!(w.advance(u64::MAX - 1).ns, u64::MAX);
+    }
+
+    #[test]
+    fn backward_read_counts_nothing_and_does_not_pin_the_clock() {
+        let c = ghz();
+        let mut w = ClockWriter::new(c, 1_000, 0);
+        // A read 500 cycles behind counts as no time at all.
+        assert_eq!(w.advance(500).ns, 0);
+        // The next forward read counts from the last forward read, not from
+        // the backward one, so `last_raw` was not rewound.
+        assert_eq!(w.advance(1_500).ns, c.scale.to_ns(500));
+        // A 64-bit counter read far behind does not saturate `ext` or move
+        // `last_raw`: the next forward read still counts from 1_500.
+        assert_eq!(w.advance(u64::MAX - 7).ns, c.scale.to_ns(500));
+        assert_eq!(w.advance(1_600).ns, c.scale.to_ns(600));
+    }
+
+    #[test]
+    fn wrap24_late_read_inside_one_wrap_counts_in_full() {
+        let c = Counter::new(ClocksourceId::AcpiPm, PM_TIMER_HZ, 24).unwrap();
+        let wrap = 1u64 << 24;
+        let late = wrap / 4 * 3;
+        let mut w = ClockWriter::new(c, 0x10, 0);
+        // A read three quarters of a wrap on is a late forward read on a
+        // counter this narrow, not a backward one.
+        assert_eq!(w.advance(0x10 + late).ns, c.scale.to_ns(late));
+        assert_eq!(w.advance(0x10 + late + 100).ns, c.scale.to_ns(late + 100));
     }
 
     #[test]

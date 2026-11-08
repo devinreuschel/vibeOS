@@ -896,6 +896,99 @@ class TestFailsBefore(RepoCase):
                           "is not an earlier commit of the pull request")
 
 
+class TestMergeTicks(RepoCase):
+    """A merge commit's ticks: a `- [x]` line the merge holds and neither parent
+    ticks needs a `Proves:` line, which the errata file supplies (the merge
+    has none). A tick that a later commit reopens needs nothing."""
+
+    PROOF = ("make lint (existing: the lint target runs the checks) -- delta box names "
+             "nothing at all")
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repo.git("checkout", "-q", "-b", "feat")
+        self.repo.commit("feat work", {"src/feat.rs": "fn feat() {}\n"})
+        self.repo.git("checkout", "-q", "main")
+        self.repo.commit("main work", {"src/side.rs": "fn side() {}\n"})
+
+    def merge(self, roadmap: str) -> str:
+        """Merge `feat` into main with `roadmap` as the resolution of ROADMAP."""
+        self.repo.git("merge", "-q", "--no-ff", "--no-commit", "feat")
+        self.roadmap = roadmap
+        return self.commit("merge feat")
+
+    def errata(self, sha: str, proves: str) -> dict[str, str | None]:
+        row = (f'[[erratum]]\ncommit = "{sha}"\nwas = ""\nproves = "{proves}"\n'
+               'why = "the merge resolution ticked the box"\n')
+        return {check_ticks.ERRATA_PATH: row}
+
+    def test_resolution_that_ticks_a_box_neither_parent_ticks_fails(self) -> None:
+        sha = self.merge(tick(ROADMAP, "delta box"))
+        self.assertErrors(self.run_check(), f"{sha[:7]} L8: merge ticks a box neither parent "
+                          "ticks: delta box names")
+
+    def test_resolution_that_changes_a_ticked_text_fails(self) -> None:
+        sha = self.merge(ROADMAP.replace("- [x] epsilon box was", "- [x] epsilon box is"))
+        self.assertErrors(self.run_check(), f"{sha[:7]} L9: merge ticks a box neither parent "
+                          "ticks: epsilon box is")
+
+    def test_resolution_that_ticks_nothing_new_passes(self) -> None:
+        self.merge(ROADMAP)
+        self.assertEqual(self.run_check().errors, [])
+
+    def test_tick_from_a_parent_passes(self) -> None:
+        self.repo.git("checkout", "-q", "feat")
+        self.commit(f"feat tick\n\nProves: {self.PROOF}", "delta box")
+        self.repo.git("checkout", "-q", "main")
+        self.repo.git("merge", "-q", "--no-ff", "-m", "merge feat", "feat")
+        self.assertEqual(self.run_check().errors, [])
+
+    def test_erratum_supplies_the_merge_proof(self) -> None:
+        sha = self.merge(tick(ROADMAP, "delta box"))
+        self.repo.commit("errata", self.errata(sha, self.PROOF))
+        r = self.run_check()
+        self.assertEqual(r.errors, [])
+        self.assertTrue(any("erratum: Proves: make lint" in n for n in r.notes), r.notes)
+
+    def test_erratum_proof_must_resolve(self) -> None:
+        sha = self.merge(tick(ROADMAP, "delta box"))
+        self.repo.commit("errata", self.errata(sha, self.PROOF.replace("make lint",
+                                                                        "make nothing")))
+        self.assertErrors(self.run_check(), "proof not found at the head: 'make nothing")
+
+    def test_tick_a_later_commit_reopens_needs_no_proof(self) -> None:
+        self.merge(tick(ROADMAP, "delta box"))
+        self.roadmap = ROADMAP
+        self.commit("reopen")
+        self.assertEqual(self.run_check().errors, [])
+
+    def test_tick_inherited_from_before_the_base_fails(self) -> None:
+        # C0 ticks delta below the base, and a feature branch from C0 keeps that
+        # tick. Main reopens delta as the base, so the merge's tick of delta is new.
+        c0 = self.commit("old tick", "delta box")
+        self.repo.git("checkout", "-q", "-b", "inherit", c0)
+        self.repo.commit("inherit work", {"src/inherit.rs": "fn inherit() {}\n"})
+        self.repo.git("checkout", "-q", "main")
+        self.roadmap = ROADMAP
+        self.base = self.commit("reopen")
+        self.repo.git("merge", "-q", "--no-ff", "--no-commit", "inherit")
+        self.roadmap = tick(ROADMAP, "delta box")
+        sha = self.commit("merge inherit")
+        self.assertErrors(self.run_check(), f"{sha[:7]} L8: merge ticks a box neither parent "
+                          "ticks: delta box names")
+
+    def test_merge_of_a_merge_that_ticked_the_box_passes(self) -> None:
+        # The first merge is proved by an erratum. A later merge of it keeps the
+        # tick, which that accepted merge added, so it needs no proof of its own.
+        first = self.merge(tick(ROADMAP, "delta box"))
+        self.repo.commit("errata", self.errata(first, self.PROOF))
+        self.repo.git("checkout", "-q", "-b", "side2", f"{first}^1")
+        self.repo.commit("side2 work", {"src/side2.rs": "fn side2() {}\n"})
+        self.repo.git("checkout", "-q", "main")
+        self.repo.git("merge", "-q", "--no-ff", "-m", "merge side2", "side2")
+        self.assertEqual(self.run_check().errors, [])
+
+
 class TestBareMode(unittest.TestCase):
     def setUp(self) -> None:
         self.repo = TempRepo()

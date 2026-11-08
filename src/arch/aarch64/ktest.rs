@@ -4,11 +4,8 @@ use core::arch::{asm, global_asm};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use vibeos::irq::IrqSpecifier;
-use vibeos::kalloc::TryBox;
 use vibeos::kva::DEFAULT_STACK_PAGES;
-use vibeos::mm::asid::{self, AsidAlloc};
-use vibeos::paging::{PAGE_SIZE_4K, PageFlags, PhysAddr};
-use vibeos::pmm::Frames;
+use vibeos::paging::{PAGE_SIZE_4K, PhysAddr};
 use vibeos::thread::ThreadId;
 
 use crate::arch;
@@ -46,6 +43,10 @@ pub(crate) fn test_kstack_overflow() -> Outcome {
     let caught = arch::catch::catch(|| unsafe {
         vibeos_fault_on_bad_stack(poison);
     });
+    // The overflow stub stashed SP in TPIDRRO_EL0 and left D and A set, and
+    // the catch longjmp skipped the path that would clear them.
+    crate::arch::aarch64::cpu::clear_tpidrro_el0();
+    crate::arch::aarch64::cpu::daif_clear_da();
     drop(g);
     kva_init::free_stack(stack);
     let Some(c) = caught else {
@@ -186,34 +187,40 @@ pub(crate) fn test_its_doorbell() -> Outcome {
     };
     let irq = match irq_init::map_wired(IrqSpecifier::Gic { intid: hwirq }) {
         Ok(i) => i,
-        Err(e) => return Outcome::Fail(e.as_str()),
-    };
-    if irq_init::set_handler(irq, on_msi).is_err() {
-        return Outcome::Fail("handler");
-    }
-    chip.unmask(hwirq);
-    if let Err(e) = crate::arch::aarch64::gic::map_its_event(0, hwirq) {
-        return Outcome::Fail(e.as_str());
-    }
-    let msg = match chip.compose_msi(hwirq, 0) {
-        Ok(m) => m,
-        Err(e) => return Outcome::Fail(e.as_str()),
-    };
-    if msg.addr == 0 {
-        return Outcome::Fail("compose addr 0");
-    }
-    MSI_HITS.store(0, Ordering::Release);
-    if !fire_msi(msg) {
-        return Outcome::Fail("doorbell map");
-    }
-    let t0 = time_init::now_ns();
-    while MSI_HITS.load(Ordering::Acquire) == 0 {
-        if time_init::now_ns().saturating_sub(t0) > 500_000_000 {
-            return Outcome::Fail("no doorbell");
+        Err(e) => {
+            chip.free(hwirq);
+            return Outcome::Fail(e.as_str());
         }
-        core::hint::spin_loop();
+    };
+    let res = (|| -> Result<(), &'static str> {
+        irq_init::set_handler(irq, on_msi).map_err(|_| "handler")?;
+        chip.unmask(hwirq);
+        crate::arch::aarch64::gic::map_its_event(0, hwirq).map_err(|e| e.as_str())?;
+        let msg = chip.compose_msi(hwirq, 0).map_err(|e| e.as_str())?;
+        if msg.addr == 0 {
+            return Err("compose addr 0");
+        }
+        MSI_HITS.store(0, Ordering::Release);
+        if !fire_msi(msg) {
+            return Err("doorbell map");
+        }
+        let t0 = time_init::now_ns();
+        while MSI_HITS.load(Ordering::Acquire) == 0 {
+            if time_init::now_ns().saturating_sub(t0) > 500_000_000 {
+                return Err("no doorbell");
+            }
+            core::hint::spin_loop();
+        }
+        Ok(())
+    })();
+    // The IrqId's free runs the chip's `free` (DISCARD and mask). Then the
+    // device's EventIDs go back, so the next run maps one.
+    let _ = irq_init::free_vector(irq);
+    crate::arch::aarch64::gic::remove_its_device(0);
+    match res {
+        Ok(()) => Outcome::Ok,
+        Err(why) => Outcome::Fail(why),
     }
-    Outcome::Ok
 }
 
 fn fire_msi(msg: vibeos::irq::MsiMessage) -> bool {
@@ -228,6 +235,9 @@ fn fire_msi(msg: vibeos::irq::MsiMessage) -> bool {
         core::ptr::write_volatile((va.as_u64().wrapping_add(off)) as *mut u32, msg.data);
         core::arch::asm!("dsb oshst", options(nostack, preserves_flags));
     }
+    // SAFETY: the write above is the last touch of `va`, and the page is
+    // an ioremap VA of one page; established here.
+    unsafe { crate::pci_init::unmap_mmio(va.as_u64(), PAGE_SIZE_4K) };
     true
 }
 
@@ -313,15 +323,12 @@ static OSLR_SEEN: AtomicU64 = AtomicU64::new(0);
 static IDENTITY_BAD: AtomicU64 = AtomicU64::new(0);
 static IDENTITY_SEEN: AtomicU64 = AtomicU64::new(0);
 
-const USER_VA: u64 = 0x1_0000;
-const ASID_SHIFT: u64 = 48;
-const ASID_SPACES: u32 = 1000;
 const OSLK: u64 = 1 << 1;
 const PERCPU_TICKS_WANT: u64 = 10;
 const PERCPU_TICKS_WAIT_NS: u64 = 2_000_000_000;
 const TICK_WAIT_NS: u64 = 200_000_000;
 
-fn ap_mask() -> u64 {
+pub(crate) fn ap_mask() -> u64 {
     let n = crate::per_cpu_init::cpu_count().min(64) as u32;
     let mut m = 0u64;
     let mut i = 1u32;
@@ -383,9 +390,13 @@ pub(crate) fn test_sysreg_compare() -> Outcome {
         if hcr & E2H_TGE != E2H_TGE {
             return Outcome::Fail("el2 hcr");
         }
-        let described = described_aps();
-        if described != 0 && aps != described {
-            return Outcome::Fail("el2 ap missing");
+        // Bring-up starts every described CPU only when PSCI has a conduit.
+        // Without one only the boot CPU runs, so the comparison does not apply.
+        if crate::arch::aarch64::power::psci_available() {
+            let described = described_aps();
+            if described != 0 && aps != described {
+                return Outcome::Fail("el2 ap missing");
+            }
         }
     }
     if aps == 0 {
@@ -428,120 +439,6 @@ pub(crate) fn test_oslsr_clear() -> Outcome {
     }
     if OSLR_BAD.load(Ordering::Acquire) != 0 {
         return Outcome::Fail("ap oslk set");
-    }
-    Outcome::Ok
-}
-
-fn free_pa(pa: u64) {
-    if pa == 0 {
-        return;
-    }
-    // SAFETY: `pa` is a buddy page this test allocated and no longer maps.
-    // established here.
-    unsafe {
-        crate::pmm_init::with_buddy(|b| b.free(Frames::from_entry(pa, 0)));
-    }
-}
-
-fn alloc_zeroed() -> Option<u64> {
-    let f = crate::pmm_init::with_buddy(|b| b.alloc(0))?;
-    let pa = f.into_entry();
-    let va = crate::paging_init::hhdm_offset().wrapping_add(pa);
-    // SAFETY: buddy page, HHDM maps it (I14). established here.
-    unsafe { core::ptr::write_bytes(va as *mut u8, 0, 4096) };
-    Some(pa)
-}
-
-pub(crate) fn test_asid_4bit() -> Outcome {
-    let ncpus = crate::per_cpu_init::cpu_count().max(2) as u32;
-    let Some(alloc) = AsidAlloc::try_boxed(4, ncpus) else {
-        return Outcome::Fail("4-bit AsidAlloc");
-    };
-    let saved = crate::arch::aarch64::cpu::read_ttbr0();
-    let cpu = 0u32;
-    let flags = PageFlags::empty()
-        .with(PageFlags::PRESENT)
-        .with(PageFlags::WRITABLE)
-        .with(PageFlags::USER);
-    let mut i = 0u32;
-    while i < ASID_SPACES {
-        if crate::ktest::deadline_within(1_000) == Some(true) {
-            // SAFETY: restore the empty TTBR0 this CPU had. established here.
-            unsafe { crate::arch::aarch64::cpu::write_ttbr0(saved) };
-            return Outcome::Fail("asid deadline");
-        }
-        let Some(l0) = alloc_zeroed() else {
-            return Outcome::Fail("asid l0");
-        };
-        let Some(data) = alloc_zeroed() else {
-            free_pa(l0);
-            return Outcome::Fail("asid data");
-        };
-        let Ok(mut tables) = TryBox::try_new([0u64; 8]) else {
-            free_pa(data);
-            free_pa(l0);
-            return Outcome::Fail("asid tables");
-        };
-        let mut n = 0usize;
-        tables[n] = l0;
-        n += 1;
-        if !crate::arch::aarch64::secondary::map_va(
-            l0,
-            USER_VA,
-            data,
-            &mut tables[..],
-            &mut n,
-            flags,
-        ) {
-            let mut t = 0;
-            while t < n {
-                free_pa(tables[t]);
-                t += 1;
-            }
-            free_pa(data);
-            return Outcome::Fail("asid map");
-        }
-        let mut word = 0u64;
-        let packed = asid::switch(&alloc, cpu, &mut word);
-        if packed == 0 {
-            let mut t = 0;
-            while t < n {
-                free_pa(tables[t]);
-                t += 1;
-            }
-            free_pa(data);
-            return Outcome::Fail("asid alloc");
-        }
-        if alloc.flush_pending(cpu) {
-            crate::arch::aarch64::cpu::tlbi_all();
-            alloc.clear_flush(cpu);
-        }
-        let asid = u64::from(alloc.asid_of(packed));
-        // SAFETY: `l0` is this space's TTBR0 root; ASID is the allocator's.
-        // established here.
-        unsafe {
-            crate::arch::aarch64::cpu::write_ttbr0(l0 | (asid << ASID_SHIFT));
-        }
-        let pattern = 0xA5A5_0000u64 | u64::from(i);
-        crate::arch::aarch64::cpu::clear_pan();
-        // SAFETY: USER_VA is mapped in this TTBR0; PAN is clear. established here.
-        unsafe {
-            core::ptr::write_volatile(USER_VA as *mut u64, pattern);
-            let got = core::ptr::read_volatile(USER_VA as *const u64);
-            crate::arch::aarch64::cpu::set_pan();
-            crate::arch::aarch64::cpu::write_ttbr0(saved);
-            crate::arch::aarch64::cpu::tlbi_all();
-            let mut t = 0;
-            while t < n {
-                free_pa(tables[t]);
-                t += 1;
-            }
-            free_pa(data);
-            if got != pattern {
-                return crate::fail_fmt!("asid {i} got {got:#x} want {pattern:#x}");
-            }
-        }
-        i += 1;
     }
     Outcome::Ok
 }
@@ -905,12 +802,27 @@ pub(crate) fn test_rtc_offset() -> Outcome {
     if !(lo..hi).contains(&a) {
         return Outcome::Fail("rtc year");
     }
-    time_init::busy_wait_ms(20);
-    let Some(b) = time_init::unix_time_s() else {
+    // The boot origin is read once, so only the device's own register shows
+    // the clock running: read it live, before and after 1.1 s of monotonic
+    // time. PL031 counts whole seconds, so that wait must show a tick.
+    let Some(la) = time_init::pl031_live_s() else {
+        return Outcome::Fail("rtc window");
+    };
+    if !(lo..hi).contains(&la) {
+        return Outcome::Fail("rtc live year");
+    }
+    let t0 = time_init::now_ns();
+    if !crate::ktest::spin_until_ns(
+        || time_init::now_ns().saturating_sub(t0) >= 1_100_000_000,
+        2_000_000_000,
+    ) {
+        return Outcome::Fail("monotonic clock did not reach 1.1 s");
+    }
+    let Some(lb) = time_init::pl031_live_s() else {
         return Outcome::Fail("rtc lost");
     };
-    if b < a {
-        return Outcome::Fail("wall clock went backwards");
+    if lb.saturating_sub(la) < 1 {
+        return Outcome::Fail("rtc did not advance in 1.1 s");
     }
     Outcome::Ok
 }
@@ -1196,12 +1108,34 @@ pub(crate) fn test_el0_munmap_touch() -> Outcome {
 
 /// A saved ELR of 2^48 kills the process with SIGSEGV; the kernel runs.
 pub(crate) fn test_el0_bad_elr() -> Outcome {
+    // Armed before the spawn. The child is pinned to this CPU and made
+    // ready inside `spawn`, so a tick can run it before an arm after the
+    // spawn would land. The hook is one-shot, taken by the next return to
+    // EL0 on any CPU, which here is the child's first.
+    syscall_init::testing::arm_bad_elr();
+    let kills = crate::proc_init::BAD_ELR_KILLS.load(core::sync::atomic::Ordering::Relaxed);
     let pid = match user::spawn(&Image::Code(EL0_EXIT0, DEFAULT), &["el0_bad_elr"]) {
         Ok(p) => p,
-        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+        Err(e) => {
+            syscall_init::testing::take_bad_elr();
+            return crate::fail_fmt!("spawn: {}", e.as_str());
+        }
     };
-    syscall_init::testing::arm_bad_elr();
     let st = user::wait(pid);
+    // The child's return to EL0 took the hook before it exited. A hook still
+    // armed here never fired, and is taken so a later test does not get it.
+    if syscall_init::testing::take_bad_elr() {
+        return Outcome::Fail("bad elr hook not taken");
+    }
+    // The status is SIGSEGV whether `elr_ok` or the MMU stopped the return,
+    // so the kill is counted: only `kill_bad_elr` moves the counter.
+    if crate::proc_init::BAD_ELR_KILLS
+        .load(core::sync::atomic::Ordering::Relaxed)
+        .wrapping_sub(kills)
+        != 1
+    {
+        return Outcome::Fail("bad elr not killed by elr_ok");
+    }
     if signaled(st, vibeos::proc::SIGSEGV) {
         Outcome::Ok
     } else {
@@ -1209,27 +1143,69 @@ pub(crate) fn test_el0_bad_elr() -> Outcome {
     }
 }
 
-/// `current_tcb` is `mrs SP_EL0`.
-pub(crate) fn test_el0_sp_el0_current() -> Outcome {
-    let t = crate::arch::current_tcb();
+static PROBE_SP_EL0: AtomicU64 = AtomicU64::new(0);
+static PROBE_CURRENT: AtomicU64 = AtomicU64::new(0);
+
+/// Reads SP_EL0 and the per-CPU `current` at IF=0, so both are this
+/// thread's on one CPU, and publishes them for the test.
+fn sp_el0_probe_entry() {
+    let _g = InterruptGuard::enter();
     let via: u64;
-    // SAFETY: SP_EL0 holds current at EL1 (ROADMAP §11.6). established here.
+    // SAFETY: SP_EL0 holds current at EL1 (ROADMAP §11.6), and IF=0 keeps
+    // this thread on this CPU. established here.
     unsafe {
         core::arch::asm!("mrs {0}, sp_el0", out(reg) via, options(nomem, nostack, preserves_flags));
     }
-    if t as u64 == via && !t.is_null() {
+    let sched = crate::per_cpu_init::current().current as u64;
+    // Release: pairs with the Acquire loads in `test_el0_sp_el0_current`.
+    PROBE_SP_EL0.store(via, Ordering::Release);
+    // Release: pairs with the Acquire loads in `test_el0_sp_el0_current`.
+    PROBE_CURRENT.store(sched, Ordering::Release);
+}
+
+/// `current_tcb` is `mrs SP_EL0`, and `set_current_thread` writes it beside
+/// the per-CPU `current`. Both are compared with the TCB the thread table
+/// holds for the id `spawn_here` returned, which neither register nor
+/// `set_current_thread` supplies, so a wrong TCB written to both fails.
+pub(crate) fn test_el0_sp_el0_current() -> Outcome {
+    let Ok(h) = thread_init::spawn_here("sp-el0-probe", sp_el0_probe_entry) else {
+        return Outcome::Fail("spawn");
+    };
+    // Taken before the probe runs: a TCB's address is fixed for its life.
+    let want = thread_init::tcb_ptr(h.id()) as u64;
+    if want == 0 {
+        return Outcome::Fail("no tcb for spawned id");
+    }
+    let t0 = time_init::now_ns();
+    while !thread_init::exited(h.id()) {
+        if time_init::now_ns().saturating_sub(t0) > 1_000_000_000 {
+            return Outcome::Fail("probe did not finish");
+        }
+        thread_init::yield_now();
+    }
+    // Acquire: pairs with the Release stores in `sp_el0_probe_entry`.
+    let via = PROBE_SP_EL0.load(Ordering::Acquire);
+    // Acquire: pairs with the Release stores in `sp_el0_probe_entry`.
+    let sched = PROBE_CURRENT.load(Ordering::Acquire);
+    if via == want && sched == want {
         Outcome::Ok
     } else {
-        crate::fail_fmt!("tcb {t:p} sp_el0 {via:#x}")
+        crate::fail_fmt!("sp_el0 {via:#x} percpu current {sched:#x}, thread table {want:#x}")
     }
 }
 
-/// Limine framebuffer over ramfb (ROADMAP §11.5).
+/// Limine framebuffer over ramfb (ROADMAP §11.5): up, and a pixel written
+/// through it reads back and then reads its old value again.
 pub(crate) fn test_fb_limine() -> Outcome {
-    if crate::fb_init::ready() {
-        Outcome::Ok
-    } else {
-        Outcome::Fail("no framebuffer")
+    if !crate::fb_init::ready() {
+        return Outcome::Fail("no framebuffer");
+    }
+    let color = vibeos::fb::pack_bgrx(0x12, 0x34, 0x56);
+    match crate::fb_init::pixel_round_trip(0, 0, color) {
+        Some((_, got, _)) if got != color => Outcome::Fail("pixel mismatch"),
+        Some((old, _, restored)) if restored != old => Outcome::Fail("pixel not restored"),
+        Some(_) => Outcome::Ok,
+        None => Outcome::Fail("no pixel"),
     }
 }
 
@@ -1371,6 +1347,10 @@ pub(crate) fn test_weak_order_probe() -> Outcome {
 
 pub(crate) const TESTS: &[Test] = &[
     test("kstack_overflow", test_kstack_overflow),
+    test(
+        "tpidrro_zero",
+        crate::arch::aarch64::ktest_el0::test_tpidrro_zero,
+    ),
     test("el1_x16_survives_irq", test_el1_x16_survives_irq),
     test("gic_present", test_gic_present),
     test("now_ns_cntvct", test_now_ns_cntvct),
@@ -1378,7 +1358,11 @@ pub(crate) const TESTS: &[Test] = &[
     test("idle_wfi", test_idle_wfi),
     test("sysreg_compare", test_sysreg_compare),
     test("oslsr_clear", test_oslsr_clear),
-    test("asid_4bit", test_asid_4bit).deadline(60_000),
+    test(
+        "asid_4bit",
+        crate::arch::aarch64::ktest_asid::test_asid_4bit,
+    )
+    .deadline(60_000),
     test("tlb_shootdown_remote", test_tlb_shootdown_remote),
     test("per_cpu_identity", test_per_cpu_identity),
     test("percpu_ticks_advance", test_percpu_ticks_advance),
@@ -1462,8 +1446,17 @@ pub(crate) const TESTS: &[Test] = &[
     )
     .deadline(60_000),
     test(
+        "el0_fp_migrate_counter",
+        crate::arch::aarch64::ktest_el0::test_el0_fp_migrate_counter,
+    )
+    .deadline(30_000),
+    test(
         "el0_sve_sigill",
         crate::arch::aarch64::ktest_el0::test_el0_sve_sigill,
+    ),
+    test(
+        "el0_code_recycle",
+        crate::arch::aarch64::ktest_el0::test_el0_code_recycle,
     ),
     test("weak_order_probe", test_weak_order_probe)
         .deadline(330_000)

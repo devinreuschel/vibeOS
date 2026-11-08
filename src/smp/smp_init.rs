@@ -27,6 +27,8 @@ use vibeos::smp::{
 };
 use vibeos::thread::ThreadId;
 
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+use super::ktest::stall;
 use crate::apic_init;
 use crate::arch;
 #[cfg(target_arch = "x86_64")]
@@ -139,6 +141,10 @@ pub(crate) struct ApAlloc {
     /// The AP's per-CPU workers, parked until it is online.
     workers: CpuWorkers,
     published: bool,
+    /// The frames this AP's resources hold (kernel_tests, x86_64), for the
+    /// stalled-AP test.
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    frames: ApFrames,
 }
 
 /// The trampoline page `page`'s physmap address, through which the BSP
@@ -276,6 +282,8 @@ pub(crate) fn alloc_ap_resources(
             return Err(Some(e));
         }
     };
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    let frames = ap_frames(&tables, idle_id, &workers);
     let idle_ptr = thread_init::tcb_ptr(idle_id);
     if publish {
         // SAFETY: CPU `cpu_id` is not running, `with_cpu`'s contract,
@@ -306,7 +314,60 @@ pub(crate) fn alloc_ap_resources(
         idle_id,
         workers,
         published: publish,
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+        frames,
     })
+}
+
+/// Frames an AP's bring-up allocates: its four IST and RSP0 stacks, its idle
+/// stack and its workers' stack, one per page (kernel_tests, x86_64).
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+const AP_FRAMES: usize = 4 * gdt::IST_PAGES + gdt::RSP0_PAGES + 2 * DEFAULT_STACK_PAGES;
+
+/// The frames one AP's bring-up allocated, as (base, order) (kernel_tests,
+/// x86_64).
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+#[derive(Clone, Copy)]
+pub(crate) struct ApFrames {
+    list: [(u64, u8); AP_FRAMES],
+    pub(crate) len: usize,
+}
+
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+impl ApFrames {
+    pub(crate) const fn new() -> Self {
+        Self {
+            list: [(0, 0); AP_FRAMES],
+            len: 0,
+        }
+    }
+
+    /// Keep one frame; `AP_FRAMES` covers every page, so none is dropped.
+    fn note(&mut self, base: u64, order: u8) {
+        if let Some(slot) = self.list.get_mut(self.len) {
+            *slot = (base, order);
+            self.len += 1;
+        }
+    }
+
+    pub(crate) fn recorded(&self) -> impl Iterator<Item = (u64, u8)> + '_ {
+        self.list.get(..self.len).unwrap_or(&[]).iter().copied()
+    }
+}
+
+/// The frames `alloc_ap_resources` gave AP `tables`, `idle_id` and
+/// `workers`, not the heap block that holds `CpuTables` (kernel_tests, x86_64).
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+fn ap_frames(tables: &ApTables, idle_id: ThreadId, workers: &CpuWorkers) -> ApFrames {
+    let mut frames = ApFrames::new();
+    for stack in tables.ist.iter().chain(core::iter::once(&tables.rsp0)) {
+        for f in stack.frames().iter().flatten() {
+            frames.note(f.base(), f.order());
+        }
+    }
+    thread_init::for_each_stack_frame(idle_id, |base, order| frames.note(base, order));
+    work_init::for_each_stack_frame(workers, |base, order| frames.note(base, order));
+    frames
 }
 
 /// Undo [`alloc_ap_resources`]. `sipi_sent`: a SIPI went to the AP, which
@@ -385,7 +446,7 @@ fn free_live_ap(
 fn wait_ready(cpu_id: u32) -> bool {
     let mut ms = 0u64;
     while ms < READY_TIMEOUT_MS {
-        // Acquire: pairs with the Release store in `ap_main`.
+        // Acquire: pairs with the Release store in `ap_entry`.
         if per_cpu_init::cpu(cpu_id).is_some_and(|c| c.ready.load(Ordering::Acquire)) {
             return true;
         }
@@ -505,6 +566,8 @@ fn start_one(a: ApAlloc, page: u64) {
         free_ap_resources(a, false);
         return;
     }
+    #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+    let frames = a.frames;
     let ApAlloc {
         tables,
         idle_id,
@@ -572,6 +635,8 @@ fn start_one(a: ApAlloc, page: u64) {
         let _ = apic_init::send_ipi(apic_id, 0, IpiMode::Init);
         time_init::busy_wait_ms(INIT_WAIT_MS);
         per_cpu_init::mark_offline(cpu_id);
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+        stall::record_stalled_frames(&frames);
         note_stalled_leak();
         // F032: the AP may still run on these; do not abandon them.
         // CpuWorkers is ThreadId-only and has no Drop.
@@ -691,11 +756,19 @@ pub unsafe fn init() {
                 .is_some_and(|r| r.end <= window.start || r.start >= window.end),
             "smp: bootstrap stack {stack:#x?} not outside the identity window"
         );
+        // Every CPU caches the window's translations first, so the teardown's
+        // flush has something to drop on each CPU (DESIGN §4.3).
+        #[cfg(feature = "kernel_tests")]
+        crate::mm::ktest::prime_identity();
         // SAFETY: every AP is up or abandoned (`start_aps` returned), nothing
         // uses an identity address but the trampoline page, which `keep`
         // keeps, and this CPU's stack is outside the window (checked above);
         // established here.
         unsafe { crate::paging_init::teardown_identity(keep) };
+        // The boot CPU reads the primed pages before any CR3 write, so a
+        // translation its flush left in place shows as a readable page.
+        #[cfg(feature = "kernel_tests")]
+        crate::mm::ktest::probe_boot_identity();
     }
 }
 
@@ -757,7 +830,6 @@ static STALL_GO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool
 static STALL_PARKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "kernel_tests")]
 static STALL_LEAKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-
 #[cfg(feature = "kernel_tests")]
 fn arm_stall_from_cmdline() {
     let sel = vibeos::ktest::Selection::parse(crate::boot::cmdline().get("vibeos.ktest"));
@@ -876,7 +948,8 @@ fn release_held_ap() {
 fn note_stalled_leak() {
     #[cfg(feature = "kernel_tests")]
     {
-        // Release: pairs with the Acquire load in the stalled-AP test.
+        // Release: pairs with the Acquire load in `stalled_ap_leaked`, so a
+        // reader that sees the leak also sees `record_stalled_frames`'s write.
         STALL_LEAKED.store(true, Ordering::Release);
     }
 }
@@ -1021,13 +1094,27 @@ fn init_aarch64() {
     let Some((stub_va, stub_len)) = arch::aarch64::secondary::stub_range() else {
         return;
     };
+    let Some(stub_pa) = arch::aarch64::secondary::va_to_pa(stub_va).map(|pa| pa & !0xFFF) else {
+        crate::klog!(vibeos::log::Level::Error, "vibeOS: smp: stub pa");
+        return;
+    };
+    let Some(desc) = machine_init::info() else {
+        return;
+    };
+    if !crate::arch::aarch64::power::psci_available() {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "vibeOS: smp: no PSCI conduit, boot cpu only"
+        );
+        return;
+    }
     let mut pas = TryVec::new();
-    let stub_pa = arch::aarch64::secondary::va_to_pa(stub_va).unwrap_or(stub_va) & !0xFFF;
     let stub_end = stub_pa.saturating_add(stub_len as u64);
     let mut p = stub_pa;
     while p < stub_end {
         if pas.try_push(p).is_err() {
-            break;
+            crate::klog!(vibeos::log::Level::Error, "vibeOS: smp: identity map");
+            return;
         }
         p = p.saturating_add(4096);
     }
@@ -1045,9 +1132,6 @@ fn init_aarch64() {
     }
     clean_identity(&id_tables, n_id);
     arch::aarch64::secondary::clean_poc(stub_va, stub_len);
-    let Some(desc) = machine_init::info() else {
-        return;
-    };
     let bsp = per_cpu_init::cpu(0)
         .map(|c| {
             // Relaxed: the BSP's MPIDR is fixed after `init_bsp`; pairs with nothing.
@@ -1055,6 +1139,7 @@ fn init_aarch64() {
         })
         .unwrap_or(0);
     let mut logical = 1u32;
+    let mut offline = 0u32;
     let mut i = 0usize;
     while i < desc.cpu_count() {
         let Some(cpu) = desc.cpus().get(i) else {
@@ -1087,9 +1172,15 @@ fn init_aarch64() {
             &mut n_id,
         ) {
             StartAp::Online => {}
-            StartAp::Failed => {}
+            StartAp::Failed => offline += 1,
         }
         logical += 1;
+    }
+    if offline != 0 {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "smp: {offline} cpus stayed offline"
+        );
     }
 }
 
@@ -1111,7 +1202,7 @@ fn clean_identity(tables: &TryBoxWrap, n: usize) {
 }
 
 #[cfg(target_arch = "aarch64")]
-type TryBoxWrap = vibeos::kalloc::TryBox<[u64; 8]>;
+type TryBoxWrap = vibeos::kalloc::TryBox<[u64; arch::aarch64::secondary::IDENTITY_TABLES]>;
 
 #[cfg(target_arch = "aarch64")]
 fn start_one_aarch64(
@@ -1184,7 +1275,10 @@ fn start_one_aarch64(
         free_live_ap(cpu_id, idle_id, workers, published, false);
         return StartAp::Failed;
     };
-    if !arch::aarch64::secondary::map_identity(ttbr0_id, param_pa, &mut id_tables[..], n_id) {
+    // SAFETY: `ttbr0_id` is the identity root this fn built, an HHDM-mapped table page. established here.
+    if !unsafe {
+        arch::aarch64::secondary::map_identity(ttbr0_id, param_pa, &mut id_tables[..], n_id)
+    } {
         crate::marker!("vibeOS: smp: apic {hw_id} alloc failed");
         free_live_ap(cpu_id, idle_id, workers, published, false);
         return StartAp::Failed;
@@ -1203,17 +1297,15 @@ fn start_one_aarch64(
     param.entry_va = ap_entry_aarch64 as *const () as u64;
     param.continue_va = arch::aarch64::secondary::continue_va();
     param.param_va = param_va;
-    param.conduit_hvc =
-        u64::from(crate::machine_init::info().is_some_and(|d| {
-            matches!(d.enable, vibeos::machine::EnableMethod::Psci { hvc: true })
-        }));
+    param.conduit_hvc = u64::from(crate::arch::aarch64::power::conduit_is_hvc());
     // SAFETY: `param_va` is the HHDM alias of a page we own. established here.
     unsafe { (param_va as *mut vibeos::arch::aarch64::psci::SecondaryParam).write_volatile(param) };
     arch::aarch64::secondary::clean_poc(
         param_va,
         core::mem::size_of::<vibeos::arch::aarch64::psci::SecondaryParam>(),
     );
-    let on = crate::arch::aarch64::power::cpu_on(hw_id, entry_pa, param_pa);
+    // SAFETY: `entry_pa` is the kernel's secondary entry stub and `param_pa` the page written above, per power::cpu_on's `# Safety`. established here.
+    let on = unsafe { crate::arch::aarch64::power::cpu_on(hw_id, entry_pa, param_pa) };
     if on == vibeos::arch::aarch64::psci::ALREADY_ON {
         crate::marker!("vibeOS: smp: apic {hw_id} already on");
         free_live_ap(cpu_id, idle_id, workers, published, false);
@@ -1330,9 +1422,10 @@ fn finish_aarch64_failure(
         note_aff_off_free();
     } else {
         note_stalled_leak();
-        // F032: AFFINITY_INFO is not OFF; a late core may still start.
-        // CpuWorkers is ThreadId-only and has no Drop.
-        let _ = (idle_id, workers, published);
+        // F032: AFFINITY_INFO is not OFF; a late core may still start, so
+        // the idle thread, its stack and the tables stay. The workers were
+        // never made ready and the core never touches them.
+        work_init::abandon_cpu_workers(workers);
     }
 }
 
@@ -1340,6 +1433,7 @@ fn finish_aarch64_failure(
 extern "C" fn ap_entry_aarch64(cpu: *mut PerCpu) -> ! {
     arch::aarch64::cpu::cli();
     arch::aarch64::cpu::set_pan();
+    arch::aarch64::cpu::clear_tpidrro_el0();
     // SAFETY: `cpu` is this AP's slot; the BSP's `with_cpu` ended before
     // CPU_ON (I43, I21, established at `smp_init::start_one_aarch64`).
     let cpu = unsafe { &mut *cpu };
@@ -1355,7 +1449,11 @@ extern "C" fn ap_entry_aarch64(cpu: *mut PerCpu) -> ! {
     arch::aarch64::cpu::release_debug_os_lock();
     arch::aarch64::cpu::print_exception_level();
     // SAFETY: this CPU's GIC; IRQs masked. established here.
-    unsafe { apic_init::enable_ap() };
+    if !unsafe { apic_init::enable_ap() } {
+        // No redistributor for this CPU: park before `ready`, so the boot
+        // CPU times it out and frees or leaks it as an unready AP.
+        park_lost();
+    }
     apic_init::arm_ap();
     maybe_stall_ap();
     if !claim_online(cpu.cpu_id) {

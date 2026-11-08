@@ -82,6 +82,13 @@ const EDU_DMA_RUN: u32 = 1;
 
 const EDU_DMA_TO_PCI: u32 = 2;
 
+/// dma32 buffers on `virt` sit below 4 GiB only because the harness gives
+/// the guest 128 MiB of RAM, starting at 1 GiB (`VIBEOS_MEM`'s default), so
+/// the mask and truncation cases cannot occur there. No allocator limit
+/// enforces the 4 GiB bound yet: `alloc_from_buddy` passes `u64::MAX` as
+/// `max_phys` (`crates/core/src/dev/dma.rs`, ROADMAP §20.6). A guest with
+/// more RAM could place a buffer above 4 GiB, and then those cases need a
+/// test of their own.
 pub(crate) fn test_dma_edu() -> Outcome {
     let Some(dev) = find_edu() else {
         return Outcome::Skip("no edu");

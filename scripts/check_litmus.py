@@ -110,7 +110,8 @@ def observation_error(rel: str, model: str, got: str) -> str | None:
 def run_herd7(root: Path) -> list[str]:
     """Run herd7 on every litmus file. herd7 must be on PATH."""
     if which("herd7") is None:
-        return ["litmus: herd7 not installed (opam install herdtools7)"]
+        return ["litmus: herd7 not installed (on Linux, the distro's herdtools7 package; "
+                "elsewhere, opam install herdtools7)"]
     errs: list[str] = []
     files = litmus_files(root)
     if not files:

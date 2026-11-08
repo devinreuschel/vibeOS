@@ -118,6 +118,18 @@ impl PageTable for Arch {
     fn bbm_make() {
         cpu::bbm_make();
     }
+
+    #[inline]
+    fn publish_table() {
+        cpu::publish_table();
+    }
+
+    /// The same barriers as `bbm_make`: a batch's stores are published by
+    /// `dsb ishst` and an `isb`.
+    #[inline]
+    fn publish_leaves() {
+        cpu::bbm_make();
+    }
 }
 
 /// NX is a leaf bit on aarch64; Limine already honours UXN/PXN.
@@ -171,7 +183,7 @@ unsafe fn takeover_ttbr1(new_root: u64) {
         Some(p) => p,
         None => crate::boot::halt_with("vibeOS: paging: takeover trampoline"),
     };
-    let mut tables = [0u64; 8];
+    let mut tables = [0u64; super::secondary::IDENTITY_TABLES];
     let Some((id, empty, _)) =
         super::secondary::build_identity_into(&pages[..n_pages], &mut tables)
     else {

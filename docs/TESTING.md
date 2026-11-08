@@ -1014,10 +1014,12 @@ runs `make test-unit` and the hostlib tests natively, §11.4's aarch64 switch ro
 run (x86_64: every ISO; aarch64: default and ktest) and the host `mkfs`/`fsck`/`nbd-cache`/
 `vibefs-cat` tools once and packs them, with the host triple they were built for, into
 `build/prebuilt.tar`, uploaded as `prebuilt-<arch>`. A push to `main` also uploads the
-production ISO as `vibeos-<arch>.iso` (7 days; the file inside stays `build/vibeos.iso`).
+production ISO as `vibeos-<arch>.iso` (7 days; the file inside is `vibeos.iso`, from the
+Makefile's `BUILD_OUT`: `build/` for x86_64, `build/aarch64/` for aarch64).
 `release.yml` publishes `dist/vibeos.iso` from its own build and does not download this
 artifact. `scripts/check_workflows.py` (`rule_matrix_artifact_names`) fails when two legs
-of a matrix job upload the same artifact name. A matrix of `tier` jobs per architecture
+of a matrix job upload the same artifact name, and `rule_arch_output_paths` when an upload
+names a kernel, user program, initrd or ISO outside the `BUILD_OUT` of its leg's `ARCH`. A matrix of `tier` jobs per architecture
 (`needs: [check, build]`, `fail-fast: false`, TCG) downloads `prebuilt-<arch>` and runs the same `make test-*`
 targets with `VIBEOS_PREBUILT=1`, which defines no ISO or host-tool rule, so a tier builds nothing
 and a missing file fails with `No rule to make target`: the Makefile stays the one definition of

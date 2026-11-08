@@ -515,13 +515,25 @@ pub fn try_user_trap(kind: TrapKind, pc: u64, far: u64) {
     finish_exit(wait_signaled(sig), Some(far));
 }
 
+/// Processes `kill_bad_elr` has killed, for the in-guest test that the
+/// `elr_ok` check, not a later fault, ended the process.
+#[cfg(all(target_arch = "aarch64", feature = "kernel_tests"))]
+pub(crate) static BAD_ELR_KILLS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 /// A return to EL0 whose `ELR_EL1` is not a user PC: `SIGSEGV`.
 #[cfg(target_arch = "aarch64")]
 pub fn kill_bad_elr(pc: u64) -> ! {
+    // The entry's DAIF is all set; the next thread runs with the mask it
+    // leaves (DESIGN §2.9 rule 3).
+    crate::arch::aarch64::cpu::daif_clear_all();
     let pid = current_pid();
     if pid == 0 {
         crate::arch::current::halt();
     }
+    // Relaxed: a count; pairs with nothing.
+    #[cfg(feature = "kernel_tests")]
+    BAD_ELR_KILLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     #[expect(
         clippy::let_underscore_must_use,
         reason = "a write to Serial cannot fail (DESIGN §2.5)"

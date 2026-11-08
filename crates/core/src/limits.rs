@@ -119,6 +119,12 @@ pub const MAX_CLAIMS: usize = 64;
 /// cost; QEMU's `dump-guest-memory` writes one note segment and one
 /// `PT_LOAD` per RAM block.
 pub const MAX_CORE_PHDRS: u16 = 256;
+/// Bytes in one device-tree `reg` window the kernel will map (`machine::fdt`):
+/// the largest real one is a PCI ECAM at 256 MiB.
+pub const MAX_DT_REG_BYTES: u64 = 1 << 30;
+/// Descriptors in one virtqueue the in-flight bitmap covers
+/// (`virtio::SplitLayout`); the spec allows 32768, the drivers ask for 64.
+pub const MAX_VIRTQ_SIZE: u16 = 256;
 /// Kernel shell commands (`shell::Registry`).
 pub const MAX_COMMANDS: usize = 48;
 /// Tokens in one kernel shell line (`shell`).

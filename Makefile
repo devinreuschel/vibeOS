@@ -13,6 +13,10 @@ else
 $(error ARCH must be x86_64 or aarch64)
 endif
 export VIBEOS_ARCH := $(ARCH)
+# Kernel ELFs, user programs, the initrd and the ISOs go under BUILD_OUT: build/
+# for x86_64 (the paths the tests pin) and build/aarch64/ for aarch64, so an
+# x86 run and an aarch64 run never overwrite each other's boot images (spec R9e).
+BUILD_OUT := $(if $(filter aarch64,$(ARCH)),build/aarch64,build)
 CARGO  := cargo
 export CARGO_TARGET_DIR := $(CURDIR)/target
 # Host triple for vibeos-core tests and mkfs/fsck. Parent cargo config
@@ -43,19 +47,19 @@ CARGO_FLAGS   :=
 endif
 
 # Every build product lives under build/ (ROADMAP §10.2): the named kernel
-# ELFs in build/kernels/, the ISOs and their staging roots beside them.
-ISO              := build/vibeos.iso
-ISO_PANIC        := build/vibeos-panic.iso
-ISO_GP           := build/vibeos-gp.iso
-ISO_PANIC_NEST   := build/vibeos-panic-nest.iso
-ISO_PANIC_STOP   := build/vibeos-panic-stop.iso
-ISO_KTEST        := build/vibeos-ktest.iso
-ISO_VIBEFS_CRASH := build/vibeos-vibefs-crash.iso
-ISO_IRQOFF       := build/vibeos-irqoff.iso
-ISO_KTEST_IRQOFF := build/vibeos-ktest-irqoff.iso
-ISO_INIT_FAULT   := build/vibeos-init-fault.iso
-ISO_NOSH         := build/vibeos-nosh.iso
-ISO_HANG         := build/vibeos-hang.iso
+# ELFs in $(BUILD_OUT)/kernels/, the ISOs and their staging roots beside them.
+ISO              := $(BUILD_OUT)/vibeos.iso
+ISO_PANIC        := $(BUILD_OUT)/vibeos-panic.iso
+ISO_GP           := $(BUILD_OUT)/vibeos-gp.iso
+ISO_PANIC_NEST   := $(BUILD_OUT)/vibeos-panic-nest.iso
+ISO_PANIC_STOP   := $(BUILD_OUT)/vibeos-panic-stop.iso
+ISO_KTEST        := $(BUILD_OUT)/vibeos-ktest.iso
+ISO_VIBEFS_CRASH := $(BUILD_OUT)/vibeos-vibefs-crash.iso
+ISO_IRQOFF       := $(BUILD_OUT)/vibeos-irqoff.iso
+ISO_KTEST_IRQOFF := $(BUILD_OUT)/vibeos-ktest-irqoff.iso
+ISO_INIT_FAULT   := $(BUILD_OUT)/vibeos-init-fault.iso
+ISO_NOSH         := $(BUILD_OUT)/vibeos-nosh.iso
+ISO_HANG         := $(BUILD_OUT)/vibeos-hang.iso
 
 LIMINE_DIR := ./limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
@@ -69,13 +73,13 @@ KERNEL_SRCS := $(shell find src crates/core/src -type f \( -name '*.rs' -o -name
 # (ROADMAP §10.2, F143).
 HOSTLIB_DEPS := $(KERNEL_SRCS) Cargo.lock Cargo.toml crates/core/Cargo.toml tests/hostlib/Cargo.toml \
 	$(wildcard tests/hostlib/src/bin/*.rs)
-INITRD := $(CURDIR)/build/initrd.fat
+INITRD := $(CURDIR)/$(BUILD_OUT)/initrd.fat
 # The production initrd with `/sbin/init` from `user/src/bin/init_fault.rs`,
 # for `make test-e2e-init-fault` only (AGENTS.md rule 9).
-INITRD_INIT_FAULT := $(CURDIR)/build/initrd-init_fault.fat
+INITRD_INIT_FAULT := $(CURDIR)/$(BUILD_OUT)/initrd-init_fault.fat
 # The production initrd without `/bin/sh` and with `/bin/false` as
 # `/bin/tests`, for `make test-e2e-init-fault`'s `init_no_sh` case only.
-INITRD_NOSH := $(CURDIR)/build/initrd-nosh.fat
+INITRD_NOSH := $(CURDIR)/$(BUILD_OUT)/initrd-nosh.fat
 KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.ld linker-aarch64.ld Makefile rust-toolchain.toml \
 	scripts/gen_ksyms.py scripts/mkiso.sh \
 	.cargo/config.toml Cargo.lock
@@ -115,26 +119,26 @@ CARGO_SHIP = CARGO_INCREMENTAL=0 $(CARGO) -Ztrim-paths -Zunstable-options --conf
 # $$ so $(CARGO_SHIP) is expanded when the recipe runs, not at $(eval) time.
 # `cp`, not `mv`: cargo may hard-link the artifact to its own copy.
 define KERNEL_VARIANT
-KERNEL_ELFS += build/kernels/vibeos-$(1).elf
+KERNEL_ELFS += $(BUILD_OUT)/kernels/vibeos-$(1).elf
 ISOS += $(3)
 ifneq ($(VIBEOS_PREBUILT),1)
-build/kernels/vibeos-$(1).elf: $(KERNEL_DEPS) $(PROFILE_STAMP)
-	rm -rf $$@ build/kernels/vibeos-$(1).ksyms.rs build/kernels/.vibeos-$(1)
-	$$(CARGO_SHIP) build --target $$(TARGET) $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
-	python3 scripts/gen_ksyms.py --nm "$$(NM)" build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
-	VIBEOS_KSYMS=$(CURDIR)/build/kernels/vibeos-$(1).ksyms.rs $$(CARGO_SHIP) build --target $$(TARGET) $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
-	python3 scripts/gen_ksyms.py --nm "$$(NM)" --check build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
-	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" build/kernels/.vibeos-$(1)/vibeos
-	cp build/kernels/.vibeos-$(1)/vibeos $$@
-$(3): build/kernels/vibeos-$(1).elf $(INITRD) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
-	LIMINE_DIR=$$(LIMINE_DIR) OBJCOPY=$$(OBJCOPY) scripts/mkiso.sh $$< $(INITRD) $$@ build/iso_root_$(1)
+$(BUILD_OUT)/kernels/vibeos-$(1).elf: $(KERNEL_DEPS) $(PROFILE_STAMP)
+	rm -rf $$@ $(BUILD_OUT)/kernels/vibeos-$(1).ksyms.rs $(BUILD_OUT)/kernels/.vibeos-$(1)
+	$$(CARGO_SHIP) build --target $$(TARGET) $$(CARGO_FLAGS) $(2) --artifact-dir $(BUILD_OUT)/kernels/.vibeos-$(1)
+	python3 scripts/gen_ksyms.py --nm "$$(NM)" $(BUILD_OUT)/kernels/.vibeos-$(1)/vibeos $(BUILD_OUT)/kernels/vibeos-$(1).ksyms.rs
+	VIBEOS_KSYMS=$(CURDIR)/$(BUILD_OUT)/kernels/vibeos-$(1).ksyms.rs $$(CARGO_SHIP) build --target $$(TARGET) $$(CARGO_FLAGS) $(2) --artifact-dir $(BUILD_OUT)/kernels/.vibeos-$(1)
+	python3 scripts/gen_ksyms.py --nm "$$(NM)" --check $(BUILD_OUT)/kernels/.vibeos-$(1)/vibeos $(BUILD_OUT)/kernels/vibeos-$(1).ksyms.rs
+	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" $(BUILD_OUT)/kernels/.vibeos-$(1)/vibeos
+	cp $(BUILD_OUT)/kernels/.vibeos-$(1)/vibeos $$@
+$(3): $(BUILD_OUT)/kernels/vibeos-$(1).elf $(INITRD) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
+	LIMINE_DIR=$$(LIMINE_DIR) OBJCOPY=$$(OBJCOPY) scripts/mkiso.sh $$< $(INITRD) $$@ $(BUILD_OUT)/iso_root_$(1)
 endif
 endef
 
 # The named ELFs do not name the profile, so each depends on a stamp that
 # changes only when CARGO_PROFILE does: a release build after a dev build
 # relinks instead of reusing the dev ELF.
-PROFILE_STAMP := build/kernels/profile.stamp
+PROFILE_STAMP := $(BUILD_OUT)/kernels/profile.stamp
 $(PROFILE_STAMP): FORCE
 	@mkdir -p $(dir $@)
 	@[ "$$(cat $@ 2>/dev/null)" = "$(CARGO_PROFILE)" ] || echo "$(CARGO_PROFILE)" > $@
@@ -166,17 +170,17 @@ $(eval $(call KERNEL_VARIANT,irqoff,--features irqoff,$(ISO_IRQOFF)))
 $(eval $(call KERNEL_VARIANT,ktest-irqoff,--features kernel_tests --features irqoff,$(ISO_KTEST_IRQOFF)))
 endif
 
-KERNEL_ELF := build/kernels/vibeos-default.elf
+KERNEL_ELF := $(BUILD_OUT)/kernels/vibeos-default.elf
 
 ifneq ($(VIBEOS_PREBUILT),1)
 # The production ELF with the faulting init's initrd (ROADMAP §10.5): its
 # panic ends the run through pvpanic, as every production panic does.
 $(ISO_INIT_FAULT): $(KERNEL_ELF) $(INITRD_INIT_FAULT) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
-	LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD_INIT_FAULT) $@ build/iso_root_init-fault
+	LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD_INIT_FAULT) $@ $(BUILD_OUT)/iso_root_init-fault
 # The production ELF with the initrd that has no `/bin/sh` (ROADMAP §10.5):
 # init's three failed shell starts end in its exit and the pid 1 panic.
 $(ISO_NOSH): $(KERNEL_ELF) $(INITRD_NOSH) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
-	LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD_NOSH) $@ build/iso_root_nosh
+	LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD_NOSH) $@ $(BUILD_OUT)/iso_root_nosh
 endif
 
 # The Rust user programs (ROADMAP §10.5, C-USERBINS): each user/src/bin/<name>.rs
@@ -193,7 +197,7 @@ USER_TRIPLE := x86_64-unknown-linux-musl
 endif
 USER_BIN_NAMES := $(sort $(basename $(notdir $(wildcard user/src/bin/*.rs))))
 VIBEOS_USER_BINS ?= $(USER_BIN_NAMES)
-USER_OUT := $(CURDIR)/build/user
+USER_OUT := $(CURDIR)/$(BUILD_OUT)/user
 USER_STAMP := $(USER_OUT)/.stamp
 USER_SRCS := $(shell find user/src user/mem -type f 2>/dev/null)
 USER_ELF_DIR := $(CARGO_TARGET_DIR)/$(USER_TRIPLE)/$(if $(filter release,$(CARGO_PROFILE)),release,debug)
@@ -222,15 +226,15 @@ $(USER_STAMP): $(USER_SRCS) user/Cargo.toml user/mem/Cargo.toml Cargo.toml Cargo
 
 # kernel_tests kernels embed the programs VIBEOS_USER_BINS names (build.rs), so
 # only the ktest ELF's build sees the two variables.
-build/kernels/vibeos-ktest.elf: $(USER_STAMP)
-build/kernels/vibeos-ktest.elf: export VIBEOS_USER_BINS := $(VIBEOS_USER_BINS)
-build/kernels/vibeos-ktest.elf: export VIBEOS_USER_DIR := $(USER_OUT)
-build/kernels/vibeos-ktest-irqoff.elf: $(USER_STAMP)
-build/kernels/vibeos-ktest-irqoff.elf: export VIBEOS_USER_BINS := $(VIBEOS_USER_BINS)
-build/kernels/vibeos-ktest-irqoff.elf: export VIBEOS_USER_DIR := $(USER_OUT)
+$(BUILD_OUT)/kernels/vibeos-ktest.elf: $(USER_STAMP)
+$(BUILD_OUT)/kernels/vibeos-ktest.elf: export VIBEOS_USER_BINS := $(VIBEOS_USER_BINS)
+$(BUILD_OUT)/kernels/vibeos-ktest.elf: export VIBEOS_USER_DIR := $(USER_OUT)
+$(BUILD_OUT)/kernels/vibeos-ktest-irqoff.elf: $(USER_STAMP)
+$(BUILD_OUT)/kernels/vibeos-ktest-irqoff.elf: export VIBEOS_USER_BINS := $(VIBEOS_USER_BINS)
+$(BUILD_OUT)/kernels/vibeos-ktest-irqoff.elf: export VIBEOS_USER_DIR := $(USER_OUT)
 endif
 
-.PHONY: help check check-python check-msrv all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
+.PHONY: help check check-python check-msrv check-hooks all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-vibefs-crash-1 test-vibefs-crash-2 test-vibefs-crash-plants test-e2e-uefi test-qmp test-forensics test-irqoff \
@@ -241,13 +245,14 @@ help:
 	  'vibeOS make targets:' \
 	  '  check                 fast local gate (clippy/unit/harness/python)' \
 	  '  check-python          ruff and mypy (VIBEOS_ALLOW_MISSING_TOOLS=1 skips a missing one)' \
+	  '  check-hooks           production-feature kernel link for ARCH, no test hook in its symbols' \
 	  '  check-msrv            vibeos-core with its MSRV toolchain (rust-version), host and kernel target' \
 	  '  fuzz-check            tests/fuzz: fmt, clippy, build every target, replay every committed input' \
 	  '  fuzz                  every cargo-fuzz target for FUZZ_TIME s (FUZZ_TARGETS=, FUZZ_SANITIZER=none|address)' \
-	  '  all / iso             kernel + build/vibeos.iso (hybrid BIOS/UEFI)' \
-	  '  kernel                kernel ELF only (build/kernels/vibeos-default.elf)' \
-	  '  user                  Rust user programs, as build/user/<name> (ROADMAP §10.5)' \
-	  '  isos                  every ISO variant, as build/vibeos*.iso' \
+	  '  all / iso             kernel + $(BUILD_OUT)/vibeos.iso (hybrid BIOS/UEFI)' \
+	  '  kernel                kernel ELF only ($(BUILD_OUT)/kernels/vibeos-default.elf)' \
+	  '  user                  Rust user programs, as $(BUILD_OUT)/user/<name> (ROADMAP §10.5)' \
+	  '  isos                  every ISO variant, as $(BUILD_OUT)/vibeos*.iso' \
 	  '  release-artifacts     v* release images (release profile) into OUT=<dir>' \
 	  '  repro                 build this commit twice; fail unless byte-identical (REPRO_ARGS=--share-rustup)' \
 	  '  ci-budget             scheduled lanes under 60% busy and tier medians under 60 s (ci-history)' \
@@ -354,7 +359,7 @@ check:
 	$(MAKE) test-harness
 	$(MAKE) fuzz-check
 	$(MAKE) check-python
-	$(CARGO) build --bin vibeos --profile hookcheck --config 'profile.hookcheck.inherits="dev"'
+	$(MAKE) check-hooks
 	python3 scripts/gen_syscalls.py --check
 	# The default kernel ELF, whose .stack_sizes check_stack_sizes.py reads.
 	$(MAKE) kernel
@@ -373,6 +378,12 @@ check:
 	    $(call missing_tool,cargo-deny,cargo deny check licenses bans sources,cargo install cargo-deny --locked --version $(CARGO_DENY_PIN)); \
 	fi
 	@echo "check: ok"
+
+# The production-feature link for $(TARGET), then the nm check on it; the CI
+# aarch64 leg runs this alone, since it does not run the whole `check`.
+check-hooks:
+	$(CARGO) build --bin vibeos --target $(TARGET) --profile hookcheck --config 'profile.hookcheck.inherits="dev"'
+	python3 scripts/check_test_hooks.py
 
 # ruff and mypy over tests/ and scripts/ (DX1, F147).
 check-python:
@@ -562,7 +573,7 @@ vmcore: $(VMCORE)
 ifeq ($(ARCH),aarch64)
 # The ISOs aarch64 per-push tiers run (ROADMAP §11.7): e2e + ktest shards.
 PREBUILT_FILES = $(ISO) $(ISO_KTEST) \
-	build/kernels/vibeos-default.elf build/kernels/vibeos-ktest.elf \
+	$(BUILD_OUT)/kernels/vibeos-default.elf $(BUILD_OUT)/kernels/vibeos-ktest.elf \
 	$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT) $(VMCORE)
 else
 PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_PANIC_NEST) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) $(ISO_INIT_FAULT) $(ISO_NOSH) \
@@ -682,9 +693,10 @@ LAPIC_FALLBACK_SHARDS := test-lapic-fallback-1 test-lapic-fallback-2 test-lapic-
 LAPIC_FALLBACK_CPU ?= qemu64,-tsc-deadline
 # aarch64 env_config defaults VIBEOS_SMP to 1 (`make run`). The in-guest
 # `-smp 2` tiers must set it: AP tests skip with `no AP` at 1 CPU, and
-# those skips have no aarch64 skips.toml row (ROADMAP §11.7).
-test-kernel $(KERNEL_SHARDS) $(KERNEL_A64_PROOF): KTEST_ENV = VIBEOS_SMP=2
-test-kernel-smp4 $(KERNEL_SMP4_SHARDS) $(KERNEL_SMP4_A64_PROOF): KTEST_ENV = VIBEOS_SMP=4
+# those skips have no aarch64 skips.toml row (ROADMAP §11.7). A caller's
+# VIBEOS_SMP overrides the default of 2 or 4 these tiers set.
+test-kernel $(KERNEL_SHARDS) $(KERNEL_A64_PROOF): KTEST_ENV = VIBEOS_SMP=$(or $(VIBEOS_SMP),2)
+test-kernel-smp4 $(KERNEL_SMP4_SHARDS) $(KERNEL_SMP4_A64_PROOF): KTEST_ENV = VIBEOS_SMP=$(or $(VIBEOS_SMP),4)
 test-lapic-fallback $(LAPIC_FALLBACK_SHARDS): KTEST_ENV = VIBEOS_QEMU_CPU=$(LAPIC_FALLBACK_CPU)
 
 test-kernel: $(ISO_KTEST)
@@ -852,7 +864,7 @@ gate:
 
 # Keeps build/results/.
 clean:
-	rm -rf build/kernels build/iso_root_* $(ISOS) $(addsuffix .xorriso-version,$(ISOS)) \
+	rm -rf $(BUILD_OUT)/kernels $(BUILD_OUT)/iso_root_* $(ISOS) $(addsuffix .xorriso-version,$(ISOS)) \
 	    $(INITRD) $(USER_OUT) $(ISO_INIT_FAULT) $(INITRD_INIT_FAULT) $(ISO_NOSH) $(INITRD_NOSH)
 	$(CARGO) clean
 

@@ -236,6 +236,53 @@ pub(crate) fn test_irq_pool() -> Outcome {
     }
 }
 
+/// A rejected `set_affinity` leaves the pool, the table and the RTE alone,
+/// and a good one keeps the RTE's mask bit.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn test_ioapic_affinity_state() -> Outcome {
+    // ISA line 13 (FPU): nothing in the guest raises it.
+    const GSI: u32 = 13;
+    let irq = match irq_init::map_wired(IrqSpecifier::Gsi {
+        gsi: GSI,
+        trigger: Trigger::Edge,
+        polarity: Polarity::High,
+    }) {
+        Ok(i) => i,
+        Err(e) => return Outcome::Fail(e.as_str()),
+    };
+    let r = ioapic_affinity_checks(irq);
+    let _ = irq_init::free_vector(irq);
+    match r {
+        Ok(()) => Outcome::Ok,
+        Err(why) => Outcome::Fail(why),
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn ioapic_affinity_checks(irq: IrqId) -> Result<(), &'static str> {
+    let vec = irq_init::vector(irq).ok_or("no vector")?;
+    let pool_cpu = || irq_init::with_pool(|p| p.cpu_of(vec));
+    if apic_init::gsi_masked(13) != Some(true) {
+        return Err("routed unmasked");
+    }
+    if irq_init::set_affinity(irq, 0xFFFF) != Err(IrqError::BadCpu) {
+        return Err("bad cpu accepted");
+    }
+    if pool_cpu() != Some(0) || irq_init::cpu_of(irq) != Some(0) {
+        return Err("cpu moved on error");
+    }
+    irq_init::set_affinity(irq, 0).map_err(|_| "affinity")?;
+    if apic_init::gsi_masked(13) != Some(true) {
+        return Err("affinity unmasked");
+    }
+    irq_init::set_handler(irq, irq_nop).map_err(|_| "handler")?;
+    irq_init::set_affinity(irq, 0).map_err(|_| "affinity live")?;
+    if apic_init::gsi_masked(13) != Some(false) {
+        return Err("affinity masked");
+    }
+    Ok(())
+}
+
 fn irq_th_nop(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {}
 
 fn irq_nop() {}
@@ -323,6 +370,7 @@ pub(crate) fn test_msix_cpu() -> Outcome {
         mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
         irq_init::disable_msix(&dev);
         let _ = irq_init::free_vector(vec);
+        irq_init::release_its_device(&dev);
         IRQ_MMIO.store(0, Ordering::SeqCst);
         restore_cmd();
         Outcome::Fail(why)
@@ -338,6 +386,7 @@ pub(crate) fn test_msix_cpu() -> Outcome {
         restore_cmd();
         mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
         let _ = irq_init::free_vector(vec);
+        irq_init::release_its_device(&dev);
         return Outcome::Fail(e.as_str());
     }
     if pci_init::cfg_read16(dev.addr, CFG_COMMAND) != before {
@@ -376,6 +425,9 @@ pub(crate) fn test_msix_cpu() -> Outcome {
     mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
     irq_init::disable_msix(&dev);
     let _ = irq_init::free_vector(vec);
+    // The EventID `alloc_msi` mapped stays allocated until its device is
+    // unmapped; the next run needs one free.
+    irq_init::release_its_device(&dev);
     IRQ_MMIO.store(0, Ordering::SeqCst);
     restore_cmd();
     if !second {
@@ -1336,6 +1388,52 @@ pub(crate) fn lpi_free_realloc() -> Outcome {
     Outcome::Ok
 }
 
+/// One edu interrupt through `enable_msi`: on GICv2m the SPI starts masked,
+/// so a device armed without an unmask never fires. GICv3 enables its LPIs
+/// at init and would pass without one.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn msi_legacy_raise() -> Outcome {
+    let Some(dev) = find_edu() else {
+        return Outcome::Fail("no edu");
+    };
+    let Some(cap) = dev.caps.msi else {
+        return Outcome::Skip("no msi cap");
+    };
+    let Some(mmio) = bar0_va(&dev) else {
+        return Outcome::Fail("edu bar0");
+    };
+    if mmio_r32(mmio, EDU_IDENT) != EDU_IDENT_VAL {
+        return Outcome::Fail("edu ident");
+    }
+    LPI_FIRST.store(0, Ordering::SeqCst);
+    let saved = pci_init::cfg_read16(dev.addr, CFG_COMMAND);
+    pci_init::update_command(dev.addr, CMD_MEM | CMD_MASTER | CMD_INTX_DISABLE, 0);
+    let mut irqs = [None, None];
+    let fail = |why: &'static str, irqs: [Option<IrqId>; 2]| {
+        lpi_realloc_cleanup(&dev, saved, mmio, &irqs);
+        Outcome::Fail(why)
+    };
+    let irq =
+        match irq_init::alloc_msi(&dev, 1).and_then(|s| s.get(0).ok_or(irq::IrqError::Exhausted)) {
+            Ok(irq) => irq,
+            Err(e) => return fail(e.as_str(), irqs),
+        };
+    irqs[0] = Some(irq);
+    if irq_init::set_handler(irq, on_lpi_first).is_err() {
+        return fail("handler", irqs);
+    }
+    if let Err(e) = irq_init::enable_msi(dev.addr, cap, irq) {
+        return fail(e.as_str(), irqs);
+    }
+    IRQ_MMIO.store(mmio, Ordering::SeqCst);
+    mmio_w32(mmio, EDU_RAISE, 1);
+    if !spin_until_ns(|| LPI_FIRST.load(Ordering::SeqCst) != 0, 500_000_000) {
+        return fail("no interrupt", irqs);
+    }
+    lpi_realloc_cleanup(&dev, saved, mmio, &irqs);
+    Outcome::Ok
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -1344,11 +1442,15 @@ pub(crate) const TESTS: &[Test] = &[
     test("reschedule_hook_installed", test_reschedule_hook_installed),
     test("irq_pool", test_irq_pool),
     test("irq_free_threaded", test_irq_free_threaded),
+    #[cfg(target_arch = "x86_64")]
+    test("ioapic_affinity_state", test_ioapic_affinity_state),
     test("msix_cpu", test_msix_cpu),
     test("intx_fallback", test_intx_fallback),
     test("intx_free_masks", test_intx_free_masks),
     #[cfg(target_arch = "aarch64")]
     test("lpi_free_realloc", lpi_free_realloc),
+    #[cfg(target_arch = "aarch64")]
+    test("msi_legacy_raise", msi_legacy_raise),
     test("msix_cpu_publish_last", msix_cpu_publish_last),
     test("lifetime_shootdown_ack_late", lifetime_shootdown_ack_late).deadline(15_000),
     test("shootdown_ack_while_busy", shootdown_ack_while_busy).deadline(13_000),

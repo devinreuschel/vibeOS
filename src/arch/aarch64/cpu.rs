@@ -17,6 +17,7 @@ use crate::cell::BootCell;
 const DAIF_I: u64 = 1 << 7;
 
 static EL2_VHE: BootCell<bool> = BootCell::new();
+static CACHE: BootCell<tlb::CacheInfo> = BootCell::new();
 static ISA_OK: AtomicBool = AtomicBool::new(false);
 static OVERFLOW_SP: AtomicU64 = AtomicU64::new(0);
 
@@ -30,6 +31,34 @@ pub fn current_el() -> u8 {
     // SAFETY: `CurrentEL` is always readable at EL1/EL2; established here.
     unsafe { asm!("mrs {0}, CurrentEL", out(reg) v, options(nomem, nostack, preserves_flags)) };
     ((v >> 2) & 3) as u8
+}
+
+/// `ID_AA64PFR0_EL1`, readable at EL1 and at EL2 under VHE.
+pub fn id_aa64pfr0_el1() -> u64 {
+    let v: u64;
+    // SAFETY: ID_AA64PFR0_EL1 is readable at EL1 and at EL2 under VHE; established here.
+    unsafe {
+        asm!(
+            "mrs {0}, ID_AA64PFR0_EL1",
+            out(reg) v,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    v
+}
+
+/// `ID_AA64DFR0_EL1`, readable at EL1 and at EL2 under VHE.
+pub fn id_aa64dfr0_el1() -> u64 {
+    let v: u64;
+    // SAFETY: ID_AA64DFR0_EL1 is readable at EL1 and at EL2 under VHE; established here.
+    unsafe {
+        asm!(
+            "mrs {0}, ID_AA64DFR0_EL1",
+            out(reg) v,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    v
 }
 
 fn hcr_el2() -> u64 {
@@ -55,8 +84,48 @@ pub fn note_exception_level() {
     }
 }
 
-/// ISA floor: FEAT_LSE (`Atomic >= 2`) and FEAT_PAN (`PAN != 0`).
-pub fn check_isa_floor() {
+/// Read `CTR_EL0` for [`sync_icache`]. The BSP's value stands for every
+/// CPU, as on a part whose cores share line sizes.
+pub fn note_cache() {
+    let ctr: u64;
+    // SAFETY: `CTR_EL0` is readable at EL1; established here.
+    unsafe { asm!("mrs {0}, CTR_EL0", out(reg) ctr, options(nomem, nostack, preserves_flags)) };
+    // SAFETY: I22, one write on the BSP before SMP; established here.
+    unsafe { CACHE.set(tlb::CacheInfo::from_ctr(ctr)) };
+}
+
+/// Make `[start, start+len)`, written through the data side, fetchable by
+/// every CPU. Runs `tlb::sync_range` over `CTR_EL0`'s line sizes; before
+/// [`note_cache`] it assumes the smallest lines and no IDC or DIC.
+///
+/// # Safety
+/// `[start, start+len)` is mapped, readable memory.
+pub unsafe fn sync_icache(start: u64, len: u64) {
+    let info = CACHE
+        .try_get()
+        .copied()
+        .unwrap_or(tlb::CacheInfo::from_ctr(0));
+    tlb::sync_range(info, start, len, |op, va| {
+        // SAFETY: EL1 cache maintenance by VA; `va` is a line of the mapped
+        // range `sync_icache`'s contract names, established by
+        // `arch::aarch64::cpu::sync_icache`.
+        unsafe {
+            match op {
+                tlb::IcacheOp::DcCvau => {
+                    asm!("dc cvau, {0}", in(reg) va, options(nostack, preserves_flags))
+                }
+                tlb::IcacheOp::IcIvau => {
+                    asm!("ic ivau, {0}", in(reg) va, options(nostack, preserves_flags))
+                }
+                tlb::IcacheOp::DsbIsh => asm!("dsb ish", options(nostack, preserves_flags)),
+                tlb::IcacheOp::Isb => asm!("isb", options(nostack, preserves_flags)),
+            }
+        }
+    });
+}
+
+/// `(ID_AA64ISAR0_EL1, ID_AA64MMFR1_EL1)`, readable at EL1 and EL2.
+fn isa_ids() -> (u64, u64) {
     let isar0: u64;
     let mmfr1: u64;
     // SAFETY: ID registers are readable at EL1/EL2; established here.
@@ -64,13 +133,28 @@ pub fn check_isa_floor() {
         asm!("mrs {0}, ID_AA64ISAR0_EL1", out(reg) isar0, options(nomem, nostack, preserves_flags));
         asm!("mrs {0}, ID_AA64MMFR1_EL1", out(reg) mmfr1, options(nomem, nostack, preserves_flags));
     }
+    (isar0, mmfr1)
+}
+
+/// ISA floor: FEAT_LSE (`Atomic >= 2`) and FEAT_PAN (`PAN != 0`). Runs
+/// before the first log line: the kernel builds with `+lse`, so the log
+/// path's compare-and-swap is an LSE instruction that a CPU without LSE
+/// faults on. A refusal prints through `serial::raw` and halts.
+pub fn check_isa_floor() {
+    let (isar0, mmfr1) = isa_ids();
     let atomic = (isar0 >> 20) & 0xF;
     let pan = (mmfr1 >> 20) & 0xF;
     if atomic < 2 || pan == 0 {
-        crate::boot::halt_with("vibeOS: cpu: isa floor (lse+pan) missing");
+        crate::serial::raw::put_boot_line(b"vibeOS: cpu: isa floor (lse+pan) missing");
+        halt();
     }
     // Release: pairs with the Acquire load in `isa_ok`.
     ISA_OK.store(true, Ordering::Release);
+}
+
+/// The ISA info line, after the log path is up and [`check_isa_floor`] passed.
+pub fn log_isa_floor() {
+    let (isar0, mmfr1) = isa_ids();
     crate::klog!(
         Level::Info,
         "vibeOS: cpu: isar0={isar0:#x} mmfr1={mmfr1:#x} lse=1 pan=1"
@@ -160,6 +244,12 @@ pub fn tlbi_all() {
     run_tlb(&tlb::ALL_INVAL, 0);
 }
 
+/// Local ASID-0 invalidate after a TTBR0 write, which `write_ttbr0` ends
+/// with an `isb`. Runs `tlb::TTBR0_SWITCH`.
+pub fn tlbi_asid0_local() {
+    run_tlb(&tlb::TTBR0_SWITCH, 0);
+}
+
 /// Leaf TLB invalidate. Runs `tlb::LEAF_INVAL`. ASID 0: TTBR0 does not
 /// carry one yet (ROADMAP §11.2).
 pub fn tlbi_va(va: u64) {
@@ -178,6 +268,12 @@ pub(crate) fn bbm_make() {
     run_tlb(&tlb::BBM_AFTER_MAKE, 0);
 }
 
+/// Publish a new table before the descriptor that links it. Runs
+/// `tlb::PUBLISH_TABLE`.
+pub(crate) fn publish_table() {
+    run_tlb(&tlb::PUBLISH_TABLE, 0);
+}
+
 /// Write `TTBR0_EL1` (ASID in the high bits when `TCR.A1` is clear).
 ///
 /// # Safety
@@ -188,6 +284,16 @@ pub unsafe fn write_ttbr0(ttbr0: u64) {
         asm!("msr ttbr0_el1, {0}", in(reg) ttbr0, options(nostack, preserves_flags));
         asm!("isb", options(nostack, preserves_flags));
     }
+}
+
+/// `CTR_EL0`: the cache line sizes (`sysreg::dcache_line_bytes`).
+pub fn read_ctr_el0() -> u64 {
+    let v: u64;
+    // SAFETY: CTR_EL0 is readable at EL1 with no trap set for it; established here.
+    unsafe {
+        asm!("mrs {0}, ctr_el0", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
 }
 
 pub fn read_ttbr0() -> u64 {
@@ -214,7 +320,10 @@ pub fn apply_computed_sysregs() {
         } else {
             asm!("msr cntkctl_el1, {0}", in(reg) cnt, options(nostack, preserves_flags));
         }
-        asm!("msr pmuserenr_el0, {0}", in(reg) pmuserenr, options(nostack, preserves_flags));
+        // PMUSERENR_EL0 is UNDEFINED without FEAT_PMUv3.
+        if sysreg::feat_pmuv3(id_aa64dfr0_el1()) {
+            asm!("msr pmuserenr_el0, {0}", in(reg) pmuserenr, options(nostack, preserves_flags));
+        }
         asm!("msr cpacr_el1, {0}", in(reg) cpacr, options(nostack, preserves_flags));
         asm!("msr sctlr_el1, {0}", in(reg) sctlr, options(nostack, preserves_flags));
         asm!("isb", options(nostack, preserves_flags));
@@ -261,6 +370,30 @@ pub fn oslsr() -> u64 {
 pub fn set_pan() {
     // SAFETY: FEAT_PAN is the ISA floor; established here.
     unsafe { asm!("msr pan, #1", options(nostack, preserves_flags)) };
+}
+
+/// Zero `TPIDRRO_EL0`, the EL0-readable word the overflow stub stashes its
+/// SP in (DESIGN §11.5 rule 6). Each CPU clears it before it can return to EL0.
+pub fn clear_tpidrro_el0() {
+    // SAFETY: `TPIDRRO_EL0` is writable at EL1; established here.
+    unsafe {
+        asm!(
+            "msr tpidrro_el0, xzr",
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+}
+
+/// `TPIDRRO_EL0` as this CPU holds it.
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(dead_code, reason = "in-guest TPIDRRO check (kernel_tests)")
+)]
+pub fn tpidrro_el0() -> u64 {
+    let v: u64;
+    // SAFETY: `TPIDRRO_EL0` is readable at EL1; established here.
+    unsafe { asm!("mrs {0}, tpidrro_el0", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v
 }
 
 /// Clear PAN for a kernel access to a user VA. Restore with [`set_pan`].

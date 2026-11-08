@@ -79,6 +79,33 @@ pub fn pick_features(device: u64) -> Result<u64, virtio::VirtioError> {
     virtio::pick_features(device, OFFER)
 }
 
+/// The shortest device config the driver reads: `capacity`, the one field
+/// it reads whatever the features.
+pub const CFG_MIN_LEN: u32 = CFG_CAPACITY as u32 + 8;
+
+/// `device`'s features less each one whose config field lies past `cfg_len`
+/// bytes: [`F_BLK_SIZE`] (`blk_size`), [`F_TOPOLOGY`] (the topology block),
+/// [`F_MQ`] (`num_queues`) and [`F_DISCARD`] (`max_discard_sectors`). The
+/// driver reads each field only under its feature. `None` below
+/// [`CFG_MIN_LEN`].
+pub fn fit_config(device: u64, cfg_len: u32) -> Option<u64> {
+    if cfg_len < CFG_MIN_LEN {
+        return None;
+    }
+    let fields = [
+        (F_BLK_SIZE, CFG_BLK_SIZE as u32 + 4),
+        (F_TOPOLOGY, CFG_TOPOLOGY as u32 + 8),
+        (F_MQ, CFG_NUM_QUEUES as u32 + 2),
+        (F_DISCARD, CFG_MAX_DISCARD_SECTORS as u32 + 4),
+    ];
+    Some(
+        fields
+            .iter()
+            .filter(|&&(_, end)| cfg_len < end)
+            .fold(device, |f, &(bit, _)| f & !bit),
+    )
+}
+
 /// Logical block size: 512 without [`F_BLK_SIZE`], else config's
 /// `blk_size`, which must be a power of two from 512 to
 /// [`MAX_BLOCK_SIZE`](crate::limits::MAX_BLOCK_SIZE). `None` for any other, and the probe fails, as
@@ -263,6 +290,20 @@ mod tests {
         assert_eq!(map_status(S_UNSUPP), Err(BlockError::Inval));
         assert!(BlockError::Io.retryable());
         assert!(!BlockError::Inval.retryable());
+    }
+
+    #[test]
+    fn config_length_masks_only_the_features_it_cannot_cover() {
+        let all = F_VERSION_1 | F_BLK_SIZE | F_TOPOLOGY | F_DISCARD | F_MQ;
+        assert_eq!(fit_config(all, CFG_MIN_LEN - 1), None);
+        let none = all & !(F_BLK_SIZE | F_TOPOLOGY | F_MQ | F_DISCARD);
+        assert_eq!(fit_config(all, CFG_MIN_LEN), Some(none));
+        assert_eq!(fit_config(all, 24), Some(none | F_BLK_SIZE));
+        assert_eq!(fit_config(all, 32), Some(none | F_BLK_SIZE | F_TOPOLOGY));
+        assert_eq!(fit_config(all, 36), Some(all & !F_DISCARD));
+        assert_eq!(fit_config(all, 39), Some(all & !F_DISCARD));
+        assert_eq!(fit_config(all, 40), Some(all));
+        assert_eq!(fit_config(all, 0x1000), Some(all));
     }
 
     #[test]

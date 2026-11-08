@@ -824,6 +824,20 @@ pub fn stacks_in_flight() -> usize {
     STACKS_IN_FLIGHT.load(Ordering::Acquire)
 }
 
+/// Call `f` with the base and order of each frame of thread `id`'s stack,
+/// lowest page first, under the scheduler lock (kernel_tests, x86_64).
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
+pub(crate) fn for_each_stack_frame(id: ThreadId, mut f: impl FnMut(u64, u8)) {
+    with_sched(|s| {
+        let Some(stack) = s.get(id).and_then(|t| t.stack.as_ref()) else {
+            return;
+        };
+        for frame in stack.frames().iter().flatten() {
+            f(frame.base(), frame.order());
+        }
+    });
+}
+
 /// A default-size stack from this CPU's cache, zeroed, or `None`.
 fn cached_stack() -> Option<GuardedStack> {
     let stack = per_cpu_init::with_current(|cpu| cpu.stack_cache.take())?;
@@ -1242,6 +1256,7 @@ fn fill_tcb(
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
     tcb.user_segs = UserSegs::NULL;
+    tcb.tls_base = 0;
     // Relaxed: a statistic, reset before the thread first runs; pairs with nothing.
     tcb.syscall_count.store(0, Ordering::Relaxed);
     tcb.pid = pid;

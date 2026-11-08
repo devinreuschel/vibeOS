@@ -2315,6 +2315,26 @@ class TestStraceE2e(unittest.TestCase):
             run_e2e.check_strace_lines(late, "vibeos.strace=0 vibeos.strace=1")
 
 
+class TestE2eCli(unittest.TestCase):
+    def test_arch_flag_reaches_parse_args(self) -> None:
+        # The script's `__main__` hands sys.argv to `main`, so a bad `--arch`
+        # is an argparse error (exit 2) before any ISO check or boot. The
+        # missing ISO keeps a regressed run from booting QEMU.
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        script = os.path.join(root, "tests", "harness", "run_e2e.py")
+        env = {**os.environ, "PYTHONPATH": root, "VIBEOS_ISO": "/nonexistent/x.iso"}
+        proc = subprocess.run(
+            [sys.executable, script, "--arch", "bogus"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("invalid choice", proc.stderr)
+
+
 class TestFwCfgCmdline(unittest.TestCase):
     """C-CMDLINE: the harness's words reach the kernel as fw_cfg `opt/vibeos/cmdline`."""
 

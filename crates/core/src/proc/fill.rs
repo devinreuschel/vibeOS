@@ -282,6 +282,30 @@ pub fn copy<A: PageTable, C, D, H: PtHold>(
     Ok(())
 }
 
+/// Make `[va, va+len)` of `space` fetchable after its bytes were written
+/// through the physmap: `sync(alias, PAGE_SIZE_4K)` once per page, `alias`
+/// the page's physmap address (the port's I-cache maintenance, a no-op on
+/// x86_64). Every page needs a present user leaf.
+pub fn sync_code<A: PageTable, C, H: PtHold>(
+    space: &AddressSpace<A, C>,
+    hold: &mut H,
+    va: u64,
+    len: u64,
+    mut sync: impl FnMut(u64, u64),
+) -> Result<(), FillError> {
+    check(va, len)?;
+    let hhdm = space.mapper().hhdm_offset();
+    let mut pas = [0u64; FILL_BATCH];
+    for b in batches(va, len) {
+        hold.hold(b, || lookup(space, b, &mut pas))?;
+        for &pa in &pas[..b.pages] {
+            sync(hhdm.wrapping_add(pa), PAGE_SIZE_4K);
+        }
+        hold.filled(b);
+    }
+    Ok(())
+}
+
 /// Give `to`, a new space, `from`'s layout for `fork`: its break and every
 /// region, each holding a clone of `core`. A reservation is recorded as it
 /// is; an anonymous region is mapped through `map(to, va, len, perms,
@@ -447,6 +471,47 @@ mod tests {
             write(&a, &mut Fake::default(), 0, b"x"),
             Err(FillError::Range)
         );
+        free(a, &mut pool);
+    }
+
+    #[test]
+    fn sync_code_visits_each_page_once_through_the_physmap() {
+        let mut pool = Pool::new(64);
+        let kernel = kernel_mapper(&mut pool);
+        let mut a = new_space(&kernel, &mut pool);
+        let va = 0x40_0000u64;
+        map(&mut a, &mut pool, va, 3);
+        let hhdm = a.mapper().hhdm_offset();
+        let mut seen = Vec::new();
+        // Starts mid-page and ends mid-page: pages 0 to 2, one call each.
+        sync_code(
+            &a,
+            &mut Fake::default(),
+            va + 5,
+            2 * PAGE_SIZE_4K,
+            |p, n| {
+                seen.push((p, n));
+            },
+        )
+        .unwrap();
+        let want: Vec<(u64, u64)> = (0..3)
+            .map(|i| {
+                let (pa, _, _) = a
+                    .mapper()
+                    .translate(VirtAddr(va + i * PAGE_SIZE_4K))
+                    .unwrap();
+                (hhdm + pa.as_u64(), PAGE_SIZE_4K)
+            })
+            .collect();
+        assert_eq!(seen, want);
+        let mut calls = 0;
+        let r = sync_code(&a, &mut Fake::default(), va, 4 * PAGE_SIZE_4K, |_, _| {
+            calls += 1
+        });
+        assert_eq!(r, Err(FillError::Unmapped));
+        let r = sync_code(&a, &mut Fake::default(), 0, 1, |_, _| calls += 1);
+        assert_eq!(r, Err(FillError::Range));
+        assert_eq!(calls, 0, "a failed lookup syncs nothing");
         free(a, &mut pool);
     }
 

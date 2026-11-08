@@ -11,9 +11,11 @@
 //! the batch's frames through the physmap with `PT` dropped and IF on.
 
 use vibeos::addr_space::{AsError, Backing, UserPerms};
+use vibeos::arch::Barriers;
 use vibeos::proc::fill::{self, Batch, FillError, PtHold};
 
-use crate::addr_space_init::{self, NewSpace, Space};
+use crate::addr_space_init::{self, Mm, NewSpace, Space};
+use crate::arch::current::Arch;
 use crate::paging_init;
 
 /// `PT`, as the drivers take it: one hold per batch.
@@ -73,6 +75,31 @@ pub fn write(space: &mut NewSpace, va: u64, src: &[u8]) -> Result<(), FillError>
     fill::write(&*mm, &mut KernelPt, va, src)
 }
 
+/// Make `[va, va+len)` of `space` fetchable once its bytes are final: the
+/// port's I-cache maintenance over each page's physmap alias, one pass per
+/// page. Runs where a page becomes executable: after the loader and `fork`
+/// fill, and in `mmap`.
+pub fn sync_code(space: &Mm, va: u64, len: u64) -> Result<(), FillError> {
+    assert_if_on();
+    fill::sync_code(space, &mut KernelPt, va, len, |alias, n| {
+        // SAFETY: `alias` is a user leaf's frame through the physmap, which
+        // is mapped and readable, established by `vibeos::proc::fill::sync_code`.
+        unsafe { Arch::sync_icache(alias as *const u8, n as usize) }
+    })
+}
+
+/// [`sync_code`] over every executable region of the new `space`.
+pub fn sync_exec(space: &NewSpace) -> Result<(), FillError> {
+    let mm = space.mm();
+    for r in mm
+        .regions()
+        .filter(|r| r.perms.exec && r.backing == Backing::Anonymous)
+    {
+        sync_code(&mm, r.start, r.len)?;
+    }
+    Ok(())
+}
+
 /// `fork`'s copy of `src`: a new space with its regions, break and bytes
 /// in new frames. Takes `src`'s `mm` lock and then the new space's; nothing
 /// else reaches an unpublished space, so the pair cannot deadlock. A
@@ -95,6 +122,7 @@ pub fn clone_full(src: &Space) -> Result<NewSpace, FillError> {
     drop(to);
     drop(from);
     drop(core);
+    sync_exec(&dst)?;
     Ok(dst)
 }
 
