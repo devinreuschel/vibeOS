@@ -1,16 +1,116 @@
 {
- "attempt": 1,
+ "attempt": 2,
  "branch": "claude/p11-followups-9fd7",
  "conclusion": "failure",
  "created": "2026-11-08T08:47:04Z",
  "event": "pull_request",
- "finished": "2026-11-08T08:57:25Z",
+ "finished": "2026-11-08T09:23:50Z",
  "head_sha": "df783156b06eeaa37fc747d11cdbe5fc709e4f06",
  "jobs": [
   {
+   "completed": "2026-11-08T09:23:33Z",
+   "conclusion": "failure",
+   "created": "2026-11-08T09:22:16Z",
+   "name": "build (x86_64)",
+   "results": [],
+   "runner": null,
+   "seconds": 75,
+   "started": "2026-11-08T09:22:18Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 2
+    },
+    {
+     "name": "apt cache key",
+     "seconds": 0
+    },
+    {
+     "name": "cache host packages",
+     "seconds": 0
+    },
+    {
+     "name": "install host tools",
+     "seconds": 21
+    },
+    {
+     "name": "install rust nightly",
+     "seconds": 14
+    },
+    {
+     "name": "cache cargo registry",
+     "seconds": 0
+    },
+    {
+     "name": "cache limine binaries",
+     "seconds": 0
+    },
+    {
+     "name": "setup",
+     "seconds": 34
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel)",
+     "seconds": null
+    },
+    {
+     "name": "cargo clippy -D warnings (kernel, aarch64)",
+     "seconds": null
+    },
+    {
+     "name": "host test switch_context (aarch64 host)",
+     "seconds": null
+    },
+    {
+     "name": "build the user programs (make user)",
+     "seconds": null
+    },
+    {
+     "name": "build every ISO and host tool (make prebuilt)",
+     "seconds": null
+    },
+    {
+     "name": "runner CPU",
+     "seconds": null
+    },
+    {
+     "name": "upload prebuilt files",
+     "seconds": null
+    },
+    {
+     "name": "upload production ISO",
+     "seconds": null
+    },
+    {
+     "name": "Post cache limine binaries",
+     "seconds": null
+    },
+    {
+     "name": "Post cache cargo registry",
+     "seconds": null
+    },
+    {
+     "name": "Post cache host packages",
+     "seconds": null
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 0
+    },
+    {
+     "name": "Complete job",
+     "seconds": 0
+    }
+   ]
+  },
+  {
    "completed": "2026-11-08T08:57:07Z",
    "conclusion": "success",
-   "created": "2026-11-08T08:47:05Z",
+   "created": "2026-11-08T09:22:16Z",
    "name": "check",
    "results": [],
    "runner": null,
@@ -100,109 +200,9 @@
    ]
   },
   {
-   "completed": "2026-11-08T08:48:19Z",
-   "conclusion": "failure",
-   "created": "2026-11-08T08:47:05Z",
-   "name": "build (x86_64)",
-   "results": [],
-   "runner": null,
-   "seconds": 73,
-   "started": "2026-11-08T08:47:06Z",
-   "steps": [
-    {
-     "name": "Set up job",
-     "seconds": 1
-    },
-    {
-     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-     "seconds": 2
-    },
-    {
-     "name": "apt cache key",
-     "seconds": 0
-    },
-    {
-     "name": "cache host packages",
-     "seconds": 0
-    },
-    {
-     "name": "install host tools",
-     "seconds": 20
-    },
-    {
-     "name": "install rust nightly",
-     "seconds": 13
-    },
-    {
-     "name": "cache cargo registry",
-     "seconds": 1
-    },
-    {
-     "name": "cache limine binaries",
-     "seconds": 0
-    },
-    {
-     "name": "setup",
-     "seconds": 33
-    },
-    {
-     "name": "cargo clippy -D warnings (kernel)",
-     "seconds": null
-    },
-    {
-     "name": "cargo clippy -D warnings (kernel, aarch64)",
-     "seconds": null
-    },
-    {
-     "name": "host test switch_context (aarch64 host)",
-     "seconds": null
-    },
-    {
-     "name": "build the user programs (make user)",
-     "seconds": null
-    },
-    {
-     "name": "build every ISO and host tool (make prebuilt)",
-     "seconds": null
-    },
-    {
-     "name": "runner CPU",
-     "seconds": null
-    },
-    {
-     "name": "upload prebuilt files",
-     "seconds": null
-    },
-    {
-     "name": "upload production ISO",
-     "seconds": null
-    },
-    {
-     "name": "Post cache limine binaries",
-     "seconds": null
-    },
-    {
-     "name": "Post cache cargo registry",
-     "seconds": null
-    },
-    {
-     "name": "Post cache host packages",
-     "seconds": null
-    },
-    {
-     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-     "seconds": 0
-    },
-    {
-     "name": "Complete job",
-     "seconds": 0
-    }
-   ]
-  },
-  {
    "completed": "2026-11-08T08:50:29Z",
    "conclusion": "success",
-   "created": "2026-11-08T08:47:05Z",
+   "created": "2026-11-08T09:22:16Z",
    "name": "build (aarch64)",
    "results": [],
    "runner": null,
@@ -300,14 +300,14 @@
    ]
   },
   {
-   "completed": "2026-11-08T08:57:17Z",
+   "completed": "2026-11-08T09:23:43Z",
    "conclusion": "success",
-   "created": "2026-11-08T08:57:08Z",
+   "created": "2026-11-08T09:23:34Z",
    "name": "ticks",
    "results": [],
    "runner": null,
    "seconds": 7,
-   "started": "2026-11-08T08:57:10Z",
+   "started": "2026-11-08T09:23:36Z",
    "steps": [
     {
      "name": "Set up job",
@@ -327,7 +327,7 @@
     },
     {
      "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-     "seconds": 0
+     "seconds": 1
     },
     {
      "name": "Complete job",
@@ -336,25 +336,25 @@
    ]
   },
   {
-   "completed": "2026-11-08T08:57:08Z",
+   "completed": "2026-11-08T09:23:33Z",
    "conclusion": "skipped",
-   "created": "2026-11-08T08:57:08Z",
+   "created": "2026-11-08T09:23:34Z",
    "name": "tier (${{ matrix.arch }}, ${{ matrix.tier }})",
    "results": [],
    "runner": null,
-   "seconds": 0,
-   "started": "2026-11-08T08:57:08Z",
+   "seconds": -1,
+   "started": "2026-11-08T09:23:34Z",
    "steps": []
   },
   {
-   "completed": "2026-11-08T08:57:25Z",
+   "completed": "2026-11-08T09:23:50Z",
    "conclusion": "failure",
-   "created": "2026-11-08T08:57:17Z",
+   "created": "2026-11-08T09:23:43Z",
    "name": "ci-pass",
    "results": [],
    "runner": null,
-   "seconds": 6,
-   "started": "2026-11-08T08:57:19Z",
+   "seconds": 5,
+   "started": "2026-11-08T09:23:45Z",
    "steps": [
     {
      "name": "Set up job",
@@ -362,7 +362,7 @@
     },
     {
      "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-     "seconds": 2
+     "seconds": 1
     },
     {
      "name": "every job succeeded",
@@ -382,6 +382,6 @@
  "run_id": 42464385588,
  "runner": null,
  "schema": 1,
- "started": "2026-11-08T08:47:04Z",
+ "started": "2026-11-08T09:22:14Z",
  "workflow": "ci"
 }
