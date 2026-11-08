@@ -213,8 +213,16 @@ fn claim_its_dev(device_id: u32) -> Option<&'static ItsDev> {
             break;
         };
         i = i.saturating_add(1);
-        // Relaxed: pairs with nothing; a slot's DeviceID is written once, by its claimer.
-        if d.id.load(Ordering::Relaxed) != ITS_DEV_EMPTY {
+        // Acquire: pairs with another claimer's AcqRel CAS, as the failure arm does.
+        let cur = d.id.load(Ordering::Acquire);
+        if cur == device_id {
+            // Another CPU claimed this DeviceID after the first loop; its ITT is the one kept.
+            if let Some(page) = itt {
+                free_pages(page);
+            }
+            return Some(d);
+        }
+        if cur != ITS_DEV_EMPTY {
             continue;
         }
         let page = match itt {
