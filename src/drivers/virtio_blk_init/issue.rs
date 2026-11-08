@@ -411,7 +411,21 @@ impl VirtioBlk {
                     return;
                 };
                 blk.q.fail();
-                blk.q.drain(&mut dump)
+                // Requests on the device first: a failed device may never
+                // complete them. Their slots stay taken, since the device
+                // can still write to them.
+                let mut n = 0usize;
+                for slot in blk.slot_req.iter_mut() {
+                    if n >= DRAIN_BATCH {
+                        break;
+                    }
+                    if let Some(r) = slot.take() {
+                        blk.q.abort(r.seq);
+                        dump[n] = Some(r);
+                        n += 1;
+                    }
+                }
+                n + dump.get_mut(n..).map_or(0, |rest| blk.q.drain(rest))
             };
             if n == 0 {
                 return;
