@@ -94,10 +94,15 @@ pub const fn feat_pmuv3(dfr0: u64) -> bool {
     pmuver != 0 && pmuver != 0xF
 }
 
-/// `ID_AA64PFR0_EL1.AMU` (bits 47:44) is not zero: FEAT_AMUv1 exists, so
-/// `HAFGRTR_EL2` is implemented (Arm ARM DDI0487).
+/// `ID_AA64PFR0_EL1.AMU` (bits 47:44) is not zero: FEAT_AMUv1 exists.
 pub const fn feat_amu(pfr0: u64) -> bool {
     (pfr0 >> 44) & 0xF != 0
+}
+
+/// `HAFGRTR_EL2` is implemented only when FEAT_FGT and FEAT_AMUv1 both
+/// exist, and an access is UNDEFINED otherwise (Arm ARM DDI0487).
+pub const fn feat_hafgrtr(mmfr0: u64, pfr0: u64) -> bool {
+    feat_fgt(mmfr0) && feat_amu(pfr0)
 }
 
 /// `ID_AA64PFR0_EL1.GIC` (bits 27:24) is not zero: the GICv3 system-register
@@ -231,6 +236,14 @@ mod tests {
         assert!(feat_amu(0xF << 44));
         // SVE (35:32) and GIC (27:24) sit outside the AMU field.
         assert!(!feat_amu((0xF << 32) | (0xF << 24)));
+    }
+
+    #[test]
+    fn hafgrtr_needs_fgt_and_amu() {
+        assert!(!feat_hafgrtr(0, 0));
+        assert!(!feat_hafgrtr(0, 1 << 44));
+        assert!(!feat_hafgrtr(1 << 56, 0));
+        assert!(feat_hafgrtr(1 << 56, 1 << 44));
     }
 
     #[test]

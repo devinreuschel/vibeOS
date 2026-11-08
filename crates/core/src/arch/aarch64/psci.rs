@@ -96,7 +96,7 @@ pub struct SecondaryParam {
     pub hdfgrtr_el2: u64,
     pub hdfgwtr_el2: u64,
     pub hafgrtr_el2: u64,
-    /// Nonzero when `HAFGRTR_EL2` exists (`ID_AA64PFR0_EL1.AMU`).
+    /// Nonzero when `HAFGRTR_EL2` exists (FEAT_FGT and FEAT_AMUv1).
     pub hafgrtr_valid: u64,
     pub fgt_valid: u64,
     /// Nonzero when `PMUSERENR_EL0` exists (`ID_AA64DFR0_EL1.PMUVer`).
