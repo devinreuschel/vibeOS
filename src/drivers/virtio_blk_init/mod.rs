@@ -28,7 +28,7 @@ use vibeos::virtio::{
 use vibeos::virtio_blk::{
     CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD,
     F_FLUSH, F_MQ, F_RO, F_TOPOLOGY, MAX_DISKS, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT, disk_name,
-    exhausted_fails_device, logical_capacity, map_status, nq_from_config, pack_discard,
+    exhausted_fails_device, fit_config, logical_capacity, map_status, nq_from_config, pack_discard,
     pack_header, pick_blk_size, pick_features, queue_size, refuse_read_only, sector_for_lba,
 };
 
@@ -202,10 +202,10 @@ fn setup(
     let common = region(dev, common_cap).ok_or(VirtioError::NoCaps)?;
     let notify_base = region(dev, notify_cap).ok_or(VirtioError::NoCaps)?;
     let isr = region(dev, isr_cap).ok_or(VirtioError::NoCaps)?;
-    // The config is read up to its last field, `max_discard_sectors`.
-    let cfg = region(dev, cfg_cap)
-        .filter(|_| cfg_cap.length >= u32::from(CFG_MAX_DISCARD_SECTORS) + 4)
-        .ok_or(VirtioError::NoCaps)?;
+    // The config is read no further than its length covers: `fit_config`
+    // refuses a shorter one and drops the features whose fields it lacks.
+    let cfg = region(dev, cfg_cap).ok_or(VirtioError::NoCaps)?;
+    let fit = fit_config(u64::MAX, cfg_cap.length).ok_or(VirtioError::NoCaps)?;
     // Memory decode before the first touch, with bus mastering off, which
     // firmware can leave on; bus mastering only once the reset completed
     // (DESIGN §12.3).
@@ -222,7 +222,7 @@ fn setup(
         COMMON_OFF_STATUS,
         STATUS_ACKNOWLEDGE | STATUS_DRIVER,
     );
-    let device_feat = read_features(common);
+    let device_feat = read_features(common) & fit;
     let feat = match pick_features(device_feat) {
         Ok(f) => f,
         Err(e) => {

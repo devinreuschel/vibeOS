@@ -79,6 +79,23 @@ pub fn pick_features(device: u64) -> Result<u64, virtio::VirtioError> {
     virtio::pick_features(device, OFFER)
 }
 
+/// The shortest device config the driver reads: up to `num_queues`, the
+/// last field it reads whatever the features. The topology block lies
+/// below it.
+pub const CFG_MIN_LEN: u32 = CFG_NUM_QUEUES as u32 + 2;
+
+/// `device`'s features less [`F_DISCARD`] when `max_discard_sectors` lies
+/// past `cfg_len` bytes. `None` below [`CFG_MIN_LEN`].
+pub fn fit_config(device: u64, cfg_len: u32) -> Option<u64> {
+    if cfg_len < CFG_MIN_LEN {
+        return None;
+    }
+    if cfg_len < CFG_MAX_DISCARD_SECTORS as u32 + 4 {
+        return Some(device & !F_DISCARD);
+    }
+    Some(device)
+}
+
 /// Logical block size: 512 without [`F_BLK_SIZE`], else config's
 /// `blk_size`, which must be a power of two from 512 to
 /// [`MAX_BLOCK_SIZE`](crate::limits::MAX_BLOCK_SIZE). `None` for any other, and the probe fails, as
@@ -263,6 +280,16 @@ mod tests {
         assert_eq!(map_status(S_UNSUPP), Err(BlockError::Inval));
         assert!(BlockError::Io.retryable());
         assert!(!BlockError::Inval.retryable());
+    }
+
+    #[test]
+    fn config_length_masks_only_the_features_it_cannot_cover() {
+        let all = F_VERSION_1 | F_TOPOLOGY | F_DISCARD | F_MQ;
+        assert_eq!(fit_config(all, CFG_MIN_LEN - 1), None);
+        assert_eq!(fit_config(all, CFG_MIN_LEN), Some(all & !F_DISCARD));
+        assert_eq!(fit_config(all, 39), Some(all & !F_DISCARD));
+        assert_eq!(fit_config(all, 40), Some(all));
+        assert_eq!(fit_config(all, 0x1000), Some(all));
     }
 
     #[test]
