@@ -29,6 +29,38 @@ NEST_DUMP = k(
 )
 
 
+EARLY = k(
+    "vibeOS: serial online",
+    "vibeOS: limine: base revision ok",
+    "vibeOS: boot: early-fault armed",
+    "vibeOS: panic: early vec=0x6 err=0x0 pc=0xffffffff80012345 addr=0x0 sp=0xffff800000fff000",
+    "vibeOS: panic: halted",
+)
+
+
+class TestCheckEarly(unittest.TestCase):
+    def test_good_line_passes(self) -> None:
+        panic_dump.check_early(EARLY, "x86_64")
+
+    def test_wrong_vector_fails(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "vec=0x6, expected 0x0"):
+            panic_dump.check_early(EARLY, "aarch64")
+
+    def test_missing_line_fails(self) -> None:
+        bad = [ln for ln in EARLY if "early vec" not in ln]
+        with self.assertRaisesRegex(HarnessError, "0 early-handler lines"):
+            panic_dump.check_early(bad, "x86_64")
+
+    def test_line_before_armed_does_not_count(self) -> None:
+        bad = [EARLY[0], EARLY[3], EARLY[1], EARLY[2], EARLY[4]]
+        with self.assertRaisesRegex(HarnessError, "0 early-handler lines"):
+            panic_dump.check_early(bad, "x86_64")
+
+    def test_full_dump_fails(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "2 dump banners"):
+            panic_dump.check_early(EARLY[:4] + k("vibeOS: panic:") + EARLY[4:], "x86_64")
+
+
 class TestCheckNest(unittest.TestCase):
     def test_good_dump_passes(self) -> None:
         panic_dump.check_nest(BOOT + NEST_DUMP)

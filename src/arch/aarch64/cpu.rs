@@ -660,6 +660,19 @@ pub fn wait_for_interrupt() {
     idle_wait();
 }
 
+/// Raise the undefined-instruction exception (`udf #0`): the early-fault
+/// test build's trip (ROADMAP §11.1), `early_fault_test` only (AGENTS.md
+/// rule 9).
+#[cfg(feature = "early_fault_test")]
+pub fn undefined_instruction() {
+    // SAFETY: invariant: the instruction only raises the undefined-instruction
+    // exception, whose early handler reports it and never returns, and it
+    // touches no memory; established by `arch::aarch64::vectors::init_early`, which `_start` runs first.
+    unsafe {
+        core::arch::asm!("udf #0", options(nomem, nostack));
+    }
+}
+
 pub fn halt() -> ! {
     irq_disable();
     loop {

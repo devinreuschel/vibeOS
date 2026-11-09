@@ -545,9 +545,16 @@ source = "kernel"
 section = "§11.2"
 
 [[marker]]
-text = "vibeOS: panic: early sp=<addr> elr=<addr> esr=<n> far=<addr>"
+text = "vibeOS: panic: early vec=<n> err=<n> pc=<addr> addr=<addr> sp=<addr>"
 kind = "failure"
-arch = "aarch64"
+arch = "both"
+source = "kernel"
+section = "§11.1"
+
+[[marker]]
+text = "vibeOS: boot: early-fault armed"
+kind = "diagnostic"
+arch = "both"
 source = "kernel"
 section = "§11.1"
 

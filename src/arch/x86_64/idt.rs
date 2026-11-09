@@ -9,11 +9,12 @@
 //! the body that [`set_handler`] registered, or [`default_body`]. Unhandled
 //! vectors dump and halt. `#BP` logs and returns. `#UD`/`#GP`/`#PF`/`#DF`/
 //! `#MC` dump and halt.
+//! Before [`init`], [`init_early`]'s gates reach the same stubs (F136).
 
 use core::arch::global_asm;
 use core::mem::{offset_of, size_of};
 use core::ptr;
-use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 use vibeos::desc::{IdtEntry, InterruptFrame, IstSlot, KERNEL_CS};
 use vibeos::per_cpu::PerCpu;
@@ -524,6 +525,9 @@ global_asm!(
     dispatch = sym trap_dispatch,
 );
 
+/// Set by [`init`]; clear, every vector reports itself and halts (F136).
+static FULL: AtomicBool = AtomicBool::new(false);
+
 /// Registered bodies, as `TrapBody` addresses; 0 runs [`default_body`].
 static BODIES: [AtomicUsize; 256] = [const { AtomicUsize::new(0) }; 256];
 
@@ -538,6 +542,16 @@ unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
     // by the entry paths (`vibeos_trap_entry`, `vibeos_trap_entry_ist`) that
     // `arch::x86_64::idt::init` points every gate at.
     let frame = unsafe { &mut *frame };
+    // Acquire: pairs with the Release store in `init`.
+    if !FULL.load(Ordering::Acquire) {
+        crate::log::panic::early_exception(
+            frame.vector,
+            frame.error_code,
+            frame.iret.rip,
+            frame.cr2,
+            frame.iret.rsp,
+        );
+    }
     let v = frame.vector as u8;
     // Before anything that reads `gs:`, `catch::intercept` included: a
     // fault on a return-to-user `iretq` arrives on the user GS.
@@ -928,7 +942,7 @@ fn page_fault(frame: &mut TrapFrame) {
     let (err, cr2) = (frame.error_code, frame.cr2);
     if frame.user_mode() {
         #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
-        testing::on_user_pf(frame);
+        crate::ktest::user::on_user_fault(frame.cr2);
         user_fault(frame);
     } else if let Some(rip) = super::uaccess::fixup(frame.iret.rip, cr2) {
         frame.iret.rip = rip;
@@ -1032,6 +1046,31 @@ pub unsafe fn load() {
     unsafe { x86::lidt(&idtr) };
 }
 
+/// The early IDT (ROADMAP §11.1, F136): every gate at its stub past the
+/// `clac`, no IST, the live CS; until [`init`] any vector reports itself.
+/// `_start` runs it after the Limine handshake, and `gdt::CpuTables::load`
+/// right after its far return to `KERNEL_CS`. A no-op once [`init`] ran.
+///
+/// # Safety
+/// IF=0, on the boot CPU while `FULL` is clear.
+pub unsafe fn init_early() {
+    // Acquire: pairs with the Release store in `init`.
+    if FULL.load(Ordering::Acquire) {
+        return;
+    }
+    let cs: u16;
+    // SAFETY: invariant: reading CS has no side effect; established here.
+    unsafe {
+        core::arch::asm!("mov {0:x}, cs", out(reg) cs, options(nomem, nostack, preserves_flags))
+    };
+    fill(CLAC.len(), cs, false);
+    let (limit, base) = pointer();
+    let idtr = DtPtr { limit, base };
+    // SAFETY: invariant: `IDT` is the filled 256-entry table, a `static`
+    // that never moves, and each gate names the live CS; established here.
+    unsafe { x86::lidt(&idtr) };
+}
+
 /// Point all 256 gates at their stubs, register the named bodies, `lidt`.
 /// Each gate enters at the stub's `clac` when CPUID reports SMAP, the bit
 /// `arch::cpu::init_control_regs` enables it from, and just past it otherwise.
@@ -1040,24 +1079,27 @@ pub unsafe fn load() {
 /// # Safety
 /// GDT already loaded. PIC already remapped and masked.
 pub unsafe fn init() {
+    let smap = crate::arch::cpu::cpuid_features().smap;
+    fill(if smap { 0 } else { CLAC.len() }, KERNEL_CS, true);
+    register_named();
+    // Release: pairs with the Acquire load in `trap_dispatch`.
+    FULL.store(true, Ordering::Release);
+    // SAFETY: `load`'s `# Safety`, established here: every gate was just
+    // filled, and this fn's `# Safety` has the GDT loaded.
+    unsafe { load() };
+}
+
+/// Each gate at its stub plus `skip`, in `cs`, with its row's IST if `ist`.
+fn fill(skip: usize, cs: u16, ist: bool) {
     let base = (&raw const vibeos_trap_stubs).cast::<u8>();
-    let skip = if crate::arch::cpu::cpuid_features().smap {
-        0
-    } else {
-        CLAC.len()
-    };
     IDT.with(|idt| {
         for (v, row) in ROWS.iter().enumerate() {
             let stub = base.wrapping_add(v * STUB_STRIDE);
             check_stub(stub, v, row);
             let gate = stub.wrapping_add(skip) as u64;
-            idt.0[v] = IdtEntry::interrupt(gate, KERNEL_CS, row.ist, row.dpl);
+            idt.0[v] = IdtEntry::interrupt(gate, cs, if ist { row.ist } else { 0 }, row.dpl);
         }
     });
-    register_named();
-    // SAFETY: `load`'s `# Safety`, established here: every gate was just
-    // filled, and this fn's `# Safety` has the GDT loaded.
-    unsafe { load() };
 }
 
 const _: () = {
@@ -1155,7 +1197,7 @@ fn dump(kind: &[u8], frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>)
 pub mod testing {
     use core::mem::size_of;
     use core::ptr;
-    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
     use vibeos::syscall::UserFrame;
     use vibeos::vectors;
@@ -1196,69 +1238,6 @@ pub mod testing {
     pub fn cpl3_hits(vector: u8) -> u64 {
         // Relaxed: a count; pairs with nothing.
         CPL3_HITS[vector as usize].load(Ordering::Relaxed)
-    }
-
-    /// `cr2` of the fault whose `#PF` body yields once, at its top; 0 for none.
-    static PF_YIELD_CR2: AtomicU64 = AtomicU64::new(0);
-    static PF_YIELDING: AtomicBool = AtomicBool::new(false);
-    static PF_DURING_YIELD: AtomicU64 = AtomicU64::new(0);
-
-    /// The next CPL-3 `#PF` at `cr2` yields at the top of its body until
-    /// another CPL-3 `#PF` body has run, for at most 1 s of TSC time.
-    pub fn arm_pf_yield(cr2: u64) {
-        // Release: pairs with the Acquire loads in `on_user_pf` and `pf_during_yield`.
-        PF_DURING_YIELD.store(0, Ordering::Release);
-        // Release: pairs with the Acquire load in `on_user_pf`.
-        PF_YIELDING.store(false, Ordering::Release);
-        // Release: pairs with the Acquire load and compare-exchange in `on_user_pf`.
-        PF_YIELD_CR2.store(cr2, Ordering::Release);
-    }
-
-    pub fn disarm_pf_yield() {
-        // Release: pairs with the Acquire load and compare-exchange in `on_user_pf`.
-        PF_YIELD_CR2.store(0, Ordering::Release);
-    }
-
-    /// The `cr2` of the first CPL-3 `#PF` body that ran during the yield;
-    /// 0 for none.
-    pub fn pf_during_yield() -> u64 {
-        // Acquire: pairs with the Release stores in `on_user_pf` and `arm_pf_yield`.
-        PF_DURING_YIELD.load(Ordering::Acquire)
-    }
-
-    /// Top of a CPL-3 `#PF` body, after the dispatcher's `sti`.
-    pub(super) fn on_user_pf(frame: &TrapFrame) {
-        // Acquire: pairs with the Release stores of `PF_YIELDING` below and in `arm_pf_yield`.
-        if PF_YIELDING.load(Ordering::Acquire) {
-            // Acquire: pairs with the Release stores in `arm_pf_yield` and below.
-            if PF_DURING_YIELD.load(Ordering::Acquire) == 0 {
-                // Release: pairs with the yield loop's Acquire load below and `pf_during_yield`.
-                PF_DURING_YIELD.store(frame.cr2, Ordering::Release);
-            }
-            return;
-        }
-        // Acquire: pairs with the Release stores in `arm_pf_yield` and `disarm_pf_yield`.
-        let armed = PF_YIELD_CR2.load(Ordering::Acquire);
-        // AcqRel, Acquire on failure: pairs with the Release stores of the arm and disarm.
-        if armed == 0
-            || frame.cr2 != armed
-            || PF_YIELD_CR2
-                .compare_exchange(armed, 0, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-        {
-            return;
-        }
-        // Release: pairs with the Acquire load at the top of a later body.
-        PF_YIELDING.store(true, Ordering::Release);
-        let t0 = crate::time_init::now_ns();
-        // Acquire: pairs with the Release store of another body's `cr2` above.
-        while PF_DURING_YIELD.load(Ordering::Acquire) == 0
-            && crate::time_init::now_ns().saturating_sub(t0) < 1_000_000_000
-        {
-            crate::thread_init::yield_now();
-        }
-        // Release: pairs with the Acquire load at the top of a later body.
-        PF_YIELDING.store(false, Ordering::Release);
     }
 
     /// The 15 GPR canaries of `arm_canaries`, in `UserFrame` order

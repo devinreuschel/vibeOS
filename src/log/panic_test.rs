@@ -2,6 +2,15 @@
 //! whose e2e mode requires one clean dump and the panic exit. No
 //! published ISO enables them (AGENTS.md rule 9).
 
+/// F136: an undefined instruction right after the Limine handshake, before
+/// `arch::idt::init` on x86_64 and the full vector table on aarch64, so the
+/// early handler reports it (ROADMAP §11.1).
+#[cfg(feature = "early_fault_test")]
+pub(crate) fn early_fault_trip() {
+    crate::marker!("vibeOS: boot: early-fault armed");
+    crate::arch::cpu::undefined_instruction();
+}
+
 /// F071: underflow `irq_nest` through the decrement `InterruptGuard::drop`
 /// uses, with this CPU's depth at 0. The underflow's `assert!` panics, and
 /// with the depth wrapped every later guard fails it again, so the dump

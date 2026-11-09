@@ -262,6 +262,8 @@ impl core::fmt::Display for CpuList {
 /// reentered by a timer/reschedule switch. Inbound shootdowns still
 /// run through `service_incoming` (IF off cannot take the IPI).
 pub fn shootdown_ranges(ranges: &[ShootRange]) {
+    // DESIGN §7.9's calling contract, on both ports (ROADMAP §11.2).
+    sync_init::assert_tlb_contract();
     for chunk in ranges.chunks(SHOOT_RANGES) {
         shootdown_round(chunk);
     }

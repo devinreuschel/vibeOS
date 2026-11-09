@@ -72,6 +72,41 @@ impl Saved {
     }
 }
 
+/// ROADMAP §11.2: TLB maintenance through the §1.2 shootdown hook asserts
+/// DESIGN §7.9's calling contract on both ports. A thread passes; the same
+/// call inside a lockless section (the context of an NMI, `#MC`, or CPL-0
+/// `#DB` body, and of serviced shootdown or call-function work) panics.
+pub(crate) fn tlb_contract_asserts() -> Outcome {
+    use sync_init::testing::SleepTrip;
+    let saved = Saved::now();
+    let _ = sync_init::testing::take_trip();
+    // IF off, as a lockless section always runs: its depth is this CPU's.
+    let g = crate::arch::current::InterruptGuard::enter();
+    let nest = per_cpu_init::irq_nest();
+    let free = arch::catch::catch_panic(|| vibeos::paging::tlb_shootdown_ranges(&[]));
+    let free_trip = sync_init::testing::take_trip();
+    let hit = arch::catch::catch_panic(|| {
+        let _l = sync_init::lockless_section();
+        vibeos::paging::tlb_shootdown_ranges(&[]);
+    });
+    let trip = sync_init::testing::take_trip();
+    saved.restore_locks(nest);
+    drop(g);
+    if free || free_trip.is_some() {
+        return crate::fail_fmt!("thread context: panic {free}, trip {:?}", free_trip);
+    }
+    if !hit {
+        return Outcome::Fail("no panic in a lockless section");
+    }
+    if trip != Some(SleepTrip::TlbContract) {
+        return crate::fail_fmt!("trip {:?}, want TlbContract", trip);
+    }
+    if let Err(o) = saved.check() {
+        return o;
+    }
+    Outcome::Ok
+}
+
 /// ROADMAP §10.3 (F108): a yield while holding a ranked `SpinMutex` trips
 /// `sync_init::assert_switch_clean` in `thread_init::switch_now`.
 pub(crate) fn lock_across_switch_asserts() -> Outcome {

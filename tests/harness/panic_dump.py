@@ -42,6 +42,39 @@ def _common(lines: list[str], what: str) -> None:
     _once(lines, PANIC_DONE, what)
 
 
+EARLY_ARMED = "vibeOS: boot: early-fault armed"
+EARLY_RE = re.compile(
+    r"^vibeOS: panic: early vec=0x([0-9a-f]+) err=0x[0-9a-f]+ pc=0x([0-9a-f]+) "
+    r"addr=0x[0-9a-f]+ sp=0x[0-9a-f]+$"
+)
+# The early-fault build's undefined instruction: `ud2` is `#UD`, vector 6;
+# `udf #0` is exception class 0x00, unknown reason.
+EARLY_VEC = {"x86_64": 6, "aarch64": 0}
+
+
+def check_early(raw: Iterable[str], arch: str) -> None:
+    """F136: the early handler's one line, after the armed line, naming the
+    undefined instruction's vector or class and a PC, then one `halted`,
+    and no other dump banner."""
+    lines = frame.kernel_lines(raw)
+    if EARLY_ARMED not in lines:
+        raise HarnessError(f"early-fault: no {EARLY_ARMED!r} line")
+    after = lines[lines.index(EARLY_ARMED) + 1 :]
+    early = [m for m in (EARLY_RE.match(t) for t in after) if m is not None]
+    if len(early) != 1:
+        raise HarnessError(f"early-fault: {len(early)} early-handler lines, expected one")
+    vec, pc = (int(g, 16) for g in early[0].groups())
+    if vec != EARLY_VEC[arch]:
+        raise HarnessError(f"early-fault: vec={vec:#x}, expected {EARLY_VEC[arch]:#x} on {arch}")
+    if pc == 0:
+        raise HarnessError("early-fault: pc=0x0")
+    # The early line is the one banner: the early handler dumps nothing more.
+    n = _count_banners(lines)
+    if n != 1:
+        raise HarnessError(f"early-fault: {n} dump banners, expected the early line alone")
+    _once(lines, PANIC_DONE, "early-fault")
+
+
 def check_nest(raw: Iterable[str]) -> None:
     """F071: the `irq_nest` underflow's own message, dumped once."""
     lines = frame.kernel_lines(raw)

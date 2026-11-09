@@ -1069,7 +1069,7 @@ near 60 s, the 9 GiB case moves to a target of its own, by the rule above that s
 | Arch | Tier | Targets | QEMU s |
 |---|---|---|---|
 | x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic`, `test-e2e-panic-nest`, `test-qmp` | 40 |
-| x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem`, `test-e2e-init-fault`, `test-e2e-strace`, `test-e2e-panic-stop`, `test-e2e-power` | 40 |
+| x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-early-fault`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem`, `test-e2e-init-fault`, `test-e2e-strace`, `test-e2e-panic-stop`, `test-e2e-power` | 40 |
 | x86_64 | kernel-1 | `test-kernel-1` | 39 |
 | x86_64 | kernel-2 | `test-kernel-2` | 36 |
 | x86_64 | kernel-3 | `test-kernel-3` | 35 |
@@ -1091,7 +1091,7 @@ near 60 s, the 9 GiB case moves to a target of its own, by the rule above that s
 | x86_64 | vibefs-crash-2 | `test-vibefs-crash-2` | 25 |
 | x86_64 | vibefs-crash-plants | `test-vibefs-crash-plants` | 15 |
 | x86_64 | forensics | `test-forensics` | 60 |
-| aarch64 | e2e-1 | `test-e2e` | 40 |
+| aarch64 | e2e-1 | `test-e2e`, `test-e2e-early-fault` | 40 |
 | aarch64 | forensics | `test-forensics` | 60 |
 | aarch64 | kernel-1 | `test-kernel-1` | 40 |
 | aarch64 | kernel-2 | `test-kernel-2` | 40 |

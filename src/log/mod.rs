@@ -17,7 +17,11 @@ pub(crate) mod ksyms;
 pub mod ktest;
 pub(crate) mod log_init;
 pub(crate) mod panic;
-#[cfg(any(feature = "panic_stop_test", feature = "panic_nest_test"))]
+#[cfg(any(
+    feature = "panic_stop_test",
+    feature = "panic_nest_test",
+    feature = "early_fault_test"
+))]
 pub(crate) mod panic_test;
 pub(crate) mod pvpanic_init;
 pub(crate) mod serial;

@@ -684,10 +684,12 @@ Calling contract, on both architectures. On x86_64 an invalidation may wait for 
 with IF=0, so the TLB-maintenance operation of the §11.1 seam is called only where
 [§2.9](INVARIANTS.md#29-preemption-and-interrupt-state) rule 2 allows a cross-CPU wait: never in NMI, `#MC`, or
 `#DB` context, never from a serviced shootdown or call-function handler, and never under the log-ring
-TAS, whose waiters service no IPIs. The aarch64 implementation does not check these contexts yet:
-the ROADMAP §11.2 box for the Inner Shareable forms adds a debug-build assert of them, although its
-broadcast waits for no peer, so that work run first on aarch64 cannot add a deadlock that only
-x86_64 hits.
+TAS, whose waiters service no IPIs. Both implementations assert those contexts in debug and
+`kernel_tests` builds at the shootdown hook (`sync_init::assert_tlb_contract`, from
+`vibeos::lock::Held::check_cross_cpu_wait`: no lockless section, which NMI, `#MC`, CPL-0 `#DB`, and
+serviced shootdown and call-function work enter, and not inside the log emit), aarch64 too although
+its broadcast waits for no peer, so work run first on aarch64 cannot add a deadlock that only x86_64
+hits.
 
 The initiator waits with interrupts disabled (`InterruptGuard` around publish → IPI → ack → clear
 waiters). A waiter with IF off cannot take an incoming shootdown as an IRQ, which would deadlock two

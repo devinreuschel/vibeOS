@@ -10,6 +10,8 @@
 //! [`PIECE_BYTES`], so nothing ever reads VRAM back (DESIGN §2.9 rule 2).
 
 use crate::font::{self, FONT_H, FONT_W};
+use crate::machine::MachineDesc;
+use crate::paging::{PageFlags, physmap_flags};
 
 /// Pack R,G,B into a BGRX `u32` (blue in the low byte).
 pub const fn pack_bgrx(r: u8, g: u8, b: u8) -> u32 {
@@ -38,6 +40,41 @@ pub fn span_contains(base: u64, span: u64, phys: u64, len: u64) -> bool {
     match (base.checked_add(span), phys.checked_add(len)) {
         (Some(span_end), Some(end)) => phys >= base && end <= span_end,
         _ => false,
+    }
+}
+
+/// The memory type the console maps its framebuffer with (ROADMAP §11.1,
+/// DESIGN §11.5 memory attributes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FbMemType {
+    /// Normal write-back: a framebuffer in RAM, such as QEMU's `ramfb`, which
+    /// the host reads through a cacheable mapping, so a non-cacheable alias
+    /// could go stale under KVM or HVF.
+    WriteBack,
+    /// Normal non-cacheable: a framebuffer inside a PCIe memory window the
+    /// device tree names, which is a BAR, not RAM.
+    NonCacheable,
+}
+
+impl FbMemType {
+    /// Leaf flags for the framebuffer mapping. `PWT` alone is the aarch64
+    /// encoding of Normal non-cacheable (`arch::aarch64::paging::make_pte`).
+    pub const fn flags(self) -> PageFlags {
+        match self {
+            FbMemType::WriteBack => physmap_flags(),
+            FbMemType::NonCacheable => physmap_flags().with(PageFlags::PWT),
+        }
+    }
+}
+
+/// The memory type for a framebuffer at `[phys, phys + len)`: non-cacheable
+/// when it lies inside a PCIe memory window of `desc`, write-back otherwise.
+/// x86_64 has no device tree that names windows, so its framebuffer stays
+/// write-back.
+pub fn fb_mem_type(desc: Option<&MachineDesc>, phys: u64, len: u64) -> FbMemType {
+    match desc {
+        Some(d) if d.in_pci_window(phys, len) => FbMemType::NonCacheable,
+        _ => FbMemType::WriteBack,
     }
 }
 
@@ -367,6 +404,49 @@ mod tests {
             v.push(p);
         }
         v
+    }
+
+    #[test]
+    fn framebuffer_in_a_pci_window_is_non_cacheable() {
+        use crate::machine::{MachineDesc, PciHost, PhysRange};
+        let mut host = PciHost::default();
+        host.windows[0] = PhysRange {
+            start: 0x1000_0000,
+            size: 0x2eff_0000,
+        };
+        host.window_len = 1;
+        let mut d = MachineDesc::default();
+        d.pci_hosts[0] = host;
+        d.pci_host_count = 1;
+        // A BAR inside the window the device tree names.
+        assert_eq!(
+            fb_mem_type(Some(&d), 0x1000_0000, 0x30_0000),
+            FbMemType::NonCacheable
+        );
+        // `ramfb` in guest RAM, outside every window.
+        assert_eq!(
+            fb_mem_type(Some(&d), 0x4800_0000, 0x30_0000),
+            FbMemType::WriteBack
+        );
+        // No machine description (x86_64 before ACPI): write-back.
+        assert_eq!(
+            fb_mem_type(None, 0x1000_0000, 0x30_0000),
+            FbMemType::WriteBack
+        );
+        assert_eq!(FbMemType::WriteBack.flags(), physmap_flags());
+        let nc = FbMemType::NonCacheable.flags();
+        assert!(nc.contains(PageFlags::PWT) && !nc.contains(PageFlags::PCD));
+        // The aarch64 leaf's AttrIndx (bits 2-4) is MAIR index 2, Normal
+        // non-cacheable.
+        let pte = crate::arch::aarch64::paging::make_pte(
+            crate::paging::VirtAddr(0xffff_8000_0000_0000),
+            crate::paging::PhysAddr(0x1000_0000),
+            nc,
+        );
+        assert_eq!(
+            (pte >> 2) & 0b111,
+            crate::arch::aarch64::paging::ATTR_NORMAL_NC
+        );
     }
 
     #[test]

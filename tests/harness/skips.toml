@@ -428,7 +428,7 @@ no_counterpart = "the program is x86_64 machine code"
 name = "syscall_body_if_on"
 reason = "x86 user text"
 arch = "aarch64"
-no_counterpart = "the program is x86_64 machine code"
+counterpart = "el0_fault_body_yield"
 
 [[skip]]
 name = "kill_line_whole"
