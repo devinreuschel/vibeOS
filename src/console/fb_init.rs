@@ -13,7 +13,8 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use vibeos::fb::{
-    CHUNK, MAX_CELLS, TextGrid, glyph_origin, pack_bgrx, pixel_offset, span_contains,
+    CHUNK, FbMemType, MAX_CELLS, TextGrid, fb_mem_type, glyph_origin, pack_bgrx, pixel_offset,
+    span_contains,
 };
 use vibeos::font::{self, FONT_H, FONT_W};
 use vibeos::lock::RANK_DEVICE;
@@ -23,7 +24,7 @@ use crate::boot::FbInfo;
 use crate::kva_init;
 use crate::paging_init;
 use crate::sync_init::SpinMutex;
-use vibeos::paging::{PhysAddr, VirtAddr, physmap_flags};
+use vibeos::paging::{PhysAddr, VirtAddr};
 
 const BANNER_ROWS: u32 = 1;
 const BG: u32 = pack_bgrx(0x12, 0x12, 0x18);
@@ -154,25 +155,34 @@ pub fn init() -> bool {
 }
 
 fn map_fb(i: &FbInfo) -> Option<u64> {
-    let hhdm = paging_init::hhdm_offset();
-    let va = VirtAddr(i.virt);
-    if paging_init::phys_mapped(i.phys) && paging_init::translate(va).is_some() {
-        let end = i.phys.saturating_add(i.size);
-        let mut p = i.phys & !(4096 - 1);
-        while p < end {
-            if paging_init::translate(VirtAddr(hhdm.wrapping_add(p))).is_none() {
-                break;
-            }
-            p = p.saturating_add(4096);
-        }
-        if p >= end {
-            return Some(hhdm.wrapping_add(i.phys));
-        }
+    let mem = fb_mem_type(crate::machine_init::info(), i.phys, i.size);
+    // A framebuffer in a PCIe window is a BAR the physmap never covers, and
+    // a write-back physmap alias of it would be the wrong type anyway.
+    if mem == FbMemType::WriteBack
+        && let Some(va) = hhdm_fb(i)
+    {
+        return Some(va);
     }
-    // SAFETY: the framebuffer is device or RAM the bootloader already
-    // scanned; `memremap` maps it write-back in KVA (MEMORY.md §4.1);
-    // established here.
-    unsafe { kva_init::memremap(PhysAddr(i.phys), i.size, physmap_flags()) }.map(|v| v.as_u64())
+    // SAFETY: invariant I17: the framebuffer is RAM or a PCIe BAR the
+    // bootloader already scanned, mapped at the one type `fb_mem_type`
+    // chose for it, and no other mapping of a BAR exists; established
+    // `vibeos::fb::fb_mem_type`.
+    unsafe { kva_init::memremap(PhysAddr(i.phys), i.size, mem.flags()) }.map(|v| v.as_u64())
+}
+
+/// The framebuffer's physmap VA when every page of it is mapped there.
+fn hhdm_fb(i: &FbInfo) -> Option<u64> {
+    let hhdm = paging_init::hhdm_offset();
+    if !paging_init::phys_mapped(i.phys) || paging_init::translate(VirtAddr(i.virt)).is_none() {
+        return None;
+    }
+    let end = i.phys.saturating_add(i.size);
+    let mut p = i.phys & !(4096 - 1);
+    while p < end {
+        paging_init::translate(VirtAddr(hhdm.wrapping_add(p)))?;
+        p = p.saturating_add(4096);
+    }
+    Some(hhdm.wrapping_add(i.phys))
 }
 
 impl Fb {

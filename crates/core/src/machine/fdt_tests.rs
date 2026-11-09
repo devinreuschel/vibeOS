@@ -1,7 +1,7 @@
 //! Host tests for the device-tree reader in `fdt.rs` (ROADMAP §11.5).
 
 use super::*;
-use crate::machine::{IrqController, MAX_INTERRUPT_MAP, MAX_MSI_MAP};
+use crate::machine::{IrqController, MAX_INTERRUPT_MAP, MAX_MSI_MAP, MAX_PCI_WINDOWS};
 use crate::pmm::clip_usable;
 
 const VIRT_82: &[u8] = include_bytes!("testdata/virt-8.2.dtb");
@@ -739,4 +739,67 @@ fn ecam_numbers_that_do_not_fit_drop_the_host() {
         assert!(d.pci_hosts().is_empty(), "{extra:?}");
         assert_eq!(d.dropped_pci_hosts, 1, "{extra:?}");
     }
+}
+
+#[test]
+fn virt_pci_host_keeps_its_memory_windows() {
+    // QEMU `virt`: an I/O window, the 32-bit memory window below RAM, and
+    // the 64-bit one at 512 GiB. I/O space is not kept.
+    let d = parse(VIRT_CUR).unwrap();
+    let w = d.pci_hosts()[0].windows();
+    assert_eq!(
+        w,
+        &[
+            PhysRange {
+                start: 0x1000_0000,
+                size: 0x2eff_0000
+            },
+            PhysRange {
+                start: 0x80_0000_0000,
+                size: 0x80_0000_0000
+            },
+        ]
+    );
+    assert!(d.in_pci_window(0x1000_0000, 0x30_0000));
+    assert!(!d.in_pci_window(0x4000_0000, 0x30_0000));
+    // A range that runs out of the window's end is not inside it.
+    assert!(!d.in_pci_window(0x3eff_0000 - 0x1000, 0x2000));
+}
+
+fn host_with_ranges(rows: &[[u32; 7]]) -> Vec<u8> {
+    let mut t = root_2_2();
+    t.begin("pcie@10000000");
+    t.prop("compatible", b"pci-host-ecam-generic\0");
+    t.prop("reg", &be(&[0, 0x1000_0000, 0, 0x1000_0000]));
+    t.prop("#address-cells", &be(&[3]));
+    t.prop("#size-cells", &be(&[2]));
+    t.prop("ranges", &be(&rows.concat()));
+    t.end();
+    t.end();
+    t.finish()
+}
+
+#[test]
+fn pci_windows_past_the_cap_are_counted() {
+    let mem = |i: u32| {
+        [
+            0x0200_0000,
+            0,
+            0,
+            0,
+            0x1000_0000 + i * 0x10_0000,
+            0,
+            0x10_0000,
+        ]
+    };
+    let io = [0x0100_0000, 0, 0, 0, 0x3eff_0000, 0, 0x1_0000];
+    let mut rows = vec![io];
+    rows.extend((0..MAX_PCI_WINDOWS as u32 + 1).map(mem));
+    let d = parse(&host_with_ranges(&rows)).unwrap();
+    let h = &d.pci_hosts()[0];
+    assert_eq!((h.window_len, d.dropped_pci_windows), (MAX_PCI_WINDOWS, 1));
+    assert_eq!(h.windows()[0].start, 0x1000_0000);
+    // An empty memory row is no window.
+    let d = parse(&host_with_ranges(&[[0x0300_0000, 0, 0, 0, 0x1000, 0, 0]])).unwrap();
+    assert_eq!(d.pci_hosts()[0].window_len, 0);
 }
