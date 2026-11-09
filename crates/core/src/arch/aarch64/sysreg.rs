@@ -122,6 +122,17 @@ pub const fn cntkctl_el1() -> u64 {
     EL0VCTEN
 }
 
+/// The generic timer's counter frequency: the device-tree timer node's
+/// `clock-frequency` when it gives a nonzero one, which the
+/// `arm,armv8-timer` binding allows for firmware that programs
+/// `CNTFRQ_EL0` wrongly, and `CNTFRQ_EL0` otherwise.
+pub fn counter_hz(dt_clock_frequency: Option<u32>, cntfrq: u64) -> u64 {
+    match dt_clock_frequency {
+        Some(hz) if hz != 0 => u64::from(hz),
+        _ => cntfrq,
+    }
+}
+
 /// Smallest data-cache line in bytes, from `CTR_EL0.DminLine` (bits 19:16;
 /// Arm ARM DDI0487): the line is `4 << DminLine` bytes.
 pub const fn dcache_line_bytes(ctr: u64) -> usize {
@@ -283,6 +294,15 @@ mod tests {
         const EL0VCTEN: u64 = 1 << 1;
         assert_eq!(cntkctl_el1(), EL0VCTEN);
         assert_eq!(cntkctl_el1() & EL0PCTEN, 0);
+    }
+
+    #[test]
+    fn counter_hz_prefers_the_device_tree() {
+        assert_eq!(counter_hz(None, 62_500_000), 62_500_000);
+        assert_eq!(counter_hz(Some(19_200_000), 62_500_000), 19_200_000);
+        // A zero `clock-frequency` names no frequency.
+        assert_eq!(counter_hz(Some(0), 62_500_000), 62_500_000);
+        assert_eq!(counter_hz(Some(u32::MAX), 1), u64::from(u32::MAX));
     }
 
     #[test]

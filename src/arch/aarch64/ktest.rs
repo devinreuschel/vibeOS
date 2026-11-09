@@ -1350,6 +1350,10 @@ pub(crate) const TESTS: &[Test] = &[
     ),
     test("el1_x16_survives_irq", test_el1_x16_survives_irq),
     test("gic_present", test_gic_present),
+    test(
+        "gic_priorities",
+        crate::arch::aarch64::ktest_gic::test_gic_priorities,
+    ),
     test("now_ns_cntvct", test_now_ns_cntvct),
     test("its_doorbell", test_its_doorbell),
     test("idle_wfi", test_idle_wfi),
