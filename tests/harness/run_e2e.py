@@ -693,7 +693,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         res.record("marker", "early_fault_line", "passed")
         print("[e2e]   . early handler line ok", file=sys.stderr)
-    if expect_panic and not gp_test and not panic_variant:
+    if expect_panic and not gp_test and not panic_variant and not early_fault:
         # The walk follows the frame pointer from the handler through the
         # recorded boot stack, the only known stack before the first thread.
         try:
