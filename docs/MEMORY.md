@@ -897,11 +897,15 @@ can be observed before an earlier Normal store, `mmio_write` runs `dmb oshst` be
 `mmio_read` runs `dmb oshld` after its load, as Linux's arm64 `writel` and `readl` do. Neither
 orders an earlier load before a device write: a driver that reads a buffer and then writes a
 doorbell that hands the buffer back runs `dma_mb` first. A `_relaxed` accessor carries no barrier
-and is used only where a comment says why no ordering is needed; none exists today. The seam's
-`Barriers` trait carries `mmio_read` and `mmio_write` (ROADMAP §10.3), each port implements them,
-and the virtio register accessors (`virtio_init::r8` to `w32`), every virtqueue kick
-(`virtio::notify`), every interrupt-status read (`virtio::read_isr`), fw-cfg, and the GIC's
-`gic_common::mmio32` family go through them. The host test
+and is used only where a comment says why no ordering is needed; no `_relaxed` accessor exists
+today. The seam's `Barriers` trait carries `mmio_read` and `mmio_write` (ROADMAP §10.3), each port
+implements them, and every access a DMA-capable device's driver makes goes through them: the virtio
+register accessors (`virtio_init::r8` to `w32`), every virtqueue kick (`virtio::notify`), every
+interrupt-status read (`virtio::read_isr`), fw-cfg, PCI configuration space through ECAM
+(`pci_init::ecam_read_at`), and the GIC's `gic_common::mmio32` family. Devices that do no DMA (the
+PL011 console in `serial::raw`, the PL031 and HPET clocks, pvpanic) and the MSI-X table writes in
+`irq_init` still use volatile accesses; until they convert, none of them is a doorbell or a status
+that announces DMA memory. The host test
 `non_coherent_request_path_cleans_and_invalidates` finds the doorbell's ordered write after the
 `avail.idx` store and the status read's ordered read before the used-ring loads.
 
@@ -910,8 +914,10 @@ on the device or a parent bus (ROADMAP §11.5), or, planned, ACPI `_CCA` and the
 coherency attribute (ROADMAP §20.7). A device with neither is non-coherent, as Linux treats it. The
 device's registry entry records it as `dev::Device::dma_coherent`
 ([§12.1](DEVICES.md#121-devices)): `pci_init` copies its host bridge's, `virtio_mmio_init` its
-node's, and every x86_64 device is coherent. A driver passes it to `DmaAlloc::coherent`, and the
-`DmaBuffer` keeps it. For a coherent device, `DmaBuffer::sync_for_device` and `sync_for_cpu` (and
+node's, and every x86_64 device is coherent. A driver passes it to `DmaAlloc::new` or `dma32`,
+which have no default, and the `DmaBuffer` keeps it. A driver that runs no maintenance refuses a
+non-coherent device instead (`virtio_init::refuse_non_coherent`, `VirtioError::NonCoherent`, with a
+rate-limited line): virtio-rng and virtio-input today; fw-cfg and virtio-blk run it. For a coherent device, `DmaBuffer::sync_for_device` and `sync_for_cpu` (and
 their `sync_range_*` forms) are `dma_wmb` and `dma_rmb`. For a non-coherent device they call the
 port's `Barriers::sync_for_device`, which cleans the range to the Point of Coherency (`dc cvac` for
 each line, then `dsb sy`) whatever the transfer's direction, so no dirty line is written back later
@@ -923,7 +929,11 @@ the meet of every CPU's `CTR_EL0` (`tlb::ctr_meet`). Maintenance works on whole 
 non-coherent device's DMA region shares no cache writeback granule (`CTR_EL0.CWG`, the largest over
 every CPU; 2 KiB, the architectural maximum, when it reads 0; `Barriers::dma_granule`) with other
 data: a `DmaBuffer` is whole pages, a region smaller than a page is aligned to and sized in granules,
-and `cpu::note_cache` asserts on every CPU that the granule is no larger than a page. A split
+and `cpu::note_cache` refuses, on every CPU before its `CTR_EL0` joins the meet, a granule larger than
+a page (`vibeOS: cpu: cwg above a page`, then it parks). The granule is frozen at `smp: done`
+(`cpu::freeze_dma_granule`), so a CPU that arrives later, a stalled AP (F032), cannot raise it under
+regions already sized in it: one whose granule is larger prints `vibeOS: cpu: cwg above the frozen
+dma granule` and parks, and bring-up counts it lost. A split
 virtqueue for such a device puts its used ring on a granule boundary (`SplitLayout::with_granule`)
 and, after `SplitQueue::set_non_coherent`, cleans each ring store after it and invalidates each
 used-ring load before it; virtio-blk sizes each request slot in granules

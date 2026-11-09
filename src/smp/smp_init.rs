@@ -720,6 +720,7 @@ pub unsafe fn init() {
     #[cfg(target_arch = "aarch64")]
     {
         init_aarch64();
+        arch::aarch64::cpu::freeze_dma_granule();
         crate::marker!(marker::SMP_DONE);
     }
     #[cfg(target_arch = "x86_64")]

@@ -150,13 +150,19 @@ pub enum VirtioError {
     /// The device completed something it was not given, or more than it was
     /// given. The queue is dead until `init`.
     BadUsed,
+    /// The device is DMA-non-coherent and this driver runs no cache
+    /// maintenance (DESIGN §4.7), so it does not bind.
+    NonCoherent,
 }
 
 /// A virtio setup error's errno: Linux's for each condition.
 impl From<VirtioError> for crate::kerror::KError {
     fn from(e: VirtioError) -> Self {
         match e {
-            VirtioError::NoVersion1 | VirtioError::NoCaps | VirtioError::Features => Self::NoDev,
+            VirtioError::NoVersion1
+            | VirtioError::NoCaps
+            | VirtioError::Features
+            | VirtioError::NonCoherent => Self::NoDev,
             VirtioError::BadQueue
             | VirtioError::Notify
             | VirtioError::Failed
@@ -179,6 +185,7 @@ impl VirtioError {
             VirtioError::Failed => "failed",
             VirtioError::NoMemory => "no memory",
             VirtioError::BadUsed => "bad used ring",
+            VirtioError::NonCoherent => "non-coherent DMA",
         }
     }
 }

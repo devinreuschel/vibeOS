@@ -90,33 +90,31 @@ pub struct DmaAlloc {
     pub align: u64,
     pub boundary: u64,
     /// The device snoops the CPU's caches, as its registry entry records
-    /// (`dev::Device::dma_coherent`). [`new`](Self::new) and
-    /// [`dma32`](Self::dma32) set it; [`coherent`](Self::coherent) changes it.
+    /// (`dev::Device::dma_coherent`). Every constructor takes it: there is
+    /// no default, since a device with no `dma-coherent` is non-coherent
+    /// (DESIGN §4.7).
     pub coherent: bool,
 }
 
 impl DmaAlloc {
-    pub const fn new(size: u64) -> Self {
+    /// `size` bytes for a device whose coherence is `coherent`.
+    pub const fn new(size: u64, coherent: bool) -> Self {
         Self {
             size,
             align: PAGE_SIZE,
             boundary: 0,
-            coherent: true,
+            coherent,
         }
     }
 
-    pub const fn dma32(size: u64) -> Self {
+    /// As [`new`](Self::new), never crossing a 4 GiB line.
+    pub const fn dma32(size: u64, coherent: bool) -> Self {
         Self {
             size,
             align: PAGE_SIZE,
             boundary: DMA32_BOUNDARY,
-            coherent: true,
+            coherent,
         }
-    }
-
-    /// This request for a device whose coherence is `coherent`.
-    pub const fn coherent(self, coherent: bool) -> Self {
-        Self { coherent, ..self }
     }
 
     /// Buddy order of the block that holds this request: `size` bytes at
@@ -528,7 +526,8 @@ mod tests {
         assert_eq!(IdentityDma.dma_to_device(pa).0, pa);
         let mut p = Pool::new(16);
         let virt_of = |phys: u64| phys.wrapping_add(0xFFFF_8000_0000_0000);
-        let buf = alloc_from_buddy::<Stub>(&mut p.buddy, DmaAlloc::new(4096), virt_of).unwrap();
+        let buf =
+            alloc_from_buddy::<Stub>(&mut p.buddy, DmaAlloc::new(4096, true), virt_of).unwrap();
         assert_eq!(buf.device().0, buf.phys());
         assert_ne!(buf.device().0, buf.virt());
         assert_eq!(buf.virt(), virt_of(buf.phys()));
@@ -558,15 +557,15 @@ mod tests {
         buf.sync_for_cpu::<Stub>();
         free_to_buddy::<Stub>(&mut p.buddy, buf);
         assert_eq!(p.buddy.stats().free_frames, 256);
-        assert!(DmaAlloc::dma32(64).boundary == DMA32_BOUNDARY);
+        assert!(DmaAlloc::dma32(64, true).boundary == DMA32_BOUNDARY);
         let _ = MAX_ORDER;
     }
 
     #[test]
     fn sg_builds_from_buffer_and_caps() {
         let mut p = Pool::new(16);
-        let buf =
-            alloc_from_buddy::<Stub>(&mut p.buddy, DmaAlloc::new(0x1000), |phys| phys).unwrap();
+        let buf = alloc_from_buddy::<Stub>(&mut p.buddy, DmaAlloc::new(0x1000, true), |phys| phys)
+            .unwrap();
         let sg = SgList::from_buffer(&buf).unwrap();
         assert_eq!(sg.n, 1);
         assert_eq!(sg.entries[0].addr, buf.device());
@@ -603,9 +602,9 @@ mod tests {
             coherent: true,
         };
         assert_eq!(odd.order(), None);
-        assert_eq!(DmaAlloc::new(0x3000).order(), Some(2));
-        assert_eq!(DmaAlloc::dma32(0x1000).order(), Some(0));
-        assert_eq!(DmaAlloc::new(0).order(), None);
+        assert_eq!(DmaAlloc::new(0x3000, true).order(), Some(2));
+        assert_eq!(DmaAlloc::dma32(0x1000, true).order(), Some(0));
+        assert_eq!(DmaAlloc::new(0, true).order(), None);
         let mut p = Pool::new(16);
         assert!(alloc_from_buddy::<Stub>(&mut p.buddy, over, |phys| phys).is_none());
         assert_eq!(p.buddy.stats().free_frames, 16);
@@ -634,8 +633,8 @@ mod tests {
     #[test]
     fn coherent_buffer_syncs_with_barriers_only() {
         let mut p = Pool::new(16);
-        let buf =
-            alloc_from_buddy::<Stub>(&mut p.buddy, DmaAlloc::new(0x1000), |phys| phys).unwrap();
+        let buf = alloc_from_buddy::<Stub>(&mut p.buddy, DmaAlloc::new(0x1000, true), |phys| phys)
+            .unwrap();
         assert!(buf.coherent());
         trace::start();
         buf.sync_for_device::<Stub>();
@@ -655,7 +654,7 @@ mod tests {
         // Host memory stands in for the block: `virt_of` maps it there.
         let mut mem = std::vec![0u8; 0x3000];
         let host = mem.as_mut_ptr() as u64;
-        let spec = DmaAlloc::new(0x1800).coherent(false);
+        let spec = DmaAlloc::new(0x1800, false);
         let buf = alloc_from_buddy::<Stub>(&mut p.buddy, spec, |_| host).unwrap();
         assert!(!buf.coherent());
         trace::start();

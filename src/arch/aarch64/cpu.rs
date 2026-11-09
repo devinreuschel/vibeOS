@@ -21,6 +21,8 @@ static EL2_VHE: BootCell<bool> = BootCell::new();
 static CTR: AtomicU64 = AtomicU64::new(tlb::CTR_MEET_TOP);
 /// A CPU has met its `CTR_EL0` into [`CTR`].
 static CTR_NOTED: AtomicBool = AtomicBool::new(false);
+/// The DMA granule, frozen at `smp: done` ([`freeze_dma_granule`]).
+static DMA_GRANULE: BootCell<u64> = BootCell::new();
 static ISA_OK: AtomicBool = AtomicBool::new(false);
 static OVERFLOW_SP: AtomicU64 = AtomicU64::new(0);
 
@@ -94,6 +96,7 @@ pub fn note_cache() {
     let ctr: u64;
     // SAFETY: `CTR_EL0` is readable at EL1; established here.
     unsafe { asm!("mrs {0}, CTR_EL0", out(reg) ctr, options(nomem, nostack, preserves_flags)) };
+    check_cwg(tlb::CacheInfo::from_ctr(ctr).cwg);
     // Acquire: pairs with the AcqRel exchange below on another CPU.
     let mut cur = CTR.load(Ordering::Acquire);
     loop {
@@ -111,13 +114,36 @@ pub fn note_cache() {
     }
     // Release: pairs with the Acquire load in `sync_icache`.
     CTR_NOTED.store(true, Ordering::Release);
-    // A non-coherent device's sub-page DMA region is sized in granules
-    // inside page-sized blocks (DESIGN §4.7): a CPU whose `CTR_EL0.CWG`
-    // claims more than a page would let a writeback reach past the block.
-    assert!(
-        tlb::CacheInfo::from_ctr(ctr).granule_fits_page(vibeos::pmm::PAGE_SIZE),
-        "vibeOS: CTR_EL0.CWG above a page"
-    );
+}
+
+/// Refuse this CPU, before its `CTR_EL0` joins the meet, when its cache
+/// writeback granule `cwg` breaks what DMA layouts assume (DESIGN §4.7):
+/// larger than a page, since a non-coherent device's sub-page region is
+/// sized in granules inside page-sized blocks; or, once
+/// [`freeze_dma_granule`] has run, larger than the frozen granule that
+/// drivers sized their regions in. A refused CPU prints a registered line
+/// through `serial::raw`, which needs no log path, and parks; an AP never
+/// marks itself ready, so bring-up treats it as lost (F032).
+fn check_cwg(cwg: u64) {
+    if cwg > vibeos::pmm::PAGE_SIZE {
+        crate::serial::raw::put_boot_line(b"vibeOS: cpu: cwg above a page");
+        halt();
+    }
+    if let Some(&frozen) = DMA_GRANULE.try_get()
+        && cwg > frozen
+    {
+        crate::serial::raw::put_boot_line(b"vibeOS: cpu: cwg above the frozen dma granule");
+        halt();
+    }
+}
+
+/// Fix the DMA granule at the meet of every CPU online now, at `smp: done`,
+/// so a CPU that arrives later (a stalled AP, F032) cannot raise it under
+/// regions already sized in it: [`check_cwg`] refuses such a CPU instead.
+pub fn freeze_dma_granule() {
+    // SAFETY: invariant I22: one write, on the BSP in `smp_init::init`
+    // right before `smp: done`; established by `smp_init::init`.
+    unsafe { DMA_GRANULE.set(cache_info().cwg) };
 }
 
 /// What every noted CPU's `CTR_EL0` says: [`CTR`] once a CPU has met into
@@ -132,11 +158,12 @@ fn cache_info() -> tlb::CacheInfo {
     }
 }
 
-/// The cache writeback granule every noted CPU's `CTR_EL0.CWG` allows,
-/// the largest of them (`tlb::ctr_meet`); `tlb::MAX_CWG` before
-/// [`note_cache`].
+/// The cache writeback granule DMA regions are sized in: the frozen value
+/// from [`freeze_dma_granule`] once `smp: done` has passed, and before it
+/// the largest `CTR_EL0.CWG` of every noted CPU (`tlb::ctr_meet`), or
+/// `tlb::MAX_CWG` before [`note_cache`].
 pub fn dma_granule() -> usize {
-    cache_info().cwg as usize
+    DMA_GRANULE.try_get().copied().unwrap_or(cache_info().cwg) as usize
 }
 
 /// Run one DMA maintenance step (`tlb::DmaOp`) at `va`.

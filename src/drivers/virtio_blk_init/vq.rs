@@ -72,7 +72,7 @@ impl DmaPlan {
     /// Out of line, so its log line's frame is not part of the probe's,
     /// which runs on the bootstrap stack (DESIGN §4.5).
     #[inline(never)]
-    pub(super) fn for_device(dev: &Device) -> Self {
+    pub(super) fn for_device(dev: &Device) -> Result<Self, VirtioError> {
         let coherent = dev.dma_coherent && !force_non_coherent();
         let granule = if coherent {
             1
@@ -80,9 +80,8 @@ impl DmaPlan {
             <Arch as vibeos::arch::Barriers>::dma_granule()
         };
         // The port's granule is a power of two no larger than a page
-        // (`Barriers::dma_granule`); `SLOT_META + BOUNCE` rounds to at most
-        // a page more.
-        let stride = slot_stride(granule).unwrap_or(SLOT_META + BOUNCE);
+        // (`Barriers::dma_granule`); one that is not fails the probe.
+        let stride = slot_stride(granule).ok_or(VirtioError::BadQueue)?;
         if !coherent {
             crate::klog!(
                 vibeos::log::Level::Info,
@@ -91,11 +90,11 @@ impl DmaPlan {
                 granule
             );
         }
-        Self {
+        Ok(Self {
             coherent,
             granule,
             stride,
-        }
+        })
     }
 
     /// Set `vq` up for this plan, in place: non-coherent queues run their

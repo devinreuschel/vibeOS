@@ -191,6 +191,7 @@ fn fail_setup(dev: &DevRef, common: u64, irq: Option<IrqId>, bufs: [Option<DmaBu
 }
 
 fn setup(dev: &DevRef, caps: ModernCaps) -> Result<Dev, VirtioError> {
+    crate::virtio_init::refuse_non_coherent("virtio-input", dev)?;
     let common_cap = caps.common.ok_or(VirtioError::NoCaps)?;
     let notify_cap = caps.notify.ok_or(VirtioError::NoCaps)?;
     let isr_cap = caps.isr.ok_or(VirtioError::NoCaps)?;
@@ -258,12 +259,12 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<Dev, VirtioError> {
         fail_setup(dev, common, irq_opt(irq_raw), [None, None]);
         return Err(VirtioError::BadQueue);
     };
-    let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64)) else {
+    let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64, dev.dma_coherent)) else {
         fail_setup(dev, common, irq_opt(irq_raw), [None, None]);
         return Err(VirtioError::Failed);
     };
     let data_len = (qsz as u64).saturating_mul(EVENT_SIZE as u64);
-    let Some(data) = dma_init::alloc(DmaAlloc::dma32(data_len.max(8))) else {
+    let Some(data) = dma_init::alloc(DmaAlloc::dma32(data_len.max(8), dev.dma_coherent)) else {
         fail_setup(dev, common, irq_opt(irq_raw), [Some(qdma), None]);
         return Err(VirtioError::Failed);
     };

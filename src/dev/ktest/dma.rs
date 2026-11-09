@@ -14,7 +14,7 @@ use crate::pci_init;
 
 pub(crate) fn test_dma_alloc() -> Outcome {
     let before = quiescent_free_frames();
-    let Some(buf) = dma_init::alloc(DmaAlloc::dma32(0x1000)) else {
+    let Some(buf) = dma_init::alloc(DmaAlloc::dma32(0x1000, true)) else {
         return Outcome::Fail("alloc");
     };
     if buf.device().as_u64() != buf.phys() {
@@ -101,10 +101,10 @@ pub(crate) fn test_dma_edu() -> Outcome {
         return Outcome::Fail("edu ident");
     }
     pci_init::update_command(dev.addr, CMD_MASTER, 0);
-    let Some(src) = dma_init::alloc(DmaAlloc::dma32(64)) else {
+    let Some(src) = dma_init::alloc(DmaAlloc::dma32(64, dev.dma_coherent)) else {
         return Outcome::Fail("src");
     };
-    let Some(dst) = dma_init::alloc(DmaAlloc::dma32(64)) else {
+    let Some(dst) = dma_init::alloc(DmaAlloc::dma32(64, dev.dma_coherent)) else {
         dma_init::free(src);
         return Outcome::Fail("dst");
     };

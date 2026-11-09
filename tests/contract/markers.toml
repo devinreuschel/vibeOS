@@ -531,6 +531,20 @@ source = "kernel"
 section = "§11.1"
 
 [[marker]]
+text = "vibeOS: cpu: cwg above a page"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.2"
+
+[[marker]]
+text = "vibeOS: cpu: cwg above the frozen dma granule"
+kind = "failure"
+arch = "aarch64"
+source = "kernel"
+section = "§11.2"
+
+[[marker]]
 text = "vibeOS: panic: early sp=<addr> elr=<addr> esr=<n> far=<addr>"
 kind = "failure"
 arch = "aarch64"

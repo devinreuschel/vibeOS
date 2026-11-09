@@ -394,7 +394,25 @@ pub(crate) fn kick(doorbell: u64, qi: u16) {
     unsafe { virtio::notify::<Arch>(doorbell, qi, false) }
 }
 
+/// Refuse a DMA-non-coherent device before touching it: the drivers that
+/// call this run no cache maintenance on their rings (DESIGN §4.7). The
+/// probe fails with `NonCoherent`, and the line names the device.
+pub(crate) fn refuse_non_coherent(driver: &str, dev: &Device) -> Result<(), VirtioError> {
+    if dev.dma_coherent {
+        return Ok(());
+    }
+    crate::klog_ratelimited!(
+        1000,
+        vibeos::log::Level::Warn,
+        "vibeOS: {}: {}: non-coherent DMA, not bound",
+        driver,
+        dev.addr
+    );
+    Err(VirtioError::NonCoherent)
+}
+
 fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
+    refuse_non_coherent("virtio-rng", dev)?;
     let common_cap = caps.common.ok_or(VirtioError::NoCaps)?;
     let notify_cap = caps.notify.ok_or(VirtioError::NoCaps)?;
     let isr_cap = caps.isr.ok_or(VirtioError::NoCaps)?;
@@ -472,11 +490,11 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
         fail_probe(dev, common, Some(irq), [None, None]);
         return Err(VirtioError::BadQueue);
     };
-    let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64)) else {
+    let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64, dev.dma_coherent)) else {
         fail_probe(dev, common, Some(irq), [None, None]);
         return Err(VirtioError::Failed);
     };
-    let Some(data) = dma_init::alloc(DmaAlloc::dma32(64)) else {
+    let Some(data) = dma_init::alloc(DmaAlloc::dma32(64, dev.dma_coherent)) else {
         fail_probe(dev, common, Some(irq), [Some(qdma), None]);
         return Err(VirtioError::Failed);
     };

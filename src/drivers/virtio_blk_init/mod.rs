@@ -333,10 +333,17 @@ fn setup(
         }
     }
 
-    let plan = DmaPlan::for_device(dev);
-    let Some(slots) = dma_init::alloc(
-        DmaAlloc::dma32(N_SLOTS.saturating_mul(plan.stride) as u64).coherent(plan.coherent),
-    ) else {
+    let plan = match DmaPlan::for_device(dev) {
+        Ok(p) => p,
+        Err(e) => {
+            fail_probe(dev, common, &vecs, nvec, None, &mut vqs, None);
+            return Err(e);
+        }
+    };
+    let Some(slots) = dma_init::alloc(DmaAlloc::dma32(
+        N_SLOTS.saturating_mul(plan.stride) as u64,
+        plan.coherent,
+    )) else {
         fail_probe(dev, common, &vecs, nvec, None, &mut vqs, None);
         return Err(VirtioError::Failed);
     };
@@ -396,8 +403,7 @@ fn setup(
             fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
             return Err(VirtioError::BadQueue);
         };
-        let Some(qdma) =
-            dma_init::alloc(DmaAlloc::dma32(layout.total as u64).coherent(plan.coherent))
+        let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64, plan.coherent))
         else {
             fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
             return Err(VirtioError::Failed);
@@ -710,10 +716,17 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
         return Err(VirtioError::Failed);
     }
 
-    let plan = DmaPlan::for_device(dev);
-    let Some(slots) = dma_init::alloc(
-        DmaAlloc::dma32(N_SLOTS.saturating_mul(plan.stride) as u64).coherent(plan.coherent),
-    ) else {
+    let plan = match DmaPlan::for_device(dev) {
+        Ok(p) => p,
+        Err(e) => {
+            fail_mmio(base, &vecs, nvec, None, &mut vqs, None);
+            return Err(e);
+        }
+    };
+    let Some(slots) = dma_init::alloc(DmaAlloc::dma32(
+        N_SLOTS.saturating_mul(plan.stride) as u64,
+        plan.coherent,
+    )) else {
         fail_mmio(base, &vecs, nvec, None, &mut vqs, None);
         return Err(VirtioError::Failed);
     };
@@ -741,8 +754,7 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
             fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, None);
             return Err(VirtioError::BadQueue);
         };
-        let Some(qdma) =
-            dma_init::alloc(DmaAlloc::dma32(layout.total as u64).coherent(plan.coherent))
+        let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64, plan.coherent))
         else {
             fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, None);
             return Err(VirtioError::Failed);

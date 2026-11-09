@@ -646,7 +646,7 @@ fn non_coherent_request_path_cleans_and_invalidates() {
     let mut pool = crate::pmm::testing::Pool::new(64);
     let hhdm = pool.hhdm();
     let stride = slot_stride(g).unwrap();
-    let spec = DmaAlloc::new(4 * stride as u64).coherent(false);
+    let spec = DmaAlloc::new(4 * stride as u64, false);
     let slots = alloc_from_buddy::<Stub>(&mut pool.buddy, spec, |p| p.wrapping_add(hhdm)).unwrap();
     let si = 1usize;
     let (soff, slen) = slot_region(si, stride);

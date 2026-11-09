@@ -23,7 +23,7 @@ use vibeos::machine::MAX_PCI_HOSTS;
 use vibeos::paging::{IOREMAP_BASE, IOREMAP_LEN, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CfgIo, FuncInfo, MAX_SCAN, bar_map_allowed};
 
-use crate::arch::current::InterruptGuard;
+use crate::arch::current::{Arch, InterruptGuard};
 use crate::boot;
 use crate::cell::BootCell;
 use crate::fb_init;
@@ -32,6 +32,7 @@ use crate::paging_init;
 use crate::sync_init::SpinMutex;
 #[cfg(target_arch = "x86_64")]
 use crate::x86;
+use vibeos::arch::Barriers;
 
 #[cfg_attr(
     target_arch = "aarch64",
@@ -381,12 +382,15 @@ fn ecam_va(phys: u64) -> Option<u64> {
     Some(pci::ecam_byte_va(va, phys))
 }
 
+/// A configuration-space read through the port's ordered `mmio_read`
+/// (DESIGN §4.7).
+///
 /// # Safety
 /// Invariant I54: `va` is a dword of an ECAM page `ecam_va` mapped.
 unsafe fn ecam_read_at(va: u64) -> u32 {
     // SAFETY: invariant I54; established by `pci_init::ecam_read_at`'s
     // `# Safety` contract.
-    unsafe { (va as *const u32).read_volatile() }
+    unsafe { Arch::mmio_read(va as *const u32) }
 }
 
 /// # Safety
@@ -394,7 +398,7 @@ unsafe fn ecam_read_at(va: u64) -> u32 {
 unsafe fn ecam_write_at(va: u64, val: u32) {
     // SAFETY: invariant I54; established by `pci_init::ecam_write_at`'s
     // `# Safety` contract.
-    unsafe { (va as *mut u32).write_volatile(val) }
+    unsafe { Arch::mmio_write(va as *mut u32, val) }
 }
 
 pub struct HwCfg;
