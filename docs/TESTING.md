@@ -588,7 +588,10 @@ timeout. A row whose placeholders all follow its last literal fails a line that 
 the first placeholder (`PANIC_SIGNATURES` in `tests/harness/harness.py`, and `frame.USER_FAILURES`
 for the `user` rows); any other fails a line its pattern matches (`FAILURE_PATTERNS`). The rows are
 the panic signatures (`panicked at`, `vibeOS: panic:`, the exception mnemonics, `double fault`,
-`stack overflow`), the lines of a dump, and the halt reasons.
+`stack overflow`), the lines of a dump, and the halt reasons. A run checks the rows for its own architecture, the `both` rows
+and those whose `arch` names it (`panic_signatures_for` and `failure_patterns_for`, from the boot's
+`QemuConfig.arch`, else `VIBEOS_ARCH`): an aarch64 boot fails on `#DABT` or `#UNDEF`, and an x86_64
+boot ignores them.
 
 Match the exception mnemonics, not the phrase "page fault". Shell help text and log messages contain
 English words, and a substring match on prose produces false failures that erode trust in the suite.

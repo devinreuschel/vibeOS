@@ -236,8 +236,8 @@ def boot_and_capture(
                     f"{result.tail()}",
                 )
             result.lines.append(line)
-            why = run_failure(line, stream)
-            sig = panic_signature(line)
+            why = run_failure(line, stream, arch=cfg.arch)
+            sig = panic_signature(line, arch=cfg.arch)
             halted = PANIC_DONE in (frame.kernel_text(line) or "")
             d = session.line(line, panic=sig is not None, halted=halted)
             if d and d.end != "pass":

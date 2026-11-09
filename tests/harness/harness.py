@@ -90,10 +90,42 @@ ROWS: tuple[registry.Row, ...] = registry.load_rows()
 # (DESIGN §9.7). A user program's line never matches: every driver also fails
 # on `frame.USER_FAILURES` in user text and on `frame.LIMINE_SIGNATURES`
 # before the first framed line.
-PANIC_SIGNATURES: tuple[str, ...] = registry.signatures(ROWS, {frame.KERNEL})
+#
+# Each architecture has its own: the `both` rows and its own (`registry`'s
+# arch filter), so an aarch64 boot fails on `#DABT` or `#UNDEF` and an x86_64
+# boot ignores them. Every consumer below takes the boot's architecture
+# (`QemuConfig.arch`, else `VIBEOS_ARCH`); `PANIC_SIGNATURES` and
+# `FAILURE_PATTERNS` are x86_64's, the reference architecture's.
+ARCHES = ("x86_64", "aarch64")
+_SIGNATURES: dict[str, tuple[str, ...]] = {
+    a: registry.signatures(ROWS, {frame.KERNEL}, a) for a in ARCHES
+}
 # The kernel `failure` rows with a placeholder before their last literal, as
 # patterns: a kernel line one of them matches fails the run too.
-FAILURE_PATTERNS: tuple[re.Pattern[str], ...] = registry.failure_patterns(ROWS, {frame.KERNEL})
+_FAILURE_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    a: registry.failure_patterns(ROWS, {frame.KERNEL}, a) for a in ARCHES
+}
+PANIC_SIGNATURES: tuple[str, ...] = _SIGNATURES["x86_64"]
+FAILURE_PATTERNS: tuple[re.Pattern[str], ...] = _FAILURE_PATTERNS["x86_64"]
+
+
+def boot_arch(arch: str | None = None) -> str:
+    """`arch`, else `VIBEOS_ARCH`, else x86_64: the architecture whose
+    failure lines a run checks."""
+    a = arch if arch is not None else os.environ.get("VIBEOS_ARCH", "x86_64")
+    if a not in ARCHES:
+        raise HarnessError(f"arch {a!r}: not x86_64 or aarch64")
+    return a
+
+
+def panic_signatures_for(arch: str | None = None) -> tuple[str, ...]:
+    """The kernel head signatures for `boot_arch(arch)`."""
+    return _SIGNATURES[boot_arch(arch)]
+
+
+def failure_patterns_for(arch: str | None = None) -> tuple[re.Pattern[str], ...]:
+    """The kernel failure patterns for `boot_arch(arch)`."""
+    return _FAILURE_PATTERNS[boot_arch(arch)]
 
 # End of the dump. An expected-panic run waits for this so backtrace/logrec
 # are in the log.
@@ -285,25 +317,36 @@ def core_report(core: str | os.PathLike[str], elf: str | os.PathLike[str]) -> st
     return "\n--- core report ---\n" + out.rstrip("\n")
 
 
-def panic_signature(raw: str, sigs: tuple[str, ...] = PANIC_SIGNATURES) -> str | None:
-    """The first of `sigs` in `raw`'s kernel text, else the first of
-    `FAILURE_PATTERNS` that matches it (as its pattern), else None."""
+def panic_signature(
+    raw: str, sigs: tuple[str, ...] | None = None, *, arch: str | None = None
+) -> str | None:
+    """The first of `sigs` (default: `arch`'s signatures) in `raw`'s kernel
+    text, else the first of `arch`'s failure patterns that matches it (as
+    its pattern), else None."""
     text = kernel_text(raw)
     if text is None:
         return None
+    if sigs is None:
+        sigs = panic_signatures_for(arch)
     sig = next((s for s in sigs if s in text), None)
     if sig is not None:
         return sig
-    return next((p.pattern for p in FAILURE_PATTERNS if p.search(text)), None)
+    return next((p.pattern for p in failure_patterns_for(arch) if p.search(text)), None)
 
 
-def contains_panic(line: str, sigs: tuple[str, ...] = PANIC_SIGNATURES) -> bool:
-    """A kernel line holding one of `sigs`, or one of `FAILURE_PATTERNS` matches."""
-    return panic_signature(line, sigs) is not None
+def contains_panic(
+    line: str, sigs: tuple[str, ...] | None = None, *, arch: str | None = None
+) -> bool:
+    """A kernel line holding one of `sigs`, or one of `arch`'s failure patterns matches."""
+    return panic_signature(line, sigs, arch=arch) is not None
 
 
 def run_failure(
-    raw: str, stream: frame.Stream, sigs: tuple[str, ...] = PANIC_SIGNATURES
+    raw: str,
+    stream: frame.Stream,
+    sigs: tuple[str, ...] | None = None,
+    *,
+    arch: str | None = None,
 ) -> tuple[str, str] | None:
     """Why `raw` fails a run, as (reason, the line's text), or None: a panic
     signature in kernel text, a `frame.USER_FAILURES` entry in user text, or
@@ -313,7 +356,7 @@ def run_failure(
     _, text = stream.feed(raw)
     if limine:
         return "Limine panic before the kernel", text
-    sig = panic_signature(raw, sigs)
+    sig = panic_signature(raw, sigs, arch=arch)
     if sig is not None:
         return f"panic signature {sig!r}", text
     fail = frame.user_failure(raw)
@@ -324,12 +367,14 @@ def run_failure(
 
 def dump_after_panic(
     lines: Iterable[str],
-    panic_signatures: tuple[str, ...] = PANIC_SIGNATURES,
+    panic_signatures: tuple[str, ...] | None = None,
+    *,
+    arch: str | None = None,
 ) -> list[str]:
     """Lines from the first panic signature through the end."""
     out = list(lines)
     for i, line in enumerate(out):
-        if contains_panic(line, panic_signatures):
+        if contains_panic(line, panic_signatures, arch=arch):
             return out[i:]
     return []
 
@@ -1650,9 +1695,12 @@ def _qemu_argv_aarch64(
 
 def _panic_sigs(
     cfg: QemuConfig,
-    base: tuple[str, ...],
+    base: tuple[str, ...] | None,
     extra: tuple[str, ...],
 ) -> tuple[str, ...]:
+    """`base` (default: `cfg.arch`'s signatures) with `cfg`'s and `extra`'s."""
+    if base is None:
+        base = panic_signatures_for(cfg.arch)
     more = cfg.extra_panic + extra
     if not more:
         return base
@@ -1679,7 +1727,7 @@ def run_qemu_and_check(
     cfg: QemuConfig,
     markers: list[Marker],
     timeout_s: float = 45.0,
-    panic_signatures: tuple[str, ...] = PANIC_SIGNATURES,
+    panic_signatures: tuple[str, ...] | None = None,
     extra_panic: tuple[str, ...] = (),
     dump_needles: tuple[str | tuple[str, ...], ...] = (),
     line_source: LineSource | None = None,
@@ -1782,7 +1830,11 @@ def run_qemu_and_check(
         if dump_at is None and ufail is not None:
             result.panic_line = line
             fail(f"user failure {ufail!r} in: {text!r}")
-        return text, (text if framed else None), panic_signature(line, panic_signatures)
+        return (
+            text,
+            (text if framed else None),
+            panic_signature(line, panic_signatures, arch=cfg.arch),
+        )
 
     def take(i: int, line: str, text: str, ktext: str | None, sig: str | None) -> bool:
         """Line `i` against the dump, the counts and the markers; True once
@@ -2032,7 +2084,7 @@ def run_qemu_inject_mce(
     from tests.harness import qmp as qmpmod
 
     cfg = replace(cfg, expect="panic")
-    panic_signatures = _panic_sigs(cfg, PANIC_SIGNATURES, ())
+    panic_signatures = _panic_sigs(cfg, None, ())
     session = qmpmod.Session(cfg, "mce")
     src = _start_qemu(cfg, time.monotonic() + timeout_s, qmp_sock=session.sock)
     argv = _argv_of(src)
@@ -2068,7 +2120,7 @@ def run_qemu_inject_mce(
                     f"{len(result.lines)} lines{_qemu_report(result, exited=True)}",
                 )
             result.lines.append(line)
-            why = run_failure(line, stream, panic_signatures)
+            why = run_failure(line, stream, panic_signatures, arch=cfg.arch)
             if why is not None:
                 result.panic_line = line
                 msg = f"{why[0]} in: {why[1]!r}{result.tail()}"
@@ -2154,7 +2206,7 @@ def _console_line(
     a panic signature through the session's event rule, which takes the
     core after the dump; the line then goes to the session."""
     result.lines.append(line)
-    why = run_failure(line, stream, sigs)
+    why = run_failure(line, stream, sigs, arch=session.cfg.arch)
     if why is None:
         msg = None
     elif tail_s is None:
@@ -2165,7 +2217,7 @@ def _console_line(
         result.panic_line = line
     d = session.line(
         line,
-        panic=panic_signature(line, sigs) is not None,
+        panic=panic_signature(line, sigs, arch=session.cfg.arch) is not None,
         halted=PANIC_DONE in (kernel_text(line) or ""),
     )
     if d:
@@ -2293,7 +2345,7 @@ def run_qemu_console_input(
     """
     from tests.harness import qmp as qmpmod
 
-    panic_signatures = _panic_sigs(cfg, PANIC_SIGNATURES, ())
+    panic_signatures = _panic_sigs(cfg, None, ())
     deadline = time.monotonic() + timeout_s
     if qmp is None and line_source is not None:
         qmp = qmpmod.FakeQmp([])
@@ -2659,6 +2711,7 @@ def check_ktest_output(
     exit_code: int | None,
     *,
     pass_status: int = ISA_DEBUG_PASS,
+    arch: str | None = None,
 ) -> RunResult:
     """Require `begin <n>`, exactly `n` runs each with its one result, then
     `end`; reject any FAIL line; require the pass exit status.
@@ -2691,7 +2744,7 @@ def check_ktest_output(
     seen: list[str] = []
     for raw in lines:
         result.lines.append(raw)
-        why = run_failure(raw, stream)
+        why = run_failure(raw, stream, arch=arch)
         if why is not None and declared.is_declared(count.open_run, why[1]):
             seen.append(why[1])
             continue
@@ -2849,7 +2902,7 @@ class _ProcSource:
 def run_qemu_until_exit(
     cfg: QemuConfig,
     timeout_s: float = 60.0,
-    panic_signatures: tuple[str, ...] = PANIC_SIGNATURES,
+    panic_signatures: tuple[str, ...] | None = None,
     extra_panic: tuple[str, ...] = (),
     kill_after: Callable[[str], float | None] | None = None,
     *,
@@ -2909,7 +2962,7 @@ def run_qemu_until_exit(
 
     def take(line: str) -> None:
         result.lines.append(line)
-        why = run_failure(line, stream, panic_signatures)
+        why = run_failure(line, stream, panic_signatures, arch=cfg.arch)
         # A line the running test declares; `check_ktest_output` judges it.
         mine = why is not None and declared_in_run(progress, why[1])
         if mine:
@@ -2919,7 +2972,7 @@ def run_qemu_until_exit(
                 result.panic_line = line
         elif why is not None:
             result.panic_line = line
-        sig = not mine and panic_signature(line, panic_signatures) is not None
+        sig = not mine and panic_signature(line, panic_signatures, arch=cfg.arch) is not None
         # A run that declares a panic's end expects its signatures; the
         # event rule judges it (DESIGN §8.3).
         expected = expect_fail or (sig and cfg.expect != "none")

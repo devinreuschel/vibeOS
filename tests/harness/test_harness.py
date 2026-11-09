@@ -25,6 +25,7 @@ from tests.harness import frame, registry, results
 from tests.harness.harness import (
     AARCH64_FORENSICS,
     AP_ONLINE,
+    ARCHES,
     FORENSICS_DEVICES,
     HPET_OFF_MACHINE,
     ISA_DEBUG_FAIL,
@@ -46,6 +47,7 @@ from tests.harness.harness import (
     RunResult,
     _monitor_reply,
     boot_contract_markers,
+    check_ktest_output,
     check_mce_dump,
     contains_panic,
     core_report,
@@ -59,6 +61,7 @@ from tests.harness.harness import (
     make_pattern_disk,
     mce_monitor_cmd,
     overlay_env,
+    panic_signatures_for,
     qemu_argv,
     run_qemu_and_check,
     run_qemu_console_input,
@@ -1135,6 +1138,70 @@ class TestPanicSignatureScan(unittest.TestCase):
         # If someone puts it in help text later, they need to rename the
         # help text, not the harness.
         self.assertTrue(contains_panic(K("we hit a double fault")))
+
+
+class TestArchSignatures(unittest.TestCase):
+    """Each boot checks its own architecture's failure lines: an aarch64 boot
+    fails on `#DABT` and `#UNDEF`, which an x86_64 boot ignores."""
+
+    A64 = dataclasses.replace(FAKE_CFG, arch="aarch64")
+    A64_ONLY = (
+        "vibeOS: trap: #DABT esr=0x96000045",
+        "vibeOS: trap: #UNDEF esr=0x2000000",
+        "vibeOS: vectors: overflow box",
+    )
+
+    def boot(self, cfg: QemuConfig, extra: str) -> RunResult:
+        lines = [K(ABC_MARKERS[0].substring), K(extra)] + [K(m.substring) for m in ABC_MARKERS[1:]]
+        src = FakeLineSource.from_lines(lines)
+        return run_qemu_and_check(cfg, ABC_MARKERS, line_source=src)
+
+    def test_aarch64_boot_fails_on_its_lines(self) -> None:
+        for line in self.A64_ONLY:
+            with self.subTest(line=line):
+                with self.assertRaisesRegex(HarnessError, "panic signature"):
+                    self.boot(self.A64, line)
+
+    def test_x86_boot_ignores_aarch64_lines(self) -> None:
+        for line in self.A64_ONLY:
+            with self.subTest(line=line):
+                self.assertEqual(self.boot(FAKE_CFG, line).matched, ["a", "b", "c"])
+
+    def test_both_rows_fail_either(self) -> None:
+        for cfg in (FAKE_CFG, self.A64):
+            with self.subTest(arch=cfg.arch):
+                with self.assertRaisesRegex(HarnessError, "panic signature"):
+                    self.boot(cfg, "vibeOS: panic: x")
+
+    def test_helpers_take_the_arch(self) -> None:
+        dabt = K("vibeOS: trap: #DABT esr=0x96000045")
+        self.assertTrue(contains_panic(dabt, arch="aarch64"))
+        self.assertFalse(contains_panic(dabt, arch="x86_64"))
+        with mock.patch.dict(os.environ, {"VIBEOS_ARCH": "aarch64"}):
+            self.assertTrue(contains_panic(dabt))
+        with mock.patch.dict(os.environ, {"VIBEOS_ARCH": "x86_64"}):
+            self.assertFalse(contains_panic(dabt))
+        self.assertIn("#UNDEF", panic_signatures_for("aarch64"))
+        self.assertNotIn("#UNDEF", panic_signatures_for("x86_64"))
+        self.assertIn("#GP", panic_signatures_for("x86_64"))
+        self.assertNotIn("#GP", panic_signatures_for("aarch64"))
+
+    def test_ktest_verdict_takes_the_arch(self) -> None:
+        lines = [K("vibeOS: ktest: begin 1"), K("vibeOS: trap: #UNDEF esr=0x0")]
+        with self.assertRaisesRegex(HarnessError, "panic signature '#UNDEF'"):
+            check_ktest_output(lines, ISA_DEBUG_PASS, arch="aarch64")
+
+    def test_user_kill_lines_are_not_signatures(self) -> None:
+        # The el0_* tests kill user code on purpose: the kill line is
+        # unframed `user:` text, and names the signal, not the trap.
+        for arch in ARCHES:
+            for text in (
+                "user: pid 7 killed SIGSEGV pc=0x40001000 far=0x0",
+                "user: pid 7 killed SIGILL pc=0x40001000 far=0x40001000",
+                "user: pid 7 killed SIGSEGV bad return elr=0x0 spsr=0x3c5",
+            ):
+                with self.subTest(arch=arch, text=text):
+                    self.assertFalse(contains_panic(K(text), arch=arch))
 
 
 class TestDeadlineReader(unittest.TestCase):

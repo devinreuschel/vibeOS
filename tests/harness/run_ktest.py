@@ -430,7 +430,7 @@ def _ktest_boot(
     if weak:
         results.current().add_section(results.WEAK_ORDER, weak)
     verdict = check_ktest_output(
-        raw.lines, raw.exit_code, pass_status=ktest_pass_status(cfg)
+        raw.lines, raw.exit_code, pass_status=ktest_pass_status(cfg), arch=cfg.arch
     )
     write_stack_summary(label, check_stack_depth(klines, enforce=False))
     check_stack_depth(klines, enforce=enforce_stack)
@@ -824,7 +824,7 @@ def check_hpet_off_boot(lines: list[str], exit_code: int | None, cfg: QemuConfig
     `HPET_OFF_KTEST`. No block or persist lines are required.
     Raises `HarnessError("hpet=off boot: ...")`."""
     try:
-        verdict = check_ktest_output(lines, exit_code)
+        verdict = check_ktest_output(lines, exit_code, arch=cfg.arch)
         skips.check_skips(
             verdict.ktest_skips,
             verdict.ktest_runs,
