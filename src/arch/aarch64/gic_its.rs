@@ -16,8 +16,8 @@ use crate::cell::BootCell;
 use crate::sync_init::SpinMutex;
 
 use super::gic_common::{
-    GICR_TYPER, Gic, LPI_BASE, LPI_SLOTS, XBASER_SHARE_IS, alloc_pages, clean_table_if_needed,
-    cleans_to_poc, gic, mmio32w, mmio64, mmio64w, note_shareability,
+    GICR_TYPER, Gic, LPI_BASE, LPI_SLOTS, XBASER_SHARE_IS, clean_table_if_needed, cleans_to_poc,
+    gic, mmio32w, mmio64, mmio64w, note_shareability,
 };
 
 const GITS_CTLR: u64 = 0x0000;
@@ -105,7 +105,7 @@ pub(super) fn its_live() -> bool {
 /// # Safety
 /// `its` is the mapped ITS; paging and the buddy are up.
 pub(super) unsafe fn init_its(g: &Gic, its: u64, rd: u64) {
-    let Some(cmd) = alloc_pages(1) else {
+    let Some(cmd) = crate::paging_init::alloc_zeroed(0) else {
         crate::klog!(Level::Error, "vibeOS: gic: its cmdq");
         return;
     };
@@ -155,7 +155,7 @@ unsafe fn init_its_basers(its: u64) -> Option<DevTable> {
         let b = unsafe { mmio64(its, off) };
         let ty = (b >> 56) & 7;
         if ty == GITS_BASER_TYPE_DEVICE || ty == GITS_BASER_TYPE_COLLECTION {
-            let Some(pa) = alloc_pages(1) else {
+            let Some(pa) = crate::paging_init::alloc_zeroed(0) else {
                 n += 1;
                 continue;
             };
@@ -228,7 +228,7 @@ fn claim_its_dev(device_id: u32) -> Option<&'static ItsDev> {
         let page = match itt {
             Some(page) => page,
             None => {
-                let page = alloc_pages(1)?;
+                let page = crate::paging_init::alloc_zeroed(0)?;
                 clean_table_if_needed(page, 4096);
                 itt = Some(page);
                 page
@@ -260,10 +260,12 @@ fn claim_its_dev(device_id: u32) -> Option<&'static ItsDev> {
     None
 }
 
-/// Return one page from `alloc_pages(1)` that no table names.
+/// Return one page from `paging_init::alloc_zeroed(0)` that no table names.
 fn free_pages(pa: u64) {
-    // SAFETY: `pa` is the block `alloc_pages(1)` returned, never published;
-    // the caller holds its only record. established here.
+    // SAFETY: `pa` is the order-0 block `paging_init::alloc_zeroed(0)`
+    // returned, so order 0 here pairs with it, the contract
+    // `pmm::Frames::from_entry` states; it was never published and the
+    // caller holds its only record. Established by `paging_init::alloc_zeroed`.
     let frame = unsafe { vibeos::pmm::Frames::from_entry(pa, 0) };
     crate::pmm_init::with_buddy(|b| b.free(frame));
 }

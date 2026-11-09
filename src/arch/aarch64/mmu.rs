@@ -175,7 +175,7 @@ fn trampoline() -> Option<(u64, [u64; 4], usize)> {
 /// `new_root` maps this CPU's code, stack, and everything the return
 /// touches. Boot CPU, IRQs off, still on Limine's tables.
 unsafe fn takeover_ttbr1(new_root: u64) {
-    let reserved = match super::secondary::alloc_zeroed_page() {
+    let reserved = match crate::paging_init::alloc_zeroed(0) {
         Some(pa) => pa,
         None => crate::boot::halt_with("vibeOS: paging: no reserved TTBR1"),
     };

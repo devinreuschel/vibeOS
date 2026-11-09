@@ -235,24 +235,7 @@ global_asm!(
     exit_syscall = const EXIT_SYSCALL,
 );
 
-/// [`exit_work`]'s `kind` for the syscall exit (and a new thread's first
-/// return); a vector exit passes its vector, below this.
-pub const EXIT_SYSCALL: u64 = 0x100;
-
-/// The process layer's exit-work hooks (DESIGN §1.2): whether the current
-/// process has a kill or stop to act on, read with IF=0, and the work
-/// itself, run with IF=1. `proc_init::init` sets both before the first
-/// ring-3 entry; unset, no exit has work.
-static EXIT_PENDING: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
-static EXIT_WORK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
-
-/// Install the exit-work hooks.
-pub fn set_exit_work_hooks(pending: fn() -> bool, work: fn(&mut UserFrame)) {
-    // Release: pairs with the Acquire loads in `exit_work`.
-    EXIT_WORK.store(work as *mut (), Ordering::Release);
-    // Release: pairs with the Acquire load in `exit_work`.
-    EXIT_PENDING.store(pending as *mut (), Ordering::Release);
-}
+pub(crate) use super::exit_work_init::{EXIT_SYSCALL, exit_work, set_exit_work_hooks};
 
 /// The syscall exit's call into [`exit_work`].
 ///
@@ -265,48 +248,6 @@ unsafe extern "C" fn vibeos_exit_work(kind: u64, frame: *mut UserFrame) {
     // established by `syscall_init::vibeos_syscall_entry` or
     // `thread_init::spawn_user`.
     exit_work(kind, unsafe { &mut *frame });
-}
-
-/// Exit work on a return to ring 3 (DESIGN §5.10 rule 11): entered with
-/// IF=0 after the exit's `cli`; while the current process has a kill or a
-/// stop pending, turn IF on, act on it (a kill does not return), turn IF
-/// off, and check again. Returns with IF=0 once a check finds none. `kind`
-/// is [`EXIT_SYSCALL`] or the vector whose exit this is.
-pub fn exit_work(kind: u64, frame: &mut UserFrame) {
-    #[cfg(feature = "kernel_tests")]
-    crate::proc::ktest::exit_seen(frame);
-    // Acquire: pairs with the Release stores in `set_exit_work_hooks`.
-    let pending = EXIT_PENDING.load(Ordering::Acquire);
-    // Acquire: pairs with the Release store in `set_exit_work_hooks`.
-    let work = EXIT_WORK.load(Ordering::Acquire);
-    if !pending.is_null() && !work.is_null() {
-        // SAFETY: invariant: non-null hooks hold a `fn() -> bool` and a
-        // `fn(&mut UserFrame)`; established by
-        // `syscall_init::set_exit_work_hooks`, their only stores.
-        let (pending, work) = unsafe {
-            (
-                core::mem::transmute::<*mut (), fn() -> bool>(pending),
-                core::mem::transmute::<*mut (), fn(&mut UserFrame)>(work),
-            )
-        };
-        loop {
-            debug_assert!(!x86::interrupts_enabled(), "exit work check with IF on");
-            if !pending() {
-                break;
-            }
-            #[cfg(feature = "kernel_tests")]
-            crate::proc::ktest::exit_work_found(kind);
-            x86::sti();
-            work(frame);
-            x86::cli();
-        }
-    }
-    #[cfg(feature = "kernel_tests")]
-    if kind == EXIT_SYSCALL {
-        crate::proc::ktest::exit_check_hook(frame);
-    }
-    #[cfg(not(feature = "kernel_tests"))]
-    let _ = kind;
 }
 
 /// The syscall exit's non-canonical-RIP path: kernel stack and GS, IF=0,
@@ -678,11 +619,12 @@ pub unsafe fn switch_fpu(cpu: &mut PerCpu, old: *mut Tcb) {
 pub unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
     if !old.is_null() {
         // SAFETY: invariant I9: `old` is the TCB this CPU is switching
-        // off; `user_tls` is still the outgoing `FS_BASE` because
-        // `switch_now` has not loaded the incoming selectors yet;
-        // established by `thread_init::switch_now`.
+        // off; the live DS, ES, FS and GS are still the ones ring 3 left,
+        // and `user_tls` the outgoing `FS_BASE`, because only the loads
+        // below change them; established by `thread_init::switch_now`.
         unsafe {
             if (*old).pid != 0 {
+                (*old).user_segs = gdt::read_user_segs();
                 (*old).tls_base = crate::arch::current::user_tls();
             }
         }
@@ -699,7 +641,17 @@ pub unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
         unsafe {
             set_rsp0_for(cpu, &*new);
             switch_cr3_for(cpu, &*new);
+        }
+        // SAFETY: invariant I9, as above; IF=0 with `GS_BASE` this CPU's
+        // `PerCpu`, and `user_segs` came from `read_user_segs` on this user
+        // thread or is `UserSegs::NULL`, as `load_user_segs` requires. The
+        // selector load can zero `FS_BASE`, so the base loads after it:
+        // `tls_base` is 0, a user address `setup_tls` chose, or what the
+        // save above read. Established by `thread_init::switch_now` and
+        // `user_init::setup_tls`.
+        unsafe {
             if (*new).pid != 0 {
+                gdt::load_user_segs((*new).user_segs);
                 crate::arch::current::set_user_tls((*new).tls_base);
             }
         }

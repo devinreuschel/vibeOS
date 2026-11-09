@@ -1272,7 +1272,7 @@ fn start_one_aarch64(
         finish_aarch64_failure(cpu_id, hw_id, idle_id, workers, published);
         return StartAp::Failed;
     }
-    let Some(param_pa) = alloc_param_page() else {
+    let Some(param_pa) = crate::paging_init::alloc_zeroed(0) else {
         crate::marker!("vibeOS: smp: apic {hw_id} alloc failed");
         free_live_ap(cpu_id, idle_id, workers, published, false);
         return StartAp::Failed;
@@ -1344,16 +1344,6 @@ fn start_one_aarch64(
     }
     publish_online(cpu_id, &workers);
     StartAp::Online
-}
-
-#[cfg(target_arch = "aarch64")]
-fn alloc_param_page() -> Option<u64> {
-    let f = crate::pmm_init::with_buddy(|b| b.alloc(0))?;
-    let pa = f.into_entry();
-    let va = crate::paging_init::hhdm_offset().wrapping_add(pa);
-    // SAFETY: buddy page, HHDM maps it (I14). established here.
-    unsafe { core::ptr::write_bytes(va as *mut u8, 0, 4096) };
-    Some(pa)
 }
 
 #[cfg(target_arch = "aarch64")]

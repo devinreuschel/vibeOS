@@ -31,6 +31,14 @@ pub use super::x86_64::cpu::{
     user_tls,
 };
 
+/// The unmask a body run from a user-mode exception takes and the mask it
+/// leaves with (DESIGN §2.9 rule 3): IF on x86_64, all of DAIF on aarch64.
+#[cfg(target_arch = "aarch64")]
+pub use super::aarch64::cpu::{daif_clear_all as body_unmask, daif_set_all as body_mask};
+/// As above: on x86_64, `sti` and `cli`.
+#[cfg(target_arch = "x86_64")]
+pub use super::x86_64::cpu::{cli as body_mask, sti as body_unmask};
+
 // The registers the panic path saves for a CPU that stops (DESIGN §2.5
 // step 1): where it is, its frame pointer, and its flags.
 #[cfg(target_arch = "aarch64")]

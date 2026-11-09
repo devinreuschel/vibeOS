@@ -67,7 +67,7 @@ pub use user::{reset_user_segs, set_tls_base, set_user_segs};
 
 // The syscall layer's hooks (DESIGN §1.2), which `syscall_init::init_bsp`
 // sets before the scheduler runs a second thread.
-/// The hardware side of a context switch (FPU, RSP0, CR3):
+/// The hardware side of a context switch (FPU, RSP0, CR3, user TLS base):
 /// `syscall_init::on_switch`. Unset, a switch changes none of them.
 static SWITCH_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
@@ -88,6 +88,21 @@ unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
     // Acquire: pairs with the Release store in `set_switch_hooks`.
     let p = SWITCH_HOOK.load(Ordering::Acquire);
     if p.is_null() {
+        // Unset only before `syscall_init::init_bsp`, when no user thread
+        // exists: the hook is the one owner of the user TLS base and
+        // selectors (DESIGN §7.5), so a user thread switched without it
+        // would keep another thread's.
+        #[cfg(debug_assertions)]
+        {
+            // SAFETY: invariant I9: `old` and `new` are null or live TCBs,
+            // as this fn's `# Safety` states; established by
+            // `thread_init::switch_now`.
+            let (old, new) = unsafe { (old.as_ref(), new.as_ref()) };
+            debug_assert!(
+                old.is_none_or(|t| t.pid == 0) && new.is_none_or(|t| t.pid == 0),
+                "context switch of a user thread before the switch hook"
+            );
+        }
         return;
     }
     // SAFETY: invariant: a non-null `SWITCH_HOOK` holds an
@@ -683,21 +698,9 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
             );
             per_cpu_init::set_current_thread(cpu, new_ptr);
             (*new_ptr).on_cpu.set();
-            // A user thread's ring-3 DS, ES, FS and GS (DESIGN §7.5). Save
-            // the outgoing TLS base before `on_switch` and before a
-            // selector load, which can zero `FS_BASE`.
-            if (*old_ptr).pid != 0 {
-                (*old_ptr).user_segs = crate::arch::gdt::read_user_segs();
-                (*old_ptr).tls_base = crate::arch::current::user_tls();
-            }
+            // The port's hardware side, the user TLS base and x86_64's
+            // selectors included (DESIGN §7.5).
             on_switch(cpu, old_ptr, new_ptr);
-            if (*new_ptr).pid != 0 {
-                crate::arch::gdt::load_user_segs((*new_ptr).user_segs);
-                // SAFETY: `tls_base` is 0 or the image's thread pointer,
-                // a user address `setup_tls` chose; established by
-                // `user_init::setup_tls` and `on_switch`.
-                crate::arch::current::set_user_tls((*new_ptr).tls_base);
-            }
         }
     });
     // The switch asm turns IF on for a thread whose `irq_nest` is 0.
