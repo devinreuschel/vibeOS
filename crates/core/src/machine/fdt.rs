@@ -712,11 +712,12 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
     if compatible_has(props, b"pci-host-ecam-generic")
         && let Some(r) = reg
     {
-        let (first, last) = prop_named(props, b"bus-range")
-            .and_then(|v| Some((be_u32(v, 0)?, be_u32(v, 4)?)))
-            .map(|(a, b)| (a as u8, b as u8))
-            .unwrap_or((0, 0xff));
-        let segment = u32_prop(props, b"linux,pci-domain").unwrap_or(0) as u16;
+        // A bus or domain number that does not fit the host's field, or a
+        // reversed range, drops the host rather than scanning another one.
+        let Some((first, last, segment)) = ecam_numbers(props) else {
+            d.dropped_pci_hosts = d.dropped_pci_hosts.saturating_add(1);
+            return;
+        };
         let mut host = PciHost {
             segment,
             first_bus: first,
@@ -733,6 +734,28 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
         }
         push_pci(d, host);
     }
+}
+
+/// An ECAM host's `bus-range` (default 0 to 255) and `linux,pci-domain`
+/// (default 0), or `None` when either does not fit or the range is
+/// reversed.
+fn ecam_numbers(props: &[Prop<'_>]) -> Option<(u8, u8, u16)> {
+    let (first, last) = match prop_named(props, b"bus-range") {
+        None => (0, 0xff),
+        Some(v) => {
+            let first = u8::try_from(be_u32(v, 0)?).ok()?;
+            let last = u8::try_from(be_u32(v, 4)?).ok()?;
+            (first, last)
+        }
+    };
+    if first > last {
+        return None;
+    }
+    let segment = match u32_prop(props, b"linux,pci-domain") {
+        None => 0,
+        Some(v) => u16::try_from(v).ok()?,
+    };
+    Some((first, last, segment))
 }
 
 /// Rows past [`MAX_MSI_MAP`] are added to `dropped`.

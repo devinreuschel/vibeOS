@@ -1,0 +1,7 @@
+# Box dependencies and closes rows for Phase 12, in the form of
+# tests/gates/phase-10-needs.toml (docs/ROADMAP.md, How to read this).
+
+[[box]]
+key = "the in-guest tests §11.6 left x86_64-only because their user program is x86_64 machine code"
+closes = ["the portable in-guest tests that `tests/harness/skips.toml` skips on aarch64"]
+why = "the §11.6 deferral box"

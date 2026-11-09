@@ -1363,6 +1363,9 @@ fn wait_secondary_status(param_va: u64) -> u64 {
         // SAFETY: HHDM of this core's param page. established here.
         let s = unsafe { core::ptr::read_volatile(status) };
         if s != vibeos::arch::aarch64::psci::STATUS_NONE {
+            // Acquire: pairs with the stub's `stlr` of the status in
+            // `arch::aarch64::secondary`, its last access to the page.
+            core::sync::atomic::fence(Ordering::Acquire);
             return s;
         }
         if time_init::now_ns().saturating_sub(t0) > READY_TIMEOUT_MS.saturating_mul(1_000_000) {
@@ -1432,6 +1435,7 @@ fn finish_aarch64_failure(
 #[cfg(target_arch = "aarch64")]
 extern "C" fn ap_entry_aarch64(cpu: *mut PerCpu) -> ! {
     arch::aarch64::cpu::cli();
+    arch::aarch64::cpu::note_cache();
     arch::aarch64::cpu::set_pan();
     arch::aarch64::cpu::clear_tpidrro_el0();
     // SAFETY: `cpu` is this AP's slot; the BSP's `with_cpu` ended before

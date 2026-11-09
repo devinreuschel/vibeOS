@@ -490,8 +490,15 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
     // least `layout.total` bytes, which stays allocated beside the queue
     // until the device is reset and it is freed; established by
     // `dma_init::alloc`.
-    let mut vq = unsafe {
+    let vq = unsafe {
         arch::current::SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0)
+    };
+    let mut vq = match vq {
+        Ok(vq) => vq,
+        Err(e) => {
+            fail_probe(dev, common, Some(irq), [Some(qdma), Some(data)]);
+            return Err(e);
+        }
     };
     vq.init();
     qdma.sync_for_device::<Arch>();

@@ -702,3 +702,41 @@ fn checked_in_trees_drop_and_refuse_nothing() {
     // QEMU virt's PCI map is 16 rows of ten cells, as the fixture holds.
     assert_eq!(parse(VIRT_82).unwrap().pci_hosts()[0].interrupt_map_len, 16);
 }
+
+fn ecam_host(extra: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut t = root_2_2();
+    t.begin("pcie@10000000");
+    t.prop("compatible", b"pci-host-ecam-generic\0");
+    t.prop("reg", &be(&[0, 0x1000_0000, 0, 0x1000_0000]));
+    for (name, value) in extra {
+        t.prop(name, value);
+    }
+    t.end();
+    t.end();
+    t.finish()
+}
+
+#[test]
+fn ecam_numbers_that_do_not_fit_drop_the_host() {
+    let d = parse(&ecam_host(&[])).unwrap();
+    let h = &d.pci_hosts()[0];
+    assert_eq!((h.first_bus, h.last_bus, h.segment), (0, 0xff, 0));
+    let d = parse(&ecam_host(&[
+        ("bus-range", be(&[0x10, 0x1f])),
+        ("linux,pci-domain", be(&[0xffff])),
+    ]))
+    .unwrap();
+    let h = &d.pci_hosts()[0];
+    assert_eq!((h.first_bus, h.last_bus, h.segment), (0x10, 0x1f, 0xffff));
+    for extra in [
+        vec![("bus-range", be(&[0, 0x100]))],
+        vec![("bus-range", be(&[0x100, 0x1ff]))],
+        vec![("bus-range", be(&[0x20, 0x10]))],
+        vec![("bus-range", be(&[0]))],
+        vec![("linux,pci-domain", be(&[0x1_0000]))],
+    ] {
+        let d = parse(&ecam_host(&extra)).unwrap();
+        assert!(d.pci_hosts().is_empty(), "{extra:?}");
+        assert_eq!(d.dropped_pci_hosts, 1, "{extra:?}");
+    }
+}

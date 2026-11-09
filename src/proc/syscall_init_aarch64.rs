@@ -424,6 +424,12 @@ pub fn elr_ok(pc: u64) -> bool {
     pc < USER_MAP_END && pc & USER_TAG_MASK == 0
 }
 
+/// Whether `frame` may be loaded into `ELR_EL1` and `SPSR_EL1` for a
+/// return to EL0: [`elr_ok`] and `trap::el0_pstate_ok`.
+pub fn return_ok(frame: &UserFrame) -> bool {
+    elr_ok(frame.pc) && vibeos::arch::aarch64::trap::el0_pstate_ok(frame.pstate)
+}
+
 #[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -614,6 +620,7 @@ pub(crate) mod testing {
     }
 
     static BAD_ELR: AtomicBool = AtomicBool::new(false);
+    static BAD_PSTATE: AtomicBool = AtomicBool::new(false);
 
     /// The next return to EL0 writes `ELR_EL1` = 2^48 (ROADMAP §11.6).
     pub(crate) fn arm_bad_elr() {
@@ -624,6 +631,17 @@ pub(crate) mod testing {
     pub(crate) fn take_bad_elr() -> bool {
         // AcqRel: pairs with the Release store in `arm_bad_elr`.
         BAD_ELR.swap(false, Ordering::AcqRel)
+    }
+
+    /// The next return to EL0 writes `SPSR_EL1.M` = EL1h.
+    pub(crate) fn arm_bad_pstate() {
+        // Release: pairs with the AcqRel swap in `take_bad_pstate`.
+        BAD_PSTATE.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn take_bad_pstate() -> bool {
+        // AcqRel: pairs with the Release store in `arm_bad_pstate`.
+        BAD_PSTATE.swap(false, Ordering::AcqRel)
     }
 
     fn vibeos_el0_eret_addr() -> u64 {

@@ -902,7 +902,7 @@ pub fn try_user_fault(f: &TrapFrame) {
 #[cfg(all(target_arch = "aarch64", feature = "kernel_tests"))]
 pub(crate) use exit::BAD_ELR_KILLS;
 #[cfg(target_arch = "aarch64")]
-pub use exit::{kill_bad_elr, try_user_trap};
+pub use exit::{kill_bad_return, try_user_trap};
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
 #[cfg(feature = "kernel_tests")]

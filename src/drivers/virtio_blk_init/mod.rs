@@ -403,8 +403,15 @@ fn setup(
         // least `layout.total` bytes, which stays allocated beside the queue
         // until the device is reset and it is freed; established by
         // `dma_init::alloc`.
-        let mut vq = unsafe {
+        let vq = unsafe {
             arch::current::SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0)
+        };
+        let mut vq = match vq {
+            Ok(vq) => vq,
+            Err(e) => {
+                fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, Some(qdma));
+                return Err(e);
+            }
         };
         vq.init();
         qdma.sync_for_device::<Arch>();
@@ -587,7 +594,17 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
     let mut vqs: [Option<Vq>; MAX_VQ] = [const { None }; MAX_VQ];
     crate::virtio_mmio_init::set_status(base, STATUS_ACKNOWLEDGE);
     crate::virtio_mmio_init::set_status(base, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
-    let device_feat = crate::virtio_mmio_init::read_features(base);
+    // The config is read no further than the DT window covers, as the PCI
+    // path bounds it by the device-config capability's length.
+    let window = dev.resources.first().map_or(0, |r| r.size);
+    let cfg_len = window
+        .checked_sub(u64::from(vibeos::virtio::MMIO_OFF_CONFIG))
+        .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX));
+    let Some(device_feat) = fit_config(crate::virtio_mmio_init::read_features(base), cfg_len)
+    else {
+        fail_mmio(base, &[], 0, None, &mut vqs, None);
+        return Err(VirtioError::NoCaps);
+    };
     let feat = match pick_features(device_feat) {
         Ok(f) => f,
         Err(e) => {
@@ -717,8 +734,15 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
         }
         // SAFETY: invariant I53: `qdma` is a page-aligned DMA buffer of at
         // least `layout.total` bytes; established by `dma_init::alloc`.
-        let mut vq = unsafe {
+        let vq = unsafe {
             arch::current::SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0)
+        };
+        let mut vq = match vq {
+            Ok(vq) => vq,
+            Err(e) => {
+                fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, Some(qdma));
+                return Err(e);
+            }
         };
         vq.init();
         qdma.sync_for_device::<Arch>();

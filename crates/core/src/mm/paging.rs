@@ -418,14 +418,17 @@ impl<A: PageTable> Mapper<A> {
         if present {
             match mode {
                 MapMode::Fresh => return Err(MapError::AlreadyMapped),
-                MapMode::Remap => {
+                // Neither replaces a table with a block, nor a block with a
+                // leaf of another size: that would orphan the table, and
+                // break-before-make's last-level TLBI would leave walk-cache
+                // entries through it.
+                MapMode::Remap | MapMode::Invalidate => {
                     let existing_huge = A::entry_flags(existing).contains(PageFlags::HUGE);
                     let want_huge = !matches!(size, PageSize::Size4K);
                     if existing_huge != want_huge {
                         return Err(MapError::PageSizeMismatch);
                     }
                 }
-                MapMode::Invalidate => {}
             }
         }
 

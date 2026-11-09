@@ -136,9 +136,9 @@ pub struct BootInfo {
     /// above frame 0 and below 1 MiB, or `None` when the map has none.
     pub trampoline_page: Option<u64>,
     pub rsdp_phys: u64,
-    /// Flattened device tree, HHDM-mapped, when Limine gave one. Read only
-    /// before `paging_init::install`.
-    pub dtb: Option<&'static [u8]>,
+    /// Flattened device tree as `(HHDM address, totalsize)`, when Limine
+    /// gave one. Its bytes are lent only through [`BootInfo::with_dtb`].
+    dtb: Option<(u64, usize)>,
     memmap: &'static [&'static Entry],
     fb: Option<&'static FramebufferResponse>,
     /// Physical `(base, end)` of each module, in response order; the first
@@ -151,6 +151,23 @@ pub struct BootInfo {
 }
 
 impl BootInfo {
+    /// Lend Limine's DTB bytes to `f`, or `None` when Limine gave none.
+    /// The borrow cannot outlive `f`, so no `'static` slice over firmware
+    /// memory exists (rule 6).
+    ///
+    /// # Safety
+    /// Runs before `pmm_init::init` and `paging_init::install`: until then
+    /// Limine's HHDM maps the blob and nothing has reused its frames.
+    pub unsafe fn with_dtb<R>(&self, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        let (va, len) = self.dtb?;
+        // SAFETY: `(va, len)` is the HHDM span `boot::dtb_span` sized from
+        // the FDT header; it is mapped and unreused before `pmm_init::init`,
+        // which `with_dtb`'s contract requires, established by the caller of
+        // this `unsafe fn`.
+        let bytes = unsafe { core::slice::from_raw_parts(va as *const u8, len) };
+        Some(f(bytes))
+    }
+
     /// USABLE memmap ranges, physical.
     pub fn usable(&self) -> impl Iterator<Item = Range<u64>> {
         self.memmap
@@ -288,8 +305,8 @@ fn capture_cmdline() -> CmdlineBuf {
     buf
 }
 
-/// Limine's DTB, sized from the FDT header `totalsize`.
-fn dtb_bytes() -> Option<&'static [u8]> {
+/// Limine's DTB as `(HHDM address, totalsize)`, sized from the FDT header.
+fn dtb_span() -> Option<(u64, usize)> {
     let resp = DTB.response()?;
     let ptr = resp.dtb_ptr.cast::<u8>();
     if ptr.is_null() {
@@ -297,9 +314,9 @@ fn dtb_bytes() -> Option<&'static [u8]> {
     }
     // SAFETY: Limine's protocol, trusted here (DESIGN §2.10): `dtb_ptr`
     // is an HHDM address of the DTB, mapped until `paging_init::install`
-    // swaps in the RAM-only physmap (a DTB in a non-RAM memmap entry is
-    // unmapped after it). The header is 40 bytes; `totalsize` then names
-    // the rest. Established here.
+    // swaps in the RAM-only physmap, and this runs from `capture`, before
+    // it. The header is 40 bytes; the borrow ends in this function.
+    // Established here.
     let hdr = unsafe { core::slice::from_raw_parts(ptr, 40) };
     let total = {
         let b = hdr.get(4..8).and_then(|s| <[u8; 4]>::try_from(s).ok())?;
@@ -315,9 +332,7 @@ fn dtb_bytes() -> Option<&'static [u8]> {
     if !(40..=2_097_152).contains(&total) {
         return None;
     }
-    // SAFETY: as above, established here: `totalsize` is the blob length
-    // and Limine maps those bytes. The cap is the dumpdtb buffer QEMU uses.
-    Some(unsafe { core::slice::from_raw_parts(ptr, total) })
+    Some((ptr as u64, total))
 }
 
 /// Limine's HHDM offset, before [`capture`]. None if the response is missing.
@@ -365,7 +380,7 @@ pub fn capture() -> &'static BootInfo {
     if rsdp_phys == 0 {
         halt_with("vibeOS: limine: rsdp missing");
     }
-    let dtb = dtb_bytes();
+    let dtb = dtb_span();
     let kernel_len = (&raw const __kernel_vma_end as u64) - (&raw const __kernel_vma_start as u64);
     let (modules, nmod) = module_ranges(hhdm_offset);
     let trampoline_page = vibeos::pmm::choose_trampoline_page(

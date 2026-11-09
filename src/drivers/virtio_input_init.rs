@@ -275,8 +275,15 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<Dev, VirtioError> {
     }
     // SAFETY: invariant I53: `qdma` is a page-aligned DMA buffer of at
     // least `layout.total` bytes; established by `dma_init::alloc`.
-    let mut vq = unsafe {
+    let vq = unsafe {
         arch::current::SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0)
+    };
+    let mut vq = match vq {
+        Ok(vq) => vq,
+        Err(e) => {
+            fail_setup(dev, common, irq_opt(irq_raw), [Some(qdma), Some(data)]);
+            return Err(e);
+        }
     };
     vq.init();
     qdma.sync_for_device::<Arch>();

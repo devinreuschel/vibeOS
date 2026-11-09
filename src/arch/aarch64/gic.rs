@@ -592,10 +592,13 @@ fn eoi(g: &Gic, eoir: u32) {
             unsafe { mmio32w(g.cpu_or_redist, GICC_EOIR, eoir) };
         }
         Kind::V3 => {
-            // SAFETY: ICC_EOIR1_EL1. established here.
+            // SAFETY: ICC_EOIR1_EL1. established here. The `isb` makes the
+            // priority drop take effect before the handler body can unmask
+            // IRQs, as Linux's `gic_eoi_irq` does.
             unsafe {
                 core::arch::asm!(
                     "msr ICC_EOIR1_EL1, {0}",
+                    "isb",
                     in(reg) u64::from(eoir),
                     options(nostack, preserves_flags)
                 );
@@ -648,8 +651,9 @@ fn write_sgi1r(val: u64) {
     }
 }
 
+/// SGI to the calling CPU.
 pub fn send_sgi(intid: u32) {
-    send_sgi_to(0, intid);
+    send_sgi_to(crate::arch::aarch64::percpu::cpu_id_hint(), intid);
 }
 
 /// SGI to logical CPU `cpu` (its `PerCpuRemote.apic_id` is the MPIDR).
@@ -792,6 +796,10 @@ pub fn set_spi_edge(intid: u32, edge: bool) {
         return;
     }
     enable_intid(g, intid, false);
+    // The ICFGR write needs the disable to have landed (GICD_CTLR.RWP,
+    // which reads 0 on GICv2).
+    // SAFETY: GICD_CTLR of the mapped distributor. established here.
+    unsafe { wait_rwp(g.dist, GICD_CTLR, GICD_CTLR_RWP, "gicd icenabler") };
     let off = GICD_ICFGR + u64::from(intid / 16) * 4;
     let shift = (intid % 16) * 2;
     let bits = if edge { GICD_ICFGR_EDGE } else { 0 };

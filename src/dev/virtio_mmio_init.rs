@@ -152,7 +152,10 @@ pub fn publish() {
     while i < n {
         let m = desc.virtio_mmio[i];
         i = i.saturating_add(1);
-        if m.size == 0 {
+        // The register block runs to `MMIO_OFF_CONFIG`, where the device
+        // config starts; a smaller window would put the queue registers
+        // on whatever follows it.
+        if m.size <= u64::from(MMIO_OFF_CONFIG) {
             continue;
         }
         let Some(vid) = peek(m.base, m.size) else {

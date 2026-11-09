@@ -91,7 +91,7 @@ fn queue(layout: SplitLayout, base: *mut u8, event_idx: bool) -> SplitQueue<Stub
     // SAFETY: invariant I53: every test passes a 16-byte-aligned `pool`
     // buffer of at least `layout.total` bytes, which it keeps alive
     // while it uses the queue; established here, by each caller.
-    unsafe { SplitQueue::new(layout, base, event_idx) }
+    unsafe { SplitQueue::new(layout, base, event_idx) }.unwrap()
 }
 
 #[test]
@@ -484,8 +484,43 @@ fn assert_free_list_sane(q: &SplitQueue<Stub>, want_free: u16) {
     for _ in 0..want_free {
         assert!(!seen[i as usize], "descriptor {i} listed twice");
         seen[i as usize] = true;
-        i = q.desc_next(i);
+        i = q.link_of(i);
     }
+}
+
+/// `a` is completed with its descriptor rewritten to chain to `forged`.
+fn complete_forged(forged_is_live: bool) {
+    let layout = SplitLayout::new(8).unwrap();
+    let (_keep, base) = pool(layout.total);
+    let mut q = queue(layout, base, false);
+    q.init();
+    let a = q.add(0x1000, 4, DESC_F_WRITE).unwrap();
+    let b = q.add(0x2000, 4, DESC_F_WRITE).unwrap();
+    q.publish();
+    let forged = if forged_is_live { b } else { a };
+    let off = q.layout.desc(a);
+    q.wr16(off + 12, DESC_F_NEXT | DESC_F_WRITE);
+    q.wr16(off + 14, forged);
+    forge_used(&mut q, a as u32);
+    assert_eq!(q.get_used().unwrap().unwrap().id, a);
+    assert_free_list_sane(&q, 7);
+    // `b` is still its own: the next chain does not reuse it.
+    let c = q.add(0x3000, 4, DESC_F_WRITE).unwrap();
+    assert_ne!(c, b);
+    assert_eq!(q.desc_addr(b), 0x2000);
+    forge_used(&mut q, b as u32);
+    assert_eq!(q.get_used().unwrap().unwrap().id, b);
+    assert_free_list_sane(&q, 7);
+}
+
+#[test]
+fn forged_next_to_a_live_head_does_not_free_it() {
+    complete_forged(true);
+}
+
+#[test]
+fn forged_next_to_itself_frees_it_once() {
+    complete_forged(false);
 }
 
 #[test]

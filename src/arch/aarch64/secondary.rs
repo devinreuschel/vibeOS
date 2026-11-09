@@ -133,11 +133,15 @@ global_asm!(
     "    tlbi vmalle1",
     "    dsb nsh",
     "    isb",
-    "    str x19, [x5, #{status}]",
+    // The status store is the stub's last access to the param page (rule
+    // 5): the conduit is loaded first, and `stlr` orders every load above
+    // before it for the boot CPU's Acquire in `wait_secondary_status`.
+    "    ldr x1, [x5, #{hvc}]",
+    "    add x6, x5, #{status}",
+    "    stlr x19, [x6]",
     "    dsb ish",
     "    cmp x19, #{feature}",
     "    b.ne 4f",
-    "    ldr x1, [x5, #{hvc}]",
     "    movz x0, #{cpu_off_lo}",
     "    movk x0, #{cpu_off_hi}, lsl #16",
     "    cbnz x1, 5f",

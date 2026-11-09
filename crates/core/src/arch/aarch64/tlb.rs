@@ -131,6 +131,10 @@ pub enum IcacheOp {
     DsbIsh,
     /// `ic ivau, <va>`, one I-cache line.
     IcIvau,
+    /// `ic ialluis`: the whole I-cache, Inner Shareable. Stands for every
+    /// `IcIvau` when the I-cache is not PIPT, since `ic ivau` through the
+    /// physmap alias need not reach the lines the user VA indexes.
+    IcIalluis,
     Isb,
 }
 
@@ -172,19 +176,48 @@ pub struct CacheInfo {
     pub dline: u64,
     /// Smallest I-cache line, bytes (`IminLine`).
     pub iline: u64,
+    /// `L1Ip` is PIPT (0b11). A VIPT or VPIPT L1 I-cache may alias, so a
+    /// by-VA invalidate through another mapping can miss a line.
+    pub pipt: bool,
 }
 
 impl CacheInfo {
     /// Decode `CTR_EL0` (DDI0487): `IminLine` 3:0 and `DminLine` 19:16 are
-    /// log2 of the line in words, `IDC` is bit 28, `DIC` bit 29.
+    /// log2 of the line in words, `L1Ip` is 15:14, `IDC` is bit 28, `DIC`
+    /// bit 29.
     pub const fn from_ctr(ctr: u64) -> Self {
         Self {
             idc: ctr & (1 << 28) != 0,
             dic: ctr & (1 << 29) != 0,
             dline: 4 << ((ctr >> 16) & 0xF),
             iline: 4 << (ctr & 0xF),
+            pipt: (ctr >> 14) & 0b11 == 0b11,
         }
     }
+}
+
+/// The `CTR_EL0` fields [`CacheInfo::from_ctr`] reads, each at the value
+/// that makes no claim: the largest line counts, PIPT, IDC and DIC set.
+/// [`ctr_meet`] of it and any `ctr` is that `ctr`'s fields.
+pub const CTR_MEET_TOP: u64 = 0xF | (0b11 << 14) | (0xF << 16) | (1 << 28) | (1 << 29);
+
+/// Two CPUs' `CTR_EL0` as one that holds for both, the fields
+/// [`CacheInfo::from_ctr`] reads only: the smaller `IminLine` and
+/// `DminLine`, PIPT only when both are, and `IDC` and `DIC` only when both
+/// set them, as Linux sanitises `CTR_EL0` across CPUs.
+pub const fn ctr_meet(a: u64, b: u64) -> u64 {
+    const fn min(x: u64, y: u64) -> u64 {
+        if x < y { x } else { y }
+    }
+    let iline = min(a & 0xF, b & 0xF);
+    let dline = min((a >> 16) & 0xF, (b >> 16) & 0xF);
+    let l1ip = if (a >> 14) & 0b11 == 0b11 && (b >> 14) & 0b11 == 0b11 {
+        0b11
+    } else {
+        0b10
+    };
+    let bits = a & b & ((1 << 28) | (1 << 29));
+    iline | (l1ip << 14) | (dline << 16) | bits
 }
 
 /// Every `line`-byte line (a power of two) that `[start, start+len)`
@@ -208,8 +241,9 @@ pub fn sync_range(info: CacheInfo, start: u64, len: u64, mut run: impl FnMut(Ica
     for &op in &ops[..n] {
         match op {
             IcacheOp::DcCvau => lines(start, len, info.dline).for_each(|va| run(op, va)),
+            IcacheOp::IcIvau if !info.pipt => run(IcacheOp::IcIalluis, 0),
             IcacheOp::IcIvau => lines(start, len, info.iline).for_each(|va| run(op, va)),
-            IcacheOp::DsbIsh | IcacheOp::Isb => run(op, 0),
+            IcacheOp::IcIalluis | IcacheOp::DsbIsh | IcacheOp::Isb => run(op, 0),
         }
     }
 }
@@ -343,16 +377,23 @@ mod tests {
                 idc: true,
                 dic: false,
                 dline: 64,
-                iline: 64
+                iline: 64,
+                pipt: false,
             }
         );
         let c = CacheInfo::from_ctr(0x0003_0002 | (1 << 29));
         assert_eq!((c.idc, c.dic, c.dline, c.iline), (false, true, 32, 16));
         // QEMU max reads 0x8444c004: DminLine 4, IminLine 4, no IDC/DIC.
         let c = CacheInfo::from_ctr(0x8444_C004);
-        assert_eq!((c.idc, c.dic, c.dline, c.iline), (false, false, 64, 64));
-        // Reset value: 4-byte lines, the conservative floor.
+        assert_eq!(
+            (c.idc, c.dic, c.dline, c.iline, c.pipt),
+            (false, false, 64, 64, true)
+        );
+        // L1Ip VIPT (0b10), as a Cortex-A53 reads.
+        assert!(!CacheInfo::from_ctr(0x8444_8004).pipt);
+        // Reset value: 4-byte lines and no PIPT claim, the conservative floor.
         assert_eq!(CacheInfo::from_ctr(0).dline, 4);
+        assert!(!CacheInfo::from_ctr(0).pipt);
     }
 
     #[test]
@@ -392,6 +433,7 @@ mod tests {
             dic: false,
             dline: 64,
             iline: 16,
+            pipt: true,
         };
         let r = recorded(info, 0x2000, 0x1000);
         let dc = r.iter().filter(|e| e.0 == IcacheOp::DcCvau).count();
@@ -426,6 +468,7 @@ mod tests {
             dic: false,
             dline: 64,
             iline: 64,
+            pipt: true,
         };
         let r = recorded(info, 0x2000, 0x1000);
         assert!(r.iter().all(|e| e.0 != IcacheOp::DcCvau));
@@ -441,6 +484,47 @@ mod tests {
             r,
             [
                 (IcacheOp::DsbIsh, 0),
+                (IcacheOp::DsbIsh, 0),
+                (IcacheOp::Isb, 0)
+            ]
+        );
+    }
+
+    #[test]
+    fn ctr_meet_keeps_what_holds_for_both() {
+        let qemu = 0x8444_C004;
+        assert_eq!(
+            CacheInfo::from_ctr(ctr_meet(CTR_MEET_TOP, qemu)),
+            CacheInfo::from_ctr(qemu)
+        );
+        // Smaller lines and a VIPT I-cache on one CPU win.
+        let small_vipt = 0x0003_8002 | (1 << 28) | (1 << 29);
+        let both = CacheInfo::from_ctr(ctr_meet(qemu | (1 << 29), small_vipt));
+        assert_eq!(
+            (both.iline, both.dline, both.pipt, both.idc, both.dic),
+            (16, 32, false, false, true)
+        );
+        assert_eq!(ctr_meet(qemu, small_vipt), ctr_meet(small_vipt, qemu));
+    }
+
+    #[test]
+    fn sync_range_invalidates_all_on_an_aliasing_icache() {
+        let info = CacheInfo {
+            idc: false,
+            dic: false,
+            dline: 64,
+            iline: 64,
+            pipt: false,
+        };
+        let r = recorded(info, 0x2000, 0x1000);
+        assert!(r.iter().all(|e| e.0 != IcacheOp::IcIvau));
+        assert_eq!(r.iter().filter(|e| e.0 == IcacheOp::DcCvau).count(), 64);
+        let tail: std::vec::Vec<_> = r.iter().skip(64).copied().collect();
+        assert_eq!(
+            tail,
+            [
+                (IcacheOp::DsbIsh, 0),
+                (IcacheOp::IcIalluis, 0),
                 (IcacheOp::DsbIsh, 0),
                 (IcacheOp::Isb, 0)
             ]

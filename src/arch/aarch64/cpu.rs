@@ -17,7 +17,10 @@ use crate::cell::BootCell;
 const DAIF_I: u64 = 1 << 7;
 
 static EL2_VHE: BootCell<bool> = BootCell::new();
-static CACHE: BootCell<tlb::CacheInfo> = BootCell::new();
+/// Every noted CPU's `CTR_EL0` as one ([`tlb::ctr_meet`]).
+static CTR: AtomicU64 = AtomicU64::new(tlb::CTR_MEET_TOP);
+/// A CPU has met its `CTR_EL0` into [`CTR`].
+static CTR_NOTED: AtomicBool = AtomicBool::new(false);
 static ISA_OK: AtomicBool = AtomicBool::new(false);
 static OVERFLOW_SP: AtomicU64 = AtomicU64::new(0);
 
@@ -84,14 +87,30 @@ pub fn note_exception_level() {
     }
 }
 
-/// Read `CTR_EL0` for [`sync_icache`]. The BSP's value stands for every
-/// CPU, as on a part whose cores share line sizes.
+/// Meet this CPU's `CTR_EL0` into what [`sync_icache`] uses. Each CPU
+/// runs it before it can run user code, so a core with smaller lines or an
+/// aliasing I-cache is covered on a part whose cores differ.
 pub fn note_cache() {
     let ctr: u64;
     // SAFETY: `CTR_EL0` is readable at EL1; established here.
     unsafe { asm!("mrs {0}, CTR_EL0", out(reg) ctr, options(nomem, nostack, preserves_flags)) };
-    // SAFETY: I22, one write on the BSP before SMP; established here.
-    unsafe { CACHE.set(tlb::CacheInfo::from_ctr(ctr)) };
+    // Acquire: pairs with the AcqRel exchange below on another CPU.
+    let mut cur = CTR.load(Ordering::Acquire);
+    loop {
+        // AcqRel: pairs with the Acquire load in `sync_icache`, and with
+        // another CPU's exchange here.
+        match CTR.compare_exchange_weak(
+            cur,
+            tlb::ctr_meet(cur, ctr),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(seen) => cur = seen,
+        }
+    }
+    // Release: pairs with the Acquire load in `sync_icache`.
+    CTR_NOTED.store(true, Ordering::Release);
 }
 
 /// Make `[start, start+len)`, written through the data side, fetchable by
@@ -101,10 +120,15 @@ pub fn note_cache() {
 /// # Safety
 /// `[start, start+len)` is mapped, readable memory.
 pub unsafe fn sync_icache(start: u64, len: u64) {
-    let info = CACHE
-        .try_get()
-        .copied()
-        .unwrap_or(tlb::CacheInfo::from_ctr(0));
+    // Acquire: pairs with the Release store of `CTR_NOTED` in `note_cache`.
+    let noted = CTR_NOTED.load(Ordering::Acquire);
+    let info = if noted {
+        // Acquire: pairs with the AcqRel update of `CTR` in `note_cache`.
+        let ctr = CTR.load(Ordering::Acquire);
+        tlb::CacheInfo::from_ctr(ctr)
+    } else {
+        tlb::CacheInfo::from_ctr(0)
+    };
     tlb::sync_range(info, start, len, |op, va| {
         // SAFETY: EL1 cache maintenance by VA; `va` is a line of the mapped
         // range `sync_icache`'s contract names, established by
@@ -117,6 +141,7 @@ pub unsafe fn sync_icache(start: u64, len: u64) {
                 tlb::IcacheOp::IcIvau => {
                     asm!("ic ivau, {0}", in(reg) va, options(nostack, preserves_flags))
                 }
+                tlb::IcacheOp::IcIalluis => asm!("ic ialluis", options(nostack, preserves_flags)),
                 tlb::IcacheOp::DsbIsh => asm!("dsb ish", options(nostack, preserves_flags)),
                 tlb::IcacheOp::Isb => asm!("isb", options(nostack, preserves_flags)),
             }

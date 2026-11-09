@@ -154,9 +154,8 @@ global_asm!(
     // and EL0 is AArch64 only (PORTABILITY §11.5 rule 1). They dump and halt
     // without the IRQ, uaccess, or ring-3 paths. Slots 12 to 15 (lower EL,
     // AArch32) halt only while the kernel never ERETs with SPSR.M[4]=1, which
-    // holds because `PSTATE_EL0T` starts every user frame (`UserFrame::new_user`
-    // in crates/core/src/arch/aarch64/trap.rs). A path that copies pstate from
-    // user memory must keep that property.
+    // holds because `vibeos_el0_exit` kills a frame that `trap::el0_pstate_ok`
+    // refuses before it writes SPSR_EL1.
     ".macro vibeos_slot_halt n",
     "    vibeos_swap_sp_x0",
     "    sub x0, x0, #{frame}",
@@ -711,8 +710,13 @@ extern "C" fn vibeos_el0_exit(frame: &mut UserFrame) {
     if crate::syscall_init::testing::eret_breakpoint_armed() {
         crate::syscall_init::testing::note_exit_target(frame.pc, frame.pstate);
     }
-    if !crate::syscall_init::elr_ok(frame.pc) {
-        crate::proc_init::kill_bad_elr(frame.pc);
+    #[cfg(feature = "kernel_tests")]
+    if crate::syscall_init::testing::take_bad_pstate() {
+        // M[3:0] = 0b0101, EL1h.
+        frame.pstate = 0b0101;
+    }
+    if !crate::syscall_init::return_ok(frame) {
+        crate::proc_init::kill_bad_return(frame.pc, frame.pstate);
     }
     // SAFETY: `frame` is this thread's user frame at the top of its
     // kernel stack; DAIF is all set; established here by

@@ -12,6 +12,15 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Added
 
+- aarch64: `make ARCH=aarch64 run` boots QEMU `virt` (TCG, or HVF on Apple Silicon) to the shell
+  with x86_64's markers ([ROADMAP §11.1](docs/ROADMAP.md#111-boot)).
+- aarch64 user mode: `/sbin/init`, `/bin/sh`, and `/bin/tests` run at EL0 on arm64 syscall
+  numbers ([ROADMAP §11.6](docs/ROADMAP.md#116-user-mode)).
+- aarch64 SMP: cores start through PSCI `CPU_ON`; TLB shootdown is broadcast TLBI
+  ([ROADMAP §11.4](docs/ROADMAP.md#114-smp-and-per-cpu)).
+- aarch64 devices: PL011, virtio-mmio and virtio-pci block, virtio input, PL031, `RNDR`, pvpanic
+  ([ROADMAP §11.5](docs/ROADMAP.md#115-devices)).
+- `VIBEOS_MACHINE` and `VIBEOS_FW_AARCH64` pick the aarch64 `-machine` and UEFI firmware.
 - aarch64 per-push CI on arm64 TCG, `make litmus`, and dual README quickstarts
   ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
 - aarch64 boot CPU: GICv2/v3, generic timer, full vector table, idle `wfi`

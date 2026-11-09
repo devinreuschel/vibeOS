@@ -10,6 +10,7 @@ use crate::arch::Barriers;
 use crate::atomic::AtomicU16;
 
 use crate::dma::{self, publish_index};
+use crate::kalloc::TryBox;
 use crate::limits::MAX_VIRTQ_SIZE;
 use crate::pci::{
     self, Bdf, CAP_VENDOR, CFG_CAP_PTR, CFG_STATUS, CfgIo, MAX_CAP_WALK, STATUS_CAPS,
@@ -536,6 +537,19 @@ struct RingPtr(*mut u8);
 // access with it; established by `virtio::SplitQueue::new`.
 unsafe impl Send for RingPtr {}
 
+// `Shadow::link` holds an index in a byte.
+const _: () = assert!(MAX_VIRTQ_SIZE <= 256);
+
+/// A [`SplitQueue`]'s guest-only copy of each descriptor's next. The
+/// table's own `next` and `flags` are device-visible, so freeing and
+/// allocating walk this instead.
+struct Shadow {
+    /// Indices fit a byte, since a queue holds at most `MAX_VIRTQ_SIZE`.
+    link: [u8; MAX_VIRTQ_SIZE as usize],
+    /// Whether a chain continues past each descriptor, set by `add_chain`.
+    has_next: [u64; MAX_VIRTQ_SIZE as usize / 64],
+}
+
 /// Split VQ over a caller-owned DMA / sim buffer. `A` is the port whose
 /// [`Barriers`] order the ring against the device.
 pub struct SplitQueue<A: Barriers> {
@@ -547,6 +561,12 @@ pub struct SplitQueue<A: Barriers> {
     /// Chain heads handed to the device and not yet completed. Guest memory
     /// only, so a device cannot forge it.
     inflight: [u64; MAX_VIRTQ_SIZE as usize / 64],
+    /// Each descriptor's next, for the free list and for chains. The
+    /// table's own `next` and `flags` are device-visible, so freeing and
+    /// allocating walk this guest-only copy (as Linux's `desc_extra`).
+    /// Guest-only descriptor links, on the heap so a queue array in a
+    /// driver's probe frame stays small (as Linux's `desc_extra` is).
+    shadow: TryBox<Shadow>,
     /// A bad completion was seen; `get_used` fails until `init`.
     broken: bool,
     pub event_idx: bool,
@@ -562,19 +582,30 @@ impl<A: Barriers> SplitQueue<A> {
     /// Invariant I53: `base` is 16-byte aligned and valid for volatile
     /// reads and writes of `layout.total` bytes for the queue's whole life,
     /// and nothing else reaches that memory but the device the queue serves.
-    pub unsafe fn new(layout: SplitLayout, base: *mut u8, event_idx: bool) -> Self {
-        Self {
+    /// `NoMemory` when the guest-only links cannot be allocated.
+    pub unsafe fn new(
+        layout: SplitLayout,
+        base: *mut u8,
+        event_idx: bool,
+    ) -> Result<Self, VirtioError> {
+        let shadow = TryBox::try_new(Shadow {
+            link: [0; MAX_VIRTQ_SIZE as usize],
+            has_next: [0; MAX_VIRTQ_SIZE as usize / 64],
+        })
+        .map_err(|_| VirtioError::NoMemory)?;
+        Ok(Self {
             layout,
             base: RingPtr(base),
             last_used: 0,
             free_head: 0,
             num_free: layout.size,
             inflight: [0; MAX_VIRTQ_SIZE as usize / 64],
+            shadow,
             broken: false,
             event_idx,
             last_avail: 0,
             _port: PhantomData,
-        }
+        })
     }
 
     // The layout and the cursors are private, with these read accessors,
@@ -663,7 +694,9 @@ impl<A: Barriers> SplitQueue<A> {
             self.wr64(off, 0);
             self.wr32(off + 8, 0);
             self.wr16(off + 12, 0);
-            self.wr16(off + 14, if i + 1 < n { i + 1 } else { 0 });
+            let next = if i + 1 < n { i + 1 } else { 0 };
+            self.wr16(off + 14, next);
+            self.set_link(i, next);
             i += 1;
         }
         self.wr16(self.layout.avail_off, 0);
@@ -675,6 +708,7 @@ impl<A: Barriers> SplitQueue<A> {
         self.free_head = 0;
         self.num_free = n;
         self.inflight = [0; MAX_VIRTQ_SIZE as usize / 64];
+        self.shadow.has_next = [0; MAX_VIRTQ_SIZE as usize / 64];
         self.broken = false;
         self.last_used = 0;
         self.last_avail = 0;
@@ -685,8 +719,7 @@ impl<A: Barriers> SplitQueue<A> {
             return None;
         }
         let i = self.free_head;
-        let next = self.rd16(self.layout.desc(i) + 14);
-        self.free_head = next;
+        self.free_head = self.link_of(i);
         self.num_free -= 1;
         Some(i)
     }
@@ -694,8 +727,38 @@ impl<A: Barriers> SplitQueue<A> {
     fn push_free(&mut self, i: u16) {
         self.wr16(self.layout.desc(i) + 14, self.free_head);
         self.wr16(self.layout.desc(i) + 12, 0);
+        self.set_link(i, self.free_head);
         self.free_head = i;
         self.num_free = self.num_free.saturating_add(1);
+    }
+
+    /// `i`'s guest-only next; 0 for an index past the table.
+    fn link_of(&self, i: u16) -> u16 {
+        u16::from(self.shadow.link.get(i as usize).copied().unwrap_or(0))
+    }
+
+    fn set_link(&mut self, i: u16, next: u16) {
+        // `next < size <= MAX_VIRTQ_SIZE` (256), so it fits a byte.
+        if let (Some(l), Ok(n)) = (self.shadow.link.get_mut(i as usize), u8::try_from(next)) {
+            *l = n;
+        }
+    }
+
+    fn continues(&self, i: u16) -> bool {
+        self.shadow
+            .has_next
+            .get(i as usize / 64)
+            .is_some_and(|w| w & (1 << (i as u32 % 64)) != 0)
+    }
+
+    fn set_continues(&mut self, i: u16, on: bool) {
+        if let Some(w) = self.shadow.has_next.get_mut(i as usize / 64) {
+            if on {
+                *w |= 1 << (i as u32 % 64);
+            } else {
+                *w &= !(1 << (i as u32 % 64));
+            }
+        }
     }
 
     fn write_desc(&self, i: u16, addr: u64, len: u32, flags: u16, next: u16) {
@@ -736,6 +799,8 @@ impl<A: Barriers> SplitQueue<A> {
             };
             let next = if last { 0 } else { ids[i + 1] };
             self.write_desc(ids[i], bufs[i].addr, bufs[i].len, flags, next);
+            self.set_link(ids[i], next);
+            self.set_continues(ids[i], !last);
             i += 1;
         }
         let head = ids[0];
@@ -766,20 +831,22 @@ impl<A: Barriers> SplitQueue<A> {
         was
     }
 
-    /// Free the chain at `i`, an in-flight head below the queue size.
-    fn free_chain(&mut self, mut i: u16) {
-        let cap = self.layout.size;
-        let mut n = 0u16;
-        while n < cap {
-            n += 1;
-            let flags = self.desc_flags(i);
-            let next = self.desc_next(i);
+    /// Free the chain at `head`, an in-flight head below the queue size.
+    /// Walks the guest-only links `add_chain` recorded, never the
+    /// device-visible table, so a device that rewrites a descriptor's
+    /// `next` or `flags` cannot free a descriptor that is still in flight.
+    fn free_chain(&mut self, head: u16) {
+        let mut i = head;
+        // `add_chain` links at most `MAX_CHAIN` descriptors.
+        for _ in 0..MAX_CHAIN {
+            let more = self.continues(i);
+            let next = self.link_of(i);
+            self.set_continues(i, false);
             self.push_free(i);
-            if flags & DESC_F_NEXT == 0 {
+            if !more {
                 break;
             }
-            // The table is device-visible: keep a forged next in range.
-            i = ring_index(next, cap);
+            i = next;
         }
     }
 

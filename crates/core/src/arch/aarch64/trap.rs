@@ -151,6 +151,16 @@ pub struct UserFrame {
 /// EL0t, DAIF clear: `SPSR_EL1` M[3:0] = 0.
 const PSTATE_EL0T: u64 = 0;
 
+/// `SPSR_EL1` M[4:0] (M[4] set is AArch32) and IL, bit 20.
+const PSTATE_MODE_IL: u64 = 0x1F | (1 << 20);
+
+/// Whether `pstate` may be written to `SPSR_EL1` for a return to EL0: the
+/// mode is AArch64 EL0t and IL is clear, so an `eret` cannot enter EL1 or
+/// AArch32 whatever path last wrote the frame (Linux's `valid_user_regs`).
+pub const fn el0_pstate_ok(pstate: u64) -> bool {
+    pstate & PSTATE_MODE_IL == 0
+}
+
 impl UserFrame {
     pub const fn zeroed() -> Self {
         Self {
@@ -305,10 +315,32 @@ mod tests {
     }
 
     #[test]
+    fn el0_pstate_ok_takes_only_aarch64_el0t() {
+        assert!(el0_pstate_ok(0));
+        // NZCV, SS, PAN, and DAIF leave the mode alone.
+        assert!(el0_pstate_ok(0xF000_0000 | (1 << 21) | (1 << 22) | 0x3C0));
+        for m in 1u64..=0x1F {
+            assert!(!el0_pstate_ok(m), "M = {m:#x}");
+        }
+        assert!(!el0_pstate_ok(1 << 20), "IL");
+    }
+
+    #[test]
     fn ring3_action_covers_ecs_0x00_to_0x3f_and_slots() {
+        // Every EL0 synchronous class ends in a signal, the syscall path, or
+        // a step over a trapped `wfi`/`wfe`: a `NotRing3` there would leave
+        // `try_user_trap` to return and the instruction to fault again
+        // forever (rule 3).
         for ec in 0u8..=0x3F {
-            let _ = action(SLOT_LOWER_A64_SYNC, esr(ec));
-            let _ = action(SLOT_CURRENT_SPX_SYNC, esr(ec));
+            let got = action(SLOT_LOWER_A64_SYNC, esr(ec));
+            match ec {
+                0x15 => assert_eq!(got, Ring3Action::Syscall, "ec {ec:#x}"),
+                0x01 => assert_eq!(got, Ring3Action::StepOver, "ec {ec:#x}"),
+                _ => assert!(
+                    matches!(got, Ring3Action::Signal { .. }),
+                    "ec {ec:#x} -> {got:?}"
+                ),
+            }
         }
         for slot in [
             SLOT_CURRENT_SP0_IRQ,

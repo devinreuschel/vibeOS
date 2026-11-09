@@ -917,15 +917,6 @@ user_code!(
     "
 );
 
-user_code!(
-    EL0_EXIT0,
-    "
-    mov x0, #0
-    mov x8, #93
-    svc #0
-    "
-);
-
 // mmap, store, munmap, store. The second store is SIGSEGV. Exit 3 means
 // that store still hit the page.
 user_code!(
@@ -973,7 +964,7 @@ fn exited0(st: u32) -> bool {
     vibeos::proc::wifexited(st) && vibeos::proc::wexitstatus(st) == 0
 }
 
-fn signaled(st: u32, sig: u32) -> bool {
+pub(super) fn signaled(st: u32, sig: u32) -> bool {
     vibeos::proc::wifsignaled(st) && vibeos::proc::wtermsig(st) == sig
 }
 
@@ -1103,43 +1094,6 @@ pub(crate) fn test_el0_munmap_touch() -> Outcome {
         }
         Ok(st) => crate::fail_fmt!("status {st:#x} want SIGSEGV"),
         Err(e) => e,
-    }
-}
-
-/// A saved ELR of 2^48 kills the process with SIGSEGV; the kernel runs.
-pub(crate) fn test_el0_bad_elr() -> Outcome {
-    // Armed before the spawn. The child is pinned to this CPU and made
-    // ready inside `spawn`, so a tick can run it before an arm after the
-    // spawn would land. The hook is one-shot, taken by the next return to
-    // EL0 on any CPU, which here is the child's first.
-    syscall_init::testing::arm_bad_elr();
-    let kills = crate::proc_init::BAD_ELR_KILLS.load(core::sync::atomic::Ordering::Relaxed);
-    let pid = match user::spawn(&Image::Code(EL0_EXIT0, DEFAULT), &["el0_bad_elr"]) {
-        Ok(p) => p,
-        Err(e) => {
-            syscall_init::testing::take_bad_elr();
-            return crate::fail_fmt!("spawn: {}", e.as_str());
-        }
-    };
-    let st = user::wait(pid);
-    // The child's return to EL0 took the hook before it exited. A hook still
-    // armed here never fired, and is taken so a later test does not get it.
-    if syscall_init::testing::take_bad_elr() {
-        return Outcome::Fail("bad elr hook not taken");
-    }
-    // The status is SIGSEGV whether `elr_ok` or the MMU stopped the return,
-    // so the kill is counted: only `kill_bad_elr` moves the counter.
-    if crate::proc_init::BAD_ELR_KILLS
-        .load(core::sync::atomic::Ordering::Relaxed)
-        .wrapping_sub(kills)
-        != 1
-    {
-        return Outcome::Fail("bad elr not killed by elr_ok");
-    }
-    if signaled(st, vibeos::proc::SIGSEGV) {
-        Outcome::Ok
-    } else {
-        crate::fail_fmt!("status {st:#x}")
     }
 }
 
@@ -1414,7 +1368,14 @@ pub(crate) const TESTS: &[Test] = &[
     )
     .deadline(30_000),
     test("el0_ring3_signals", test_el0_ring3_signals),
-    test("el0_bad_elr", test_el0_bad_elr),
+    test(
+        "el0_bad_elr",
+        crate::arch::aarch64::ktest_el0::test_el0_bad_elr,
+    ),
+    test(
+        "el0_bad_pstate",
+        crate::arch::aarch64::ktest_el0::test_el0_bad_pstate,
+    ),
     test("el0_munmap_touch", test_el0_munmap_touch),
     test(
         "el0_tls_survive",
