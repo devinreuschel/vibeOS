@@ -8,8 +8,6 @@ use vibeos::arch::aarch64::sysreg;
 use vibeos::kalloc::TryBox;
 use vibeos::paging::{PageFlags, PhysAddr, VirtAddr};
 
-use crate::pmm_init;
-
 unsafe extern "C" {
     pub(super) fn vibeos_secondary_entry();
     fn vibeos_secondary_end();
@@ -231,15 +229,6 @@ pub fn va_to_pa(va: u64) -> Option<u64> {
     Some(va)
 }
 
-pub(crate) fn alloc_zeroed_page() -> Option<u64> {
-    let f = pmm_init::with_buddy(|b| b.alloc(0))?;
-    let pa = f.into_entry();
-    let va = crate::paging_init::hhdm_offset().wrapping_add(pa);
-    // SAFETY: buddy page, HHDM maps it (I14). established here.
-    unsafe { core::ptr::write_bytes(va as *mut u8, 0, 4096) };
-    Some(pa)
-}
-
 /// # Safety
 /// `root_pa` is a table page the HHDM maps (I14), and no other writer
 /// reaches the returned slot while the caller holds it.
@@ -268,7 +257,7 @@ pub unsafe fn map_va(
     let mut table = l0_pa;
     let mut level = 4u8;
     while level > 1 {
-        // SAFETY: `table` is `l0_pa` or a table `alloc_zeroed_page` gave us,
+        // SAFETY: `table` is `l0_pa` or a table `paging_init::alloc_zeroed` gave us,
         // both HHDM-mapped table pages per map_va's `# Safety`. established here.
         let Some(slot) = (unsafe { table_slot(table, va, level) }) else {
             return false;
@@ -276,7 +265,7 @@ pub unsafe fn map_va(
         // SAFETY: slot in a table we own. established here.
         let cur = unsafe { slot.read() };
         if cur & paging::DESC_VALID == 0 {
-            let Some(next) = alloc_zeroed_page() else {
+            let Some(next) = crate::paging_init::alloc_zeroed(0) else {
                 return false;
             };
             // an untracked table is never cleaned to PoC, so don't link it
@@ -333,8 +322,8 @@ pub(crate) const IDENTITY_TABLES: usize = 16 + 3 * vibeos::acpi::MAX_CPUS;
 /// to PoC before a secondary loads them. None when `tables` is too small.
 /// Paging install calls this before the heap exists.
 pub(crate) fn build_identity_into(pas: &[u64], tables: &mut [u64]) -> Option<(u64, u64, usize)> {
-    let l0 = alloc_zeroed_page()?;
-    let empty = alloc_zeroed_page()?;
+    let l0 = crate::paging_init::alloc_zeroed(0)?;
+    let empty = crate::paging_init::alloc_zeroed(0)?;
     let mut n = 0usize;
     if !paging::track_table(tables, &mut n, l0) || !paging::track_table(tables, &mut n, empty) {
         return None;

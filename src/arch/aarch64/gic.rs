@@ -8,7 +8,7 @@ use vibeos::machine::PhysRange;
 use vibeos::paging::PhysAddr;
 
 use super::gic_common::{
-    CHIP, GICR_TYPER, Gic, Kind, LPI_BASE, LPI_SLOTS, SPI_SLOTS, XBASER_SHARE_IS, alloc_pages,
+    CHIP, GICR_TYPER, Gic, Kind, LPI_BASE, LPI_SLOTS, SPI_SLOTS, XBASER_SHARE_IS,
     clean_table_if_needed, gic, mmio32, mmio32w, mmio64, mmio64w, note_shareability,
 };
 use super::gic_its::{LPI_EVENT, discard_lpi, init_its, its_live, map_collection, movi_lpi};
@@ -69,7 +69,7 @@ const GICR_SYNCR: u64 = 0x00C0;
 /// GICR_PROPBASER / GICR_PENDBASER InnerCache (bits [9:7]): Normal Inner
 /// write-back, read- and write-allocate, `0b111` (IHI 0069).
 const GICR_XBASER_INNER_WB: u64 = (0b11 << 8) | (0b01 << 7);
-/// LPI property and pending tables are 16 pages each (`alloc_pages(16)`).
+/// LPI property and pending tables are 16 pages each (`paging_init::alloc_zeroed(4)`).
 const LPI_TABLE_BYTES: usize = 16 * 4096;
 
 static CHIP_OBJ: GicChip = GicChip;
@@ -433,7 +433,7 @@ unsafe fn enable_lpi(g: &Gic, rd: u64) -> bool {
     let prop = if existing != 0 {
         existing
     } else {
-        let Some(prop) = alloc_pages(16) else {
+        let Some(prop) = crate::paging_init::alloc_zeroed(4) else {
             crate::klog!(Level::Error, "vibeOS: gic: lpi prop table");
             return false;
         };
@@ -463,7 +463,7 @@ unsafe fn enable_lpi(g: &Gic, rd: u64) -> bool {
         }
     };
     // GICR_PENDBASER is 64 KiB-aligned (IHI 0069); 16 pages gives that.
-    let Some(pend) = alloc_pages(16) else {
+    let Some(pend) = crate::paging_init::alloc_zeroed(4) else {
         crate::klog!(Level::Error, "vibeOS: gic: lpi pend table");
         return false;
     };

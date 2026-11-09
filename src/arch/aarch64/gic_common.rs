@@ -111,16 +111,3 @@ pub(super) fn clean_table_if_needed(pa: u64, bytes: usize) {
         crate::arch::aarch64::secondary::clean_poc(va, bytes);
     }
 }
-
-pub(super) fn alloc_pages(pages: usize) -> Option<u64> {
-    let order = pages.trailing_zeros() as u8;
-    if 1usize.checked_shl(u32::from(order))? != pages {
-        return None;
-    }
-    let f = crate::pmm_init::with_buddy(|b| b.alloc(order))?;
-    let pa = f.into_entry();
-    let va = crate::paging_init::hhdm_offset().wrapping_add(pa);
-    // SAFETY: buddy block, HHDM maps it (I14). established here.
-    unsafe { core::ptr::write_bytes(va as *mut u8, 0, pages.saturating_mul(4096)) };
-    Some(pa)
-}

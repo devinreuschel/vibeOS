@@ -683,21 +683,9 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
             );
             per_cpu_init::set_current_thread(cpu, new_ptr);
             (*new_ptr).on_cpu.set();
-            // A user thread's ring-3 DS, ES, FS and GS (DESIGN §7.5). Save
-            // the outgoing TLS base before `on_switch` and before a
-            // selector load, which can zero `FS_BASE`.
-            if (*old_ptr).pid != 0 {
-                (*old_ptr).user_segs = crate::arch::gdt::read_user_segs();
-                (*old_ptr).tls_base = crate::arch::current::user_tls();
-            }
+            // The port's hardware side, the user TLS base and x86_64's
+            // selectors included (DESIGN §7.5).
             on_switch(cpu, old_ptr, new_ptr);
-            if (*new_ptr).pid != 0 {
-                crate::arch::gdt::load_user_segs((*new_ptr).user_segs);
-                // SAFETY: `tls_base` is 0 or the image's thread pointer,
-                // a user address `setup_tls` chose; established by
-                // `user_init::setup_tls` and `on_switch`.
-                crate::arch::current::set_user_tls((*new_ptr).tls_base);
-            }
         }
     });
     // The switch asm turns IF on for a thread whose `irq_nest` is 0.

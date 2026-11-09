@@ -15,48 +15,9 @@ use vibeos::thread::{Fxsave, Tcb, ThreadId};
 use crate::arch::current::{Arch, InterruptGuard};
 use crate::per_cpu_init;
 
-pub const EXIT_SYSCALL: u64 = 0x100;
+pub(crate) use super::exit_work_init::{EXIT_SYSCALL, exit_work, set_exit_work_hooks};
 
 static HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
-static EXIT_PENDING: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
-static EXIT_WORK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
-
-pub fn set_exit_work_hooks(pending: fn() -> bool, work: fn(&mut UserFrame)) {
-    // Release: pairs with the Acquire loads in `exit_work`.
-    EXIT_WORK.store(work as *mut (), Ordering::Release);
-    // Release: pairs with the Acquire load in `exit_work`.
-    EXIT_PENDING.store(pending as *mut (), Ordering::Release);
-}
-
-/// Exit work on a return to EL0 (DESIGN §5.10 rule 11): entered with
-/// DAIF all set; while work is pending, unmask, act, mask, and check
-/// again.
-pub fn exit_work(kind: u64, frame: &mut UserFrame) {
-    // Acquire: pairs with the Release stores in `set_exit_work_hooks`.
-    let pending = EXIT_PENDING.load(Ordering::Acquire);
-    // Acquire: pairs with the Release store in `set_exit_work_hooks`.
-    let work = EXIT_WORK.load(Ordering::Acquire);
-    if !pending.is_null() && !work.is_null() {
-        // SAFETY: invariant: non-null hooks hold a `fn() -> bool` and a
-        // `fn(&mut UserFrame)`; established by
-        // `syscall_init::set_exit_work_hooks`, their only stores.
-        let (pending, work) = unsafe {
-            (
-                core::mem::transmute::<*mut (), fn() -> bool>(pending),
-                core::mem::transmute::<*mut (), fn(&mut UserFrame)>(work),
-            )
-        };
-        loop {
-            if !pending() {
-                break;
-            }
-            crate::arch::aarch64::cpu::daif_clear_all();
-            work(frame);
-            crate::arch::aarch64::cpu::daif_set_all();
-        }
-    }
-    let _ = kind;
-}
 
 /// # Safety
 /// Unused: secondaries load the full VBAR in `vectors::load`.

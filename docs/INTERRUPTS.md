@@ -705,7 +705,10 @@ syscall body after the stub has unmasked IRQs (ROADMAP §11.6).
     the FP check; the work it finds is a kill or a stop (`proc_init::exit_work_pending`), and a
     reschedule runs in the interrupt body (the timer's and the reschedule IPI's), not here. `kill`
     publishes a Term or Stop signal and then kicks the target's CPU (`ipi_init::kick`). In-guest
-    `signal_on_return` and `exit_work_ipi` cover it.
+    `signal_on_return` and `exit_work_ipi` cover it. On aarch64 the same function
+    (`exit_work_init::exit_work`, which both ports' `syscall_init` re-export) runs from
+    `vibeos_el0_exit` after the EL0 return path sets all of DAIF, on every EL0 exception's return,
+    and unmasks all of DAIF for the work, as a syscall body runs.
 12. Signal-handler entry, on both architectures. Delivery saves the interrupted context (the user
     frame above, after any syscall-restart rewind) and its FP state into Linux's signal frame on the
     user stack (ROADMAP §13.8), then rewrites the user frame so the return to user mode enters the

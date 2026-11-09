@@ -50,10 +50,10 @@ pub(crate) fn test_asid_4bit() -> Outcome {
             unsafe { crate::arch::aarch64::cpu::write_ttbr0(saved) };
             return Outcome::Fail("asid deadline");
         }
-        let Some(l0) = crate::arch::aarch64::secondary::alloc_zeroed_page() else {
+        let Some(l0) = crate::paging_init::alloc_zeroed(0) else {
             return Outcome::Fail("asid l0");
         };
-        let Some(data) = crate::arch::aarch64::secondary::alloc_zeroed_page() else {
+        let Some(data) = crate::paging_init::alloc_zeroed(0) else {
             free_pa(l0);
             return Outcome::Fail("asid data");
         };

@@ -98,6 +98,25 @@ fn sym_addr(sym: &u8) -> u64 {
 
 // ------------------ frame allocator glue ------------------
 
+/// A naturally aligned block of `1 << order` frames from the global buddy,
+/// zeroed through the physmap, as the physical address of its first frame:
+/// the caller owns the block and gives it back with
+/// `Frames::from_entry(pa, order)`. `None` when the buddy has no block of
+/// that order. The aarch64 port's boot tables, AP parameter pages, and GIC
+/// tables take theirs here.
+#[cfg(target_arch = "aarch64")]
+pub fn alloc_zeroed(order: u8) -> Option<u64> {
+    let bytes = PAGE_SIZE_4K.checked_shl(u32::from(order))?;
+    let f = pmm_init::with_buddy(|b| b.alloc(order))?;
+    let pa = f.into_entry();
+    let va = hhdm_offset().wrapping_add(pa);
+    // SAFETY: invariant I14: the block is buddy RAM this fn just took and
+    // nothing else names, and the physmap maps every buddy frame writable
+    // at `hhdm_offset()`; established by `paging_init::install`.
+    unsafe { core::ptr::write_bytes(va as *mut u8, 0, bytes as usize) };
+    Some(pa)
+}
+
 /// Adapter: `FrameAlloc` for `paging::Mapper` backed by the global
 /// buddy. Every allocation goes through `pmm_init::with_buddy` so the
 /// same single-CPU safety story applies (DESIGN §7.7 upgrade in phase 4).
