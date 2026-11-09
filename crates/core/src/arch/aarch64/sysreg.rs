@@ -187,6 +187,7 @@ mod tests {
         assert_eq!(t & (1 << 22), 0, "A1");
         assert_ne!(t & (1 << 36), 0, "AS");
         assert_eq!((t >> 30) & 0b11, 0b10, "TG1 4K");
+        assert_eq!((t >> 14) & 0b11, 0b00, "TG0 4K");
         assert_eq!(tcr_el1(false) & (1 << 36), 0);
     }
 
