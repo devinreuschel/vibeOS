@@ -5,9 +5,8 @@
 //! half is the upper 256 slots of the root. `PageFlags` keeps this format's
 //! bit values, so its encoding here is the identity on the flag bits.
 
-use crate::log::vmcore::Machine;
-use crate::log::vmcore::walk::{CoreFormat, Desc};
-use crate::paging::{PageFlags, PhysAddr, VirtAddr};
+use crate::paging::{CoreFormat, Desc, PageFlags, PhysAddr, VirtAddr};
+use crate::proc::elf::EM_X86_64;
 
 /// Levels of the walk, the root being level 4.
 pub const LEVELS: u8 = 4;
@@ -79,7 +78,7 @@ pub const fn is_leaf(entry: u64, level: u8) -> bool {
 pub struct X86_64;
 
 impl CoreFormat for X86_64 {
-    const MACHINE: Machine = Machine::X86_64;
+    const E_MACHINE: u16 = EM_X86_64;
     const LEVELS: u8 = LEVELS;
     const ENTRIES: usize = PTES_PER_TABLE;
     const KERNEL_ROOT_FIRST: usize = KERNEL_PML4_FIRST;

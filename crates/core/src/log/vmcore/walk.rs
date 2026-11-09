@@ -9,60 +9,17 @@
 use core::marker::PhantomData;
 
 use super::{
-    BT_MAX, ET_CORE, Machine, PAGE, PT_NOTE, Phdr, PhysMem, SHDR_SIZE, VmError, add, offset,
-    put_all,
+    BT_MAX, ET_CORE, PAGE, PT_NOTE, Phdr, PhysMem, SHDR_SIZE, VmError, add, offset, put_all,
 };
 use crate::log::backtrace::{self, StackRange};
 use crate::paging::PageFlags;
+pub use crate::paging::{CoreFormat, Desc};
 
 pub use crate::arch::X86_64;
 pub use crate::arch::aarch64::paging::Aarch64Ttbr1;
 use crate::proc::elf::{EHDR_SIZE, ELFCLASS64, ELFDATA2LSB, PHDR_SIZE, PT_LOAD};
 
 // ------------------------------------------------------------------ formats
-
-/// What a table entry at some level does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Desc {
-    /// Not a translation: invalid, or a type the level does not allow.
-    None,
-    /// Points at the next level's table.
-    Table,
-    /// Maps a page or a block of the level's size.
-    Leaf,
-}
-
-/// A kernel page-table format the core tool walks: the pure half of a
-/// port's paging (`arch::<port>::paging`) for the root VMCOREINFO's
-/// `NUMBER(vibeos_pgt_root)` names, and the machine its cores are for.
-pub trait CoreFormat {
-    /// The `e_machine` of the kernel ELF and of the core.
-    const MACHINE: Machine;
-    /// Levels of the walk; the root is level `LEVELS`.
-    const LEVELS: u8;
-    /// Entries in one table.
-    const ENTRIES: usize;
-    /// Root slots `KERNEL_ROOT_FIRST..ENTRIES` map the kernel half.
-    const KERNEL_ROOT_FIRST: usize;
-    /// The VA root slot `KERNEL_ROOT_FIRST` maps first: the kernel half's
-    /// start, and the lowest VA a frame pointer may name.
-    const KERNEL_VA_START: u64;
-    /// The index `va` selects in a table at `level`.
-    fn index(va: u64, level: u8) -> usize;
-    /// What `entry`, read at `level`, does.
-    fn desc(entry: u64, level: u8) -> Desc;
-    /// The physical address `entry` points at.
-    fn entry_phys(entry: u64) -> u64;
-    /// The portable flags of `entry` (`PageFlags`' x86_64 values).
-    fn entry_flags(entry: u64) -> PageFlags;
-    /// Whether the root translates `va`.
-    fn va_ok(va: u64) -> bool;
-    /// A table descriptor for the table at `pa`: what the kernel's mapper
-    /// writes, for the synthetic cores (`synth`).
-    fn table_entry(pa: u64) -> u64;
-    /// A leaf that maps `pa` at `va` with `flags` (`PageFlags` bits).
-    fn leaf_entry(va: u64, pa: u64, flags: u64) -> u64;
-}
 
 /// One run of the kernel's mappings: `len` bytes at `va`, backed by the
 /// core from `pa`.
@@ -332,13 +289,13 @@ pub struct VirtStats {
     pub bytes: u64,
 }
 
-fn virt_header(machine: Machine, phnum: u16) -> [u8; EHDR_SIZE] {
+fn virt_header(e_machine: u16, phnum: u16) -> [u8; EHDR_SIZE] {
     let mut h = [0u8; EHDR_SIZE];
     let ident: [u8; 7] = [0x7F, b'E', b'L', b'F', ELFCLASS64, ELFDATA2LSB, 1];
     let words: [(usize, &[u8]); 9] = [
         (0, &ident),
         (16, &ET_CORE.to_le_bytes()),
-        (18, &machine.em().to_le_bytes()),
+        (18, &e_machine.to_le_bytes()),
         (20, &1u32.to_le_bytes()),
         (0x20, &offset(EHDR_SIZE).to_le_bytes()),
         (0x34, &(EHDR_SIZE as u16).to_le_bytes()),
@@ -377,7 +334,7 @@ pub fn write_virtual_core<M: PhysMem, A: CoreFormat>(
         .checked_add(offset(PHDR_SIZE).saturating_mul(u64::from(phnum)))
         .ok_or(VmError::TooManySegments)?;
     let data_start = round_up(add(heads, note_len)?, PAGE)?;
-    sink(&virt_header(A::MACHINE, phnum))?;
+    sink(&virt_header(A::E_MACHINE, phnum))?;
     let note = Phdr {
         kind: PT_NOTE,
         offset: heads,

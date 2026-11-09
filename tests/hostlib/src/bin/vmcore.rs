@@ -449,11 +449,11 @@ fn report(store: &Store, elf_bytes: &[u8], opts: &Opts) -> Result<Output, Fail> 
 }
 
 fn report_in<A: CoreFormat>(store: &Store, elf_bytes: &[u8], opts: &Opts) -> Result<Output, Fail> {
-    let machine = A::MACHINE;
     let elf = KernelElf::parse(elf_bytes).map_err(|e| other("elf", e))?;
-    if elf.hdr.machine != machine {
+    if elf.hdr.machine.em() != A::E_MACHINE {
         return Err(Fail::Other(VmError::MachineMismatch.as_str().into()));
     }
+    let machine = elf.hdr.machine;
     let elf_id = elf.build_id().map_err(|e| Fail::Other(e.as_str().into()))?;
     let notes: Vec<_> = store.notes.iter().flat_map(|n| Notes::new(n)).collect();
     let vi = Vmcoreinfo::find(notes.iter().copied()).map_err(|_| Fail::NoNote)?;

@@ -6,9 +6,8 @@
 //! output address, Contiguous[52], PXN[53], UXN[54]. `PageFlags` keeps
 //! x86_64's bit values; this module maps them.
 
-use crate::log::vmcore::Machine;
-use crate::log::vmcore::walk::{CoreFormat, Desc};
-use crate::paging::{PageFlags, PhysAddr, VirtAddr};
+use crate::paging::{CoreFormat, Desc, PageFlags, PhysAddr, VirtAddr};
+use crate::proc::elf::EM_AARCH64;
 
 /// Levels of the walk; the root is level 4 (ARM L0).
 pub const LEVELS: u8 = 4;
@@ -197,7 +196,7 @@ pub const fn is_leaf(entry: u64, level: u8) -> bool {
 pub struct Aarch64Ttbr1;
 
 impl CoreFormat for Aarch64Ttbr1 {
-    const MACHINE: Machine = Machine::Aarch64;
+    const E_MACHINE: u16 = EM_AARCH64;
     const LEVELS: u8 = LEVELS;
     const ENTRIES: usize = PTES_PER_TABLE;
     const KERNEL_ROOT_FIRST: usize = 0;

@@ -29,9 +29,7 @@
 use core::fmt;
 
 use crate::log::vmcoreinfo;
-use crate::proc::elf::{
-    EHDR_SIZE, ELFCLASS64, ELFDATA2LSB, EM_AARCH64, EM_X86_64, PHDR_SIZE, PT_LOAD,
-};
+use crate::proc::elf::{EHDR_SIZE, ELFCLASS64, ELFDATA2LSB, PHDR_SIZE, PT_LOAD};
 
 pub use crate::acpi::PhysMem;
 
@@ -72,30 +70,7 @@ const ELFCLASS32: u8 = 1;
 const SHDR_SIZE: usize = 64;
 const SYM_SIZE: usize = 24;
 
-/// The machine an ELF's `e_machine` names: the two ports a core can come
-/// from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Machine {
-    X86_64,
-    Aarch64,
-}
-
-impl Machine {
-    pub const fn from_em(em: u16) -> Option<Machine> {
-        match em {
-            EM_X86_64 => Some(Machine::X86_64),
-            EM_AARCH64 => Some(Machine::Aarch64),
-            _ => None,
-        }
-    }
-
-    pub const fn em(self) -> u16 {
-        match self {
-            Machine::X86_64 => EM_X86_64,
-            Machine::Aarch64 => EM_AARCH64,
-        }
-    }
-}
+pub use crate::proc::elf::Machine;
 
 /// Why the tool refuses a core or an ELF, or cannot decode a table. Each
 /// has one message ([`VmError::as_str`]); the binary adds the values.

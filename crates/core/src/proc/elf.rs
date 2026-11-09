@@ -27,6 +27,31 @@ pub const EM_X86_64: u16 = 62;
 /// `EM_AARCH64` from ELF's `e_machine` (`elf.h`).
 pub const EM_AARCH64: u16 = 183;
 
+/// The machine an ELF's `e_machine` names: the two ports a core can come
+/// from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Machine {
+    X86_64,
+    Aarch64,
+}
+
+impl Machine {
+    pub const fn from_em(em: u16) -> Option<Machine> {
+        match em {
+            EM_X86_64 => Some(Machine::X86_64),
+            EM_AARCH64 => Some(Machine::Aarch64),
+            _ => None,
+        }
+    }
+
+    pub const fn em(self) -> u16 {
+        match self {
+            Machine::X86_64 => EM_X86_64,
+            Machine::Aarch64 => EM_AARCH64,
+        }
+    }
+}
+
 pub const PT_LOAD: u32 = 1;
 pub const PT_INTERP: u32 = 3;
 pub const PT_PHDR: u32 = 6;
