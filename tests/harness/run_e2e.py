@@ -23,6 +23,7 @@ from tests.harness.harness import (
     boot_contract_markers,
     check_el2_boot,
     default_iso,
+    early_fault_markers,
     env_config,
     env_expect_panic,
     env_flag,
@@ -474,11 +475,12 @@ def main(argv: list[str] | None = None) -> int:
     res = results.Results(env.tier, env.arch)
     expect_panic = env_expect_panic()
     gp_test = env_flag("VIBEOS_GP_TEST")
+    early_fault = env_flag("VIBEOS_EARLY_FAULT")
     expect_pit = env_flag("VIBEOS_EXPECT_PIT")
 
     # The panic, `#GP` and panic-variant builds end on QMP `GUEST_PANICKED`,
     # which the kernel's pvpanic write raises after the dump (DESIGN §8.3).
-    expect = "panic" if expect_panic or gp_test or panic_variant else "none"
+    expect = "panic" if expect_panic or gp_test or panic_variant or early_fault else "none"
     cfg = env.qemu(hpet=not expect_pit, expect=expect)
     dump_needles: tuple[str | tuple[str, ...], ...] = ()
     if gp_test:
@@ -496,6 +498,11 @@ def main(argv: list[str] | None = None) -> int:
             ("  0x", "boot_rest"),
             "vibeOS: panic: halted",
         )
+    elif early_fault:
+        # The early handler ends in `panic: halted` and, on x86_64, pvpanic.
+        markers = early_fault_markers(arch=env.arch)
+        expect_panic = True
+        dump_needles = ("vibeOS: panic: early vec=", "vibeOS: panic: halted")
     elif panic_variant:
         markers = boot_contract_markers(
             cpu=env.cpu,
@@ -574,6 +581,15 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         res.record("marker", "gp_backtrace_order", "passed")
         print(f"[e2e]   . backtrace: {' then '.join(GP_FRAMES)}", file=sys.stderr)
+    if early_fault:
+        try:
+            panic_dump.check_early(result.lines, env.arch)
+        except HarnessError as e:
+            res.record("marker", "early_fault_line", "failed")
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        res.record("marker", "early_fault_line", "passed")
+        print("[e2e]   . early handler line ok", file=sys.stderr)
     if panic_variant:
         try:
             PANIC_VARIANTS[panic_variant][1](result.lines)

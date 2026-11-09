@@ -435,14 +435,8 @@ fn write_vbar(v: u64) {
 
 #[unsafe(no_mangle)]
 extern "C" fn vibeos_early_rust(sp: u64, elr: u64, esr: u64, far: u64) -> ! {
-    crate::marker!(
-        "vibeOS: panic: early sp={:#x} elr={:#x} esr={:#x} far={:#x}",
-        sp,
-        elr,
-        esr,
-        far
-    );
-    cpu::halt();
+    // ESR_EL1.EC, bits 31:26, is the exception class.
+    crate::log::panic::early_exception((esr >> 26) & 0x3f, esr, elr, far, sp);
 }
 
 /// Dump and halt for a vector slot no kernel path takes (PORTABILITY §11.5

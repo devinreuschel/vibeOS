@@ -30,6 +30,7 @@ Drivers live in `run_*.py` and must not parse the environment or build argv;
 | `VIBEOS_TIER` | `adhoc`; each `make test-*` recipe sets its target name | all (`results.py`) |
 | `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
 | `VIBEOS_GP_TEST` | off | `run_e2e` |
+| `VIBEOS_EARLY_FAULT` | off | `run_e2e` |
 | `VIBEOS_EXPECT_PIT` | off | `run_e2e` |
 | `VIBEOS_MCE_TEST` | off | `run_e2e` |
 | `VIBEOS_SKIP_PERSIST` | off | `run_ktest` |
@@ -104,10 +105,13 @@ PANIC_EXIT_S = 10.0
 
 # The line that opens a dump, mirroring the headers `src/log/panic.rs` writes:
 # `panic` (the bare `PANIC_BANNER`), `begin_dump`'s `panic: reentered`,
-# `exception_vec`, and `exception_halt` for each kind `src/arch/x86_64/idt.rs`
-# passes it. Anchored at the start, so a `vibeOS: logrec:` replay never counts.
+# `exception_vec`, `exception_halt` for each kind `src/arch/x86_64/idt.rs`
+# passes it, and `early_exception`'s one line, which is the whole of the early
+# handler's report. Anchored at the start, so a `vibeOS: logrec:` replay never
+# counts.
 DUMP_BANNER_RE = re.compile(
     r"^vibeOS: (?:panic:(?: reentered)?$"
+    r"|panic: early vec=0x"
     r"|exception: vector \d+ rip=0x"
     r"|(?:#UD|nmi|#DB|#GP|#PF|#DF|#MC) rip=0x)"
 )
@@ -3078,6 +3082,14 @@ def halt_test_markers(*, arch: str = "x86_64") -> list[Marker]:
     return contract_markers(
         registry.BootConfig(hpet=True, smp=1, lapic_mode="", panic_test=True, arch=arch)
     )
+
+
+def early_fault_markers(*, arch: str = "x86_64") -> list[Marker]:
+    """The markers before the early-fault build's undefined instruction, right
+    after the Limine handshake (ROADMAP §11.1, F136): the panic-test build's
+    rows but its armed line, then the early-fault armed line."""
+    rows = [m for m in halt_test_markers(arch=arch) if m.name != "panic_test_armed"]
+    return [*rows, Marker("vibeOS: boot: early-fault armed", "early_fault_armed")]
 
 
 # gp-test boots all the way through IDT, then a deliberate #GP dumps and

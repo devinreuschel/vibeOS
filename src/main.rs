@@ -168,8 +168,16 @@ pub extern "C" fn _start() -> ! {
         arch::current::halt();
     }
     crate::marker!(marker::LIMINE_OK);
+    // SAFETY: one CPU with IF=0, before `idt::init`, as `idt::init_early`
+    // requires; established here (DESIGN §3.3 boot order).
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        arch::idt::init_early()
+    };
     #[cfg(target_arch = "x86_64")]
     crate::log::pvpanic_init::probe();
+    #[cfg(feature = "early_fault_test")]
+    crate::log::panic_test::early_fault_trip();
 
     // With `--features panic_test`, prove the panic path end to end.
     // Kept before PMM init so the panic path still exercises only the
@@ -287,6 +295,12 @@ fn normal_boot_tail() -> ! {
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: KVA is up (`kva_init::init` above), as `gdt::init_bsp` requires; established here.
     unsafe { arch::gdt::init_bsp() };
+    // SAFETY: one CPU with IF=0, before `idt::init`, as `idt::init_early`
+    // requires; established here. The early gates now name the new GDT's CS.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        arch::idt::init_early()
+    };
     #[cfg(target_arch = "x86_64")]
     crate::marker!(marker::GDT_OK);
 

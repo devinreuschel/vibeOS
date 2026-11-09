@@ -307,6 +307,33 @@ fn dump_backtrace(rip: u64, rbp: u64) {
     walk_known(rip, rbp, print_frame_addr);
 }
 
+/// An exception taken before the full exception setup (ROADMAP §11.1,
+/// F136): one CPU, no threads and no stop IPIs yet, so no dump. One line on
+/// raw serial, `vibeOS: panic: early`, the row both ports share: `vec` is
+/// the x86_64 vector or the aarch64 exception class, `err` the error code
+/// or `ESR`, `pc` the faulting PC, `addr` CR2 or `FAR`, `sp` the
+/// interrupted stack pointer. Then [`finish`]'s halted line, pvpanic where
+/// boot has probed it, and the halt.
+pub fn early_exception(vec: u64, err: u64, pc: u64, addr: u64, sp: u64) -> ! {
+    crate::arch::current::irq_disable();
+    if raw::claim_dump() {
+        let mut buf = [0u8; LINE_CAP];
+        let mut w = StackBuf::new(&mut buf);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "`StackBuf` truncates and never fails, so only a formatter's own error lands here, leaving a shorter line and nothing to act on (DESIGN §2.5)"
+        )]
+        let _ = write!(
+            w,
+            "vibeOS: panic: early vec={vec:#x} err={err:#x} pc={pc:#x} addr={addr:#x} sp={sp:#x}"
+        );
+        w.mark_cut();
+        raw::write_owner(w.as_bytes());
+        finish();
+    }
+    crate::arch::current::halt();
+}
+
 /// The dump's end, then DESIGN §2.5 step 7: pvpanic's panicked event,
 /// written only after the whole dump is on COM1, since the host may pause
 /// or end the guest on it, then the halt.

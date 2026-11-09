@@ -42,6 +42,11 @@ kernel_tests = []
 # Debug: keep the kernel interactive REPL instead of `/sbin/init`.
 # Test-only (AGENTS.md rule 9): no published ISO enables it.
 kernel_shell = []
+# Right after the Limine handshake, raise an undefined instruction so the
+# early exception handler's line is e2e-tested on both architectures
+# (ROADMAP §11.1, F136).
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
+early_fault_test = []
 # After a full boot, trigger a #GP so the dump+halt path is e2e-tested.
 # Test-only (AGENTS.md rule 9): no published ISO enables it.
 gp_test = []
