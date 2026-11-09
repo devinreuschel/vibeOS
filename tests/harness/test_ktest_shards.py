@@ -217,6 +217,7 @@ class ShardTable(unittest.TestCase):
                 "vblk-bad-sector",
                 "stalled-ap",
                 "aff-off",
+                "asid-4bit",
             ],
         )
         self.assertNotIn("aff-off", proof_boot_names(4, False))

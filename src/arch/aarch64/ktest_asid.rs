@@ -2,7 +2,8 @@
 //! processes under the `kernel_tests` 4-bit cap, each writing and checking
 //! a private pattern at one shared VA while its CPU switches among them.
 //!
-//! A boot that selects [`CAP`] runs with 15 usable ASIDs
+//! An opt-in row: the harness's `asid-4bit` proof boot names [`CAP`]
+//! alone, and that boot runs with 15 usable ASIDs
 //! (`arch::aarch64::asid::init_bsp`), so the processes force rollovers on
 //! every CPU while other CPUs run theirs. Each CPU keeps [`PER_CPU`]
 //! processes alive at once and they yield to each other, so a switch goes

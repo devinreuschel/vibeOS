@@ -911,6 +911,15 @@ PROOF_BOOTS: tuple[ProofBoot, ...] = (
         lambda s, _h: s >= 4,
         arches=("aarch64",),
     ),
+    # aarch64 only, at `-smp 4`, on `test-kernel-smp4-5`'s `aarch64_boots`: the ASID box's
+    # 1,000 processes under the 4-bit cap (ROADMAP §11.2).
+    ProofBoot(
+        "asid-4bit",
+        "aarch64 4-bit ASID boot",
+        "_asid_4bit_boot",
+        lambda s, _h: s >= 4,
+        arches=("aarch64",),
+    ),
 )
 
 
@@ -935,6 +944,16 @@ def _stalled_ap_boot(env: EnvConfig) -> None:
     It must park (ROADMAP §11.4, F032).
     """
     _proof_boot(env, "stalled-ap", ktest="stalled_ap_leak", repeat=None)
+
+
+ASID_4BIT_TEST = "asid_procs_4bit"
+
+
+def _asid_4bit_boot(env: EnvConfig) -> None:
+    """`asid_procs_4bit` alone: naming the opt-in row caps ASIDs at 4 bits
+    for the boot, and its 1,000 processes force rollovers (ROADMAP §11.2)."""
+    raw = _single_test_boot(env, ASID_4BIT_TEST, "asid 4-bit")
+    check_select_run(raw.lines, {ASID_4BIT_TEST: 1}, ())
 
 
 def _aff_off_boot(env: EnvConfig) -> None:

@@ -221,8 +221,9 @@ orders the read after the PTE store (`SpaceCtx::flush_page`, Linux arm64's `ASID
 every CPU that holds the space's entries whether or not the unmapping CPU has the space loaded. A
 user VA that reaches the `PageTable` seam, which names no space, is invalidated with `tlbi vaale1is`,
 every ASID.
-A `kernel_tests` boot whose selection runs `asid_procs_4bit` caps the width at 4 bits, 15 usable
-ASIDs, so that test's 1,000 processes force rollovers; TCG drops its soft TLB on every ASID change,
+A `kernel_tests` boot whose `vibeos.ktest=` names `asid_procs_4bit`, an opt-in row that the
+harness's `asid-4bit` proof boot runs alone at `-smp 4`, caps the width at 4 bits, 15 usable ASIDs, so
+that test's 1,000 processes force rollovers, while every other boot keeps the hardware width; TCG drops its soft TLB on every ASID change,
 so the same build keeps each CPU's ASID-to-space pairs since its last flush and counts an alias.
 
 Why: a rollover that only broadcasts a flush is not safe. A CPU still running an address space from

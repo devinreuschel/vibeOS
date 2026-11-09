@@ -1360,7 +1360,8 @@ pub(crate) const TESTS: &[Test] = &[
         "asid_procs_4bit",
         crate::arch::aarch64::ktest_asid::test_asid_procs_4bit,
     )
-    .deadline(180_000),
+    .deadline(180_000)
+    .opt_in(),
     test("tlb_shootdown_remote", test_tlb_shootdown_remote),
     test("per_cpu_identity", test_per_cpu_identity),
     test("percpu_ticks_advance", test_percpu_ticks_advance),

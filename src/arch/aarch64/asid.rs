@@ -24,8 +24,10 @@ use crate::cell::BootCell;
 /// TTBR0's ASID field (`TCR_EL1.A1` clear).
 const ASID_SHIFT: u64 = 48;
 
-/// The in-guest test the `kernel_tests` cap serves: a boot whose
-/// `vibeos.ktest=` selects it runs with [`asid::TEST_CAP_BITS`]-bit ASIDs.
+/// The in-guest test the `kernel_tests` cap serves: an opt-in row, so a
+/// boot runs with [`asid::TEST_CAP_BITS`]-bit ASIDs only when its
+/// `vibeos.ktest=` names the row exactly (the harness's `asid-4bit` proof
+/// boot); every other boot keeps the hardware width.
 #[cfg(feature = "kernel_tests")]
 pub(crate) const CAP_TEST: &str = "asid_procs_4bit";
 
@@ -91,12 +93,12 @@ pub(crate) fn generation() -> u64 {
 }
 
 /// The `kernel_tests` cap: [`asid::TEST_CAP_BITS`] when the boot's
-/// selection runs [`CAP_TEST`].
+/// selection names [`CAP_TEST`], an opt-in row, exactly.
 fn test_cap() -> Option<u32> {
     #[cfg(feature = "kernel_tests")]
     {
         let sel = vibeos::ktest::Selection::parse(crate::boot::cmdline().get("vibeos.ktest"));
-        if sel.selects(CAP_TEST, false) {
+        if sel.selects(CAP_TEST, true) {
             return Some(asid::TEST_CAP_BITS);
         }
     }
