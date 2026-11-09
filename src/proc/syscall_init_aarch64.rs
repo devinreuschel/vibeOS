@@ -39,6 +39,11 @@ pub unsafe fn init_bsp() {
             .store(empty, core::sync::atomic::Ordering::Release);
     });
     if empty != 0 {
+        // A raw write, not `asid::load_ttbr0`: the allocator that load
+        // needs is built just below, from TTBR0 on the empty root, and
+        // `asid::init_bsp` ends with the local flush of whatever the TTBR1
+        // takeover left tagged. An AP needs no such write: its entry stub
+        // loads the empty root and flushes (`arch::aarch64::secondary`).
         // SAFETY: `empty` is the permanent ASID-0 TTBR0 root
         // `paging_init::install` published; established there.
         unsafe { crate::arch::aarch64::cpu::write_ttbr0(empty) };
@@ -47,17 +52,6 @@ pub unsafe fn init_bsp() {
     // SAFETY: invariant I22: the boot CPU, once, before `smp: done` and
     // before any user root loads (this fn's `# Safety`); established here.
     unsafe { crate::arch::aarch64::asid::init_bsp() };
-}
-
-/// # Safety
-/// Secondaries: VBAR is live; this writes the empty TTBR0 root.
-pub unsafe fn init_ap(_tables: *const crate::arch::gdt::CpuTables, _rsp0: u64) {
-    let empty = crate::paging_init::empty_user_root();
-    if empty != 0 {
-        // SAFETY: `empty` is the permanent ASID-0 TTBR0 root
-        // `paging_init::install` published; established there.
-        unsafe { crate::arch::aarch64::cpu::write_ttbr0(empty) };
-    }
 }
 
 /// Save V0–V31, FPCR, and FPSR into `tcb.fpu` (ROADMAP §11.6, F069).

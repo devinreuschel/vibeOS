@@ -491,7 +491,8 @@ fn id_mmfr() -> (u64, u64) {
 }
 
 /// `TTBR0_EL1` each AP held on arrival at `ap_entry_aarch64`, as the
-/// secondary stub left it, before `syscall_init::init_ap` writes it again.
+/// secondary stub left it: the empty user root, which the AP keeps until
+/// its first `asid::load_ttbr0`.
 #[cfg(feature = "kernel_tests")]
 static AP_ENTRY_TTBR0: [core::sync::atomic::AtomicU64; vibeos::acpi::MAX_CPUS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; vibeos::acpi::MAX_CPUS];

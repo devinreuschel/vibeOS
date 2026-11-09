@@ -89,22 +89,70 @@ pub fn note_exception_level() {
     }
 }
 
+/// Why [`note_cache`] refused this CPU: its cache writeback granule breaks
+/// what DMA layouts assume (DESIGN §4.7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CwgRefusal {
+    /// Larger than a page, since a non-coherent device's sub-page region
+    /// is sized in granules inside page-sized blocks.
+    AbovePage,
+    /// Larger than the granule [`freeze_dma_granule`] froze, which drivers
+    /// sized their regions in.
+    AboveFrozen,
+}
+
+impl CwgRefusal {
+    /// The registered failure line the boot CPU prints through
+    /// `serial::raw`; an AP's `marker!` names the same text as a literal,
+    /// which `scripts/check_markers.py` reads.
+    pub const fn line(self) -> &'static str {
+        match self {
+            Self::AbovePage => "vibeOS: cpu: cwg above a page",
+            Self::AboveFrozen => "vibeOS: cpu: cwg above the frozen dma granule",
+        }
+    }
+}
+
+/// Set in [`CTR`] by [`freeze_dma_granule`], in a bit `CTR_EL0` keeps RES0
+/// and [`tlb::ctr_meet`] does not carry, so the freeze and a late CPU's
+/// meet fall in one modification order: a CPU either meets in before the
+/// freeze, and the frozen granule counts it, or sees the bit and is held
+/// to the frozen granule.
+const CTR_FROZEN: u64 = 1 << 63;
+
 /// Meet this CPU's `CTR_EL0` into what [`sync_icache`] uses. Each CPU
 /// runs it before it can run user code, so a core with smaller lines or an
 /// aliasing I-cache is covered on a part whose cores differ.
-pub fn note_cache() {
+///
+/// A refused CPU's `CTR_EL0` never joins the meet; the caller prints
+/// [`CwgRefusal::line`] and parks it. The boot CPU prints through
+/// `serial::raw`, which needs no log path; an AP calls this once its
+/// per-CPU state is installed and prints through `marker!`, whose lines
+/// stay whole across CPUs, and never marks itself ready, so bring-up
+/// treats it as lost (F032).
+pub fn note_cache() -> Result<(), CwgRefusal> {
     let ctr: u64;
     // SAFETY: `CTR_EL0` is readable at EL1; established here.
     unsafe { asm!("mrs {0}, CTR_EL0", out(reg) ctr, options(nomem, nostack, preserves_flags)) };
-    check_cwg(tlb::CacheInfo::from_ctr(ctr).cwg);
-    // Acquire: pairs with the AcqRel exchange below on another CPU.
+    let cwg = tlb::CacheInfo::from_ctr(ctr).cwg;
+    if cwg > vibeos::pmm::PAGE_SIZE {
+        return Err(CwgRefusal::AbovePage);
+    }
+    // Acquire: pairs with the AcqRel exchange below on another CPU and the
+    // AcqRel `fetch_or` in `freeze_dma_granule`.
     let mut cur = CTR.load(Ordering::Acquire);
     loop {
-        // AcqRel: pairs with the Acquire load in `sync_icache`, and with
-        // another CPU's exchange here.
+        let frozen = cur & CTR_FROZEN;
+        if frozen != 0 && cwg > tlb::CacheInfo::from_ctr(cur).cwg {
+            return Err(CwgRefusal::AboveFrozen);
+        }
+        // AcqRel: pairs with the Acquire load in `sync_icache`, with
+        // another CPU's exchange here, and with the AcqRel `fetch_or` in
+        // `freeze_dma_granule`: a freeze between this CPU's load and its
+        // exchange fails the exchange, and the loop sees the bit.
         match CTR.compare_exchange_weak(
             cur,
-            tlb::ctr_meet(cur, ctr),
+            tlb::ctr_meet(cur, ctr) | frozen,
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
@@ -114,36 +162,19 @@ pub fn note_cache() {
     }
     // Release: pairs with the Acquire load in `sync_icache`.
     CTR_NOTED.store(true, Ordering::Release);
-}
-
-/// Refuse this CPU, before its `CTR_EL0` joins the meet, when its cache
-/// writeback granule `cwg` breaks what DMA layouts assume (DESIGN §4.7):
-/// larger than a page, since a non-coherent device's sub-page region is
-/// sized in granules inside page-sized blocks; or, once
-/// [`freeze_dma_granule`] has run, larger than the frozen granule that
-/// drivers sized their regions in. A refused CPU prints a registered line
-/// through `serial::raw`, which needs no log path, and parks; an AP never
-/// marks itself ready, so bring-up treats it as lost (F032).
-fn check_cwg(cwg: u64) {
-    if cwg > vibeos::pmm::PAGE_SIZE {
-        crate::serial::raw::put_boot_line(b"vibeOS: cpu: cwg above a page");
-        halt();
-    }
-    if let Some(&frozen) = DMA_GRANULE.try_get()
-        && cwg > frozen
-    {
-        crate::serial::raw::put_boot_line(b"vibeOS: cpu: cwg above the frozen dma granule");
-        halt();
-    }
+    Ok(())
 }
 
 /// Fix the DMA granule at the meet of every CPU online now, at `smp: done`,
 /// so a CPU that arrives later (a stalled AP, F032) cannot raise it under
-/// regions already sized in it: [`check_cwg`] refuses such a CPU instead.
+/// regions already sized in it: [`note_cache`] refuses such a CPU instead.
 pub fn freeze_dma_granule() {
+    // AcqRel: pairs with the AcqRel exchange in `note_cache` on another
+    // CPU; the meet it returns is the one the bit holds later CPUs to.
+    let meet = CTR.fetch_or(CTR_FROZEN, Ordering::AcqRel);
     // SAFETY: invariant I22: one write, on the BSP in `smp_init::init`
     // right before `smp: done`; established by `smp_init::init`.
-    unsafe { DMA_GRANULE.set(cache_info().cwg) };
+    unsafe { DMA_GRANULE.set(tlb::CacheInfo::from_ctr(meet).cwg) };
 }
 
 /// What every noted CPU's `CTR_EL0` says: [`CTR`] once a CPU has met into
@@ -288,7 +319,8 @@ pub fn log_isa_floor() {
     );
 }
 
-#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+/// Whether the boot CPU passed [`check_isa_floor`]: until then
+/// `panic::early_exception` prints with no atomic read-modify-write.
 pub fn isa_ok() -> bool {
     // Acquire: pairs with the Release store in `check_isa_floor`.
     ISA_OK.load(Ordering::Acquire)
@@ -350,12 +382,6 @@ fn exec_tlb(op: tlb::TlbOp, va_operand: u64) {
             tlb::TlbOp::TlbiVaale1is => {
                 asm!("tlbi vaale1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
             }
-            tlb::TlbOp::TlbiVae1is => {
-                asm!("tlbi vae1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
-            }
-            tlb::TlbOp::TlbiAside1is => {
-                asm!("tlbi aside1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
-            }
             tlb::TlbOp::TlbiAside1 => {
                 asm!("tlbi aside1, {0}", in(reg) va_operand, options(nostack, preserves_flags));
             }
@@ -406,36 +432,45 @@ fn is_kernel_va(va: u64) -> bool {
 /// A kernel VA's entries are global, which every ASID matches, so it runs
 /// `tlb::LEAF_INVAL` with ASID 0; a user VA's could carry any space's ASID,
 /// so it runs `tlb::LEAF_INVAL_ALL_ASIDS`. A caller that knows the space
-/// uses [`tlbi_user_va`].
+/// uses [`tlbi_user_va`]. A user VA's invalidate asserts DESIGN §7.9's
+/// calling contract (`sync_init::assert_tlb_contract`), as every user
+/// invalidate here does.
 /// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
 /// completion of TLB maintenance instructions": herd7 does not model the TLB.
+#[track_caller]
 pub fn tlbi_va(va: u64) {
     if is_kernel_va(va) {
         run_tlb(&tlb::LEAF_INVAL, tlb::tlbi_va_operand(va, 0));
     } else {
+        crate::sync_init::assert_tlb_contract();
         run_tlb(&tlb::LEAF_INVAL_ALL_ASIDS, tlb::tlbi_va_operand(va, 0));
     }
 }
 
 /// Leaf TLB invalidate of user VA `va` in the space whose ASID is `asid`,
-/// on every CPU (Linux arm64's `flush_tlb_page` with `ASID(mm)`). Runs
-/// `tlb::LEAF_INVAL`. Arm ARM DDI0487, "TLB maintenance requirements" and
-/// "Ordering and completion of TLB maintenance instructions": herd7 does not
-/// model the TLB.
+/// on every CPU (Linux arm64's `flush_tlb_page` with `ASID(mm)`), after
+/// asserting DESIGN §7.9's calling contract. Runs `tlb::LEAF_INVAL`. Arm
+/// ARM DDI0487, "TLB maintenance requirements" and "Ordering and completion
+/// of TLB maintenance instructions": herd7 does not model the TLB.
+#[track_caller]
 pub fn tlbi_user_va(va: u64, asid: u16) {
+    crate::sync_init::assert_tlb_contract();
     run_tlb(&tlb::LEAF_INVAL, tlb::tlbi_va_operand(va, asid));
 }
 
 /// Break-before-make maintenance after the invalid store. Runs
 /// `tlb::BBM_AFTER_INVALID` for a kernel VA (global entries, ASID 0) and
 /// `tlb::BBM_AFTER_INVALID_ALL_ASIDS` for a user VA, whose space the seam
-/// does not name.
+/// does not name, after asserting DESIGN §7.9's calling contract for a
+/// user VA.
 /// Arm ARM DDI0487, "Using break-before-make when updating translation
 /// table entries": herd7 does not model the TLB.
+#[track_caller]
 pub(crate) fn bbm_break(va: u64) {
     if is_kernel_va(va) {
         run_tlb(&tlb::BBM_AFTER_INVALID, tlb::tlbi_va_operand(va, 0));
     } else {
+        crate::sync_init::assert_tlb_contract();
         run_tlb(
             &tlb::BBM_AFTER_INVALID_ALL_ASIDS,
             tlb::tlbi_va_operand(va, 0),

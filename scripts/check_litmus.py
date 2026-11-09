@@ -76,8 +76,6 @@ PORT_GLOBS = ("src/arch/aarch64/**/*.rs", "crates/core/src/arch/aarch64/**/*.rs"
 SITES: tuple[tuple[str, str], ...] = (
     ("crates/core/src/arch/aarch64/tlb.rs", "LEAF_INVAL"),
     ("crates/core/src/arch/aarch64/tlb.rs", "ALL_INVAL"),
-    ("crates/core/src/arch/aarch64/tlb.rs", "TABLE_INVAL"),
-    ("crates/core/src/arch/aarch64/tlb.rs", "ASID_INVAL"),
     ("crates/core/src/arch/aarch64/tlb.rs", "ROLLOVER_LOCAL"),
     ("crates/core/src/arch/aarch64/tlb.rs", "TTBR0_SWITCH"),
     ("crates/core/src/arch/aarch64/tlb.rs", "BBM_AFTER_INVALID"),

@@ -1442,7 +1442,6 @@ fn finish_aarch64_failure(
 #[cfg(target_arch = "aarch64")]
 extern "C" fn ap_entry_aarch64(cpu: *mut PerCpu) -> ! {
     arch::aarch64::cpu::cli();
-    arch::aarch64::cpu::note_cache();
     arch::aarch64::cpu::set_pan();
     arch::aarch64::cpu::clear_tpidrro_el0();
     // SAFETY: `cpu` is this AP's slot; the BSP's `with_cpu` ended before
@@ -1456,9 +1455,22 @@ extern "C" fn ap_entry_aarch64(cpu: *mut PerCpu) -> ! {
     // CPU's and still 0 (`mark_live` ran on the BSP).
     per_cpu_init::set_current_thread(cpu, cpu.idle);
     arch::aarch64::vectors::load();
-    // SAFETY: VBAR is live; `crate::syscall_init::init_ap` writes this
-    // CPU's empty TTBR0; established here.
-    unsafe { crate::syscall_init::init_ap(core::ptr::null(), 0) };
+    // Before `ready`, so this CPU's cache lines are in the meet before it
+    // can run user code; after `install_gs`, so a refusal prints through
+    // `marker!`, whose lines stay whole while other CPUs print.
+    if let Err(why) = arch::aarch64::cpu::note_cache() {
+        match why {
+            arch::aarch64::cpu::CwgRefusal::AbovePage => {
+                crate::marker!("vibeOS: cpu: cwg above a page");
+            }
+            arch::aarch64::cpu::CwgRefusal::AboveFrozen => {
+                crate::marker!("vibeOS: cpu: cwg above the frozen dma granule");
+            }
+        }
+        park_lost();
+    }
+    // TTBR0 is already the empty root: the entry stub loaded it and
+    // flushed this CPU's TLB (`arch::aarch64::secondary`).
     arch::aarch64::cpu::release_debug_os_lock();
     arch::aarch64::cpu::print_exception_level();
     // SAFETY: this CPU's GIC; IRQs masked. established here.

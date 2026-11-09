@@ -261,7 +261,8 @@ pub(crate) fn test_stop_cont_no_lost_wakeup() -> Outcome {
 }
 
 // getpid, then exit(0).
-x86_user_code!(
+#[cfg(target_arch = "x86_64")]
+user_code!(
     S19_GETPID_EXIT,
     "
     mov eax, 39
@@ -270,6 +271,20 @@ x86_user_code!(
     mov eax, 60
     syscall
     ud2
+    "
+);
+
+// getpid (172), then exit(0) (93): the generic syscall numbers.
+#[cfg(target_arch = "aarch64")]
+user_code!(
+    S19_GETPID_EXIT,
+    "
+    mov x8, #172
+    svc #0
+    mov x0, #0
+    mov x8, #93
+    svc #0
+    udf #0
     "
 );
 
@@ -521,8 +536,9 @@ fn body_unmap_and_switch(other: u32) -> Result<(), Outcome> {
     Ok(())
 }
 
-/// aarch64's counterpart of `syscall_body_if_on`'s fault half (ROADMAP
-/// §11.3): an EL0 data abort's body yields at its top, after the entry saved
+/// `syscall_body_if_on`'s fault half alone, on aarch64 (ROADMAP §11.3),
+/// where `syscall_body_if_on` runs both halves too: an EL0 data abort's
+/// body yields at its top, after the entry saved
 /// `ESR_EL1` and `FAR_EL1` and unmasked DAIF, to another process's data
 /// abort on the same CPU, and each kill line still names its own `far`.
 #[cfg(target_arch = "aarch64")]

@@ -311,20 +311,31 @@ fn dump_backtrace(rip: u64, rbp: u64) {
 /// or `ESR`, `pc` the faulting PC, `addr` CR2 or `FAR`, `sp` the
 /// interrupted stack pointer. Then [`finish`]'s halted line, pvpanic where
 /// boot has probed it, and the halt.
+///
+/// On aarch64 before `cpu::check_isa_floor` has passed, the CPU may lack
+/// FEAT_LSE, and `claim_dump` and `write_owner` are LSE instructions there,
+/// so the same two lines go out through `raw::put_boot_line`, which runs no
+/// atomic read-modify-write, and the CPU halts: no other CPU runs yet.
 pub fn early_exception(vec: u64, err: u64, pc: u64, addr: u64, sp: u64) -> ! {
     crate::arch::current::irq_disable();
+    let mut buf = [0u8; LINE_CAP];
+    let mut w = StackBuf::new(&mut buf);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "`StackBuf` truncates and never fails, so only a formatter's own error lands here, leaving a shorter line and nothing to act on (DESIGN §2.5)"
+    )]
+    let _ = write!(
+        w,
+        "vibeOS: panic: early vec={vec:#x} err={err:#x} pc={pc:#x} addr={addr:#x} sp={sp:#x}"
+    );
+    w.mark_cut();
+    #[cfg(target_arch = "aarch64")]
+    if !crate::arch::aarch64::cpu::isa_ok() {
+        raw::put_boot_line(w.as_bytes());
+        raw::put_boot_line(b"vibeOS: panic: halted");
+        crate::arch::current::halt();
+    }
     if raw::claim_dump() {
-        let mut buf = [0u8; LINE_CAP];
-        let mut w = StackBuf::new(&mut buf);
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "`StackBuf` truncates and never fails, so only a formatter's own error lands here, leaving a shorter line and nothing to act on (DESIGN §2.5)"
-        )]
-        let _ = write!(
-            w,
-            "vibeOS: panic: early vec={vec:#x} err={err:#x} pc={pc:#x} addr={addr:#x} sp={sp:#x}"
-        );
-        w.mark_cut();
         raw::write_owner(w.as_bytes());
         finish();
     }
