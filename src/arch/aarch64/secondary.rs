@@ -320,17 +320,31 @@ pub unsafe fn map_identity(l0_pa: u64, pa: u64, tables: &mut [u64], n: &mut usiz
 /// tables, and up to three more for each CPU's param page (`map_identity`).
 pub(crate) const IDENTITY_TABLES: usize = 16 + 3 * vibeos::acpi::MAX_CPUS;
 
-/// Build a TTBR0 identity root covering `pas` into `tables` (no heap).
+/// Build a TTBR0 identity root covering `pas`, plus a zero root to switch
+/// to after it, into `tables` (no heap).
 ///
-/// Returns `(l0, empty, count)`. `empty` is a zero root. `tables[..count]`
-/// holds `l0`, `empty` and the tables under `l0`, which the caller cleans
-/// to PoC before a secondary loads them. None when `tables` is too small.
-/// Paging install calls this before the heap exists.
+/// Returns `(l0, empty, count)`. `tables[..count]` holds `l0`, `empty` and
+/// the tables under `l0`. None when `tables` is too small. Paging install
+/// calls this before the heap exists, when no empty user root exists yet.
 pub(crate) fn build_identity_into(pas: &[u64], tables: &mut [u64]) -> Option<(u64, u64, usize)> {
-    let l0 = crate::paging_init::alloc_zeroed(0)?;
     let empty = crate::paging_init::alloc_zeroed(0)?;
+    let (l0, n) = identity_root_into(pas, tables, Some(empty))?;
+    Some((l0, empty, n))
+}
+
+/// Build a TTBR0 identity root covering `pas` into `tables`, tracking
+/// `extra` beside it. Returns `(l0, count)`: `tables[..count]` holds `l0`,
+/// `extra`, and the tables under `l0`, which the caller cleans to PoC
+/// before a secondary loads them.
+fn identity_root_into(pas: &[u64], tables: &mut [u64], extra: Option<u64>) -> Option<(u64, usize)> {
+    let l0 = crate::paging_init::alloc_zeroed(0)?;
     let mut n = 0usize;
-    if !paging::track_table(tables, &mut n, l0) || !paging::track_table(tables, &mut n, empty) {
+    if !paging::track_table(tables, &mut n, l0) {
+        return None;
+    }
+    if let Some(e) = extra
+        && !paging::track_table(tables, &mut n, e)
+    {
         return None;
     }
     for &pa in pas {
@@ -349,14 +363,15 @@ pub(crate) fn build_identity_into(pas: &[u64], tables: &mut [u64]) -> Option<(u6
         }
         i += 1;
     }
-    Some((l0, empty, n))
+    Some((l0, n))
 }
 
-/// Build a TTBR0 identity root covering `pas`, plus `empty` TTBR0.
-pub fn build_identity(pas: &[u64]) -> Option<(u64, u64, TryBox<[u64; IDENTITY_TABLES]>)> {
+/// Build a TTBR0 identity root covering `pas` for the secondary stub, which
+/// leaves it for `paging_init::empty_user_root`.
+pub fn build_identity(pas: &[u64]) -> Option<(u64, TryBox<[u64; IDENTITY_TABLES]>)> {
     let mut tables = TryBox::try_new([0u64; IDENTITY_TABLES]).ok()?;
-    let (l0, empty, _) = build_identity_into(pas, &mut *tables)?;
-    Some((l0, empty, tables))
+    let (l0, _) = identity_root_into(pas, &mut *tables, None)?;
+    Some((l0, tables))
 }
 
 /// `dc cvac` over `[va, va+len)`, one op per `CTR_EL0.DminLine` line, then
@@ -465,6 +480,56 @@ fn id_mmfr() -> (u64, u64) {
         asm!("mrs {0}, ID_AA64MMFR1_EL1", out(reg) mmfr1, options(nomem, nostack, preserves_flags));
     }
     (mmfr0, mmfr1)
+}
+
+/// `TTBR0_EL1` each AP held on arrival at `ap_entry_aarch64`, as the
+/// secondary stub left it, before `syscall_init::init_ap` writes it again.
+#[cfg(feature = "kernel_tests")]
+static AP_ENTRY_TTBR0: [core::sync::atomic::AtomicU64; vibeos::acpi::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; vibeos::acpi::MAX_CPUS];
+/// APs whose stub entry address still translated on arrival.
+#[cfg(feature = "kernel_tests")]
+static AP_ENTRY_ID_LIVE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// APs that recorded [`AP_ENTRY_TTBR0`].
+#[cfg(feature = "kernel_tests")]
+static AP_ENTRY_SEEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Record what the stub left in TTBR0 and whether its identity address
+/// still translates (ROADMAP §11.4). IRQs masked.
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn note_ap_entry_ttbr0(cpu_id: u32) {
+    let ttbr0 = super::cpu::read_ttbr0();
+    let id_live = entry_pa().is_some_and(super::cpu::stage1_read_translates);
+    let (Some(slot), true) = (AP_ENTRY_TTBR0.get(cpu_id as usize), cpu_id < 64) else {
+        return;
+    };
+    // Relaxed: pairs with nothing; the Release `fetch_or` on `AP_ENTRY_SEEN` below publishes it.
+    slot.store(ttbr0, core::sync::atomic::Ordering::Relaxed);
+    if id_live {
+        // Relaxed: pairs with nothing; the Release `fetch_or` on `AP_ENTRY_SEEN` below publishes it.
+        AP_ENTRY_ID_LIVE.fetch_or(1u64 << cpu_id, core::sync::atomic::Ordering::Relaxed);
+    }
+    // Release: pairs with the Acquire load in `ap_entry_ttbr0`.
+    AP_ENTRY_SEEN.fetch_or(1u64 << cpu_id, core::sync::atomic::Ordering::Release);
+}
+
+/// `(TTBR0_EL1, stub entry translated)` as AP `cpu_id` arrived, or None
+/// when it recorded nothing.
+#[cfg(feature = "kernel_tests")]
+pub fn ap_entry_ttbr0(cpu_id: u32) -> Option<(u64, bool)> {
+    if cpu_id >= 64 {
+        return None;
+    }
+    // Acquire: pairs with the Release `fetch_or` in `note_ap_entry_ttbr0`.
+    if AP_ENTRY_SEEN.load(core::sync::atomic::Ordering::Acquire) & (1u64 << cpu_id) == 0 {
+        return None;
+    }
+    let slot = AP_ENTRY_TTBR0.get(cpu_id as usize)?;
+    // Relaxed: pairs with nothing; the Acquire load of `AP_ENTRY_SEEN` above orders it.
+    let ttbr0 = slot.load(core::sync::atomic::Ordering::Relaxed);
+    // Relaxed: pairs with nothing; the Acquire load of `AP_ENTRY_SEEN` above orders it.
+    let live = AP_ENTRY_ID_LIVE.load(core::sync::atomic::Ordering::Relaxed) & (1u64 << cpu_id) != 0;
+    Some((ttbr0, live))
 }
 
 /// `snapshot_sysregs` length. Slots 0..8 are the EL1 registers (their EL2

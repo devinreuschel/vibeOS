@@ -1353,6 +1353,10 @@ pub(crate) const TESTS: &[Test] = &[
     test("sysreg_compare", test_sysreg_compare),
     test("oslsr_clear", test_oslsr_clear),
     test(
+        "ap_ttbr0_empty",
+        crate::arch::aarch64::ktest_asid::test_ap_ttbr0_empty,
+    ),
+    test(
         "asid_4bit",
         crate::arch::aarch64::ktest_asid::test_asid_4bit,
     )

@@ -58,5 +58,6 @@ pub(crate) const TESTS: &[Test] = &[
     test("virtio_vq", test_virtio_vq),
     test("virtio_input", test_virtio_input),
     test("block_vblk_mmio_smp", test_block_vblk_mmio_smp),
+    test("virtio_mmio_spi", test_virtio_mmio_spi),
     test("dev_random_source", test_dev_random_source),
 ];

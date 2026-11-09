@@ -1,5 +1,6 @@
 //! aarch64 ASID proof: a 4-bit generation allocator's rollovers, checked
-//! through real TTBR0 switches (ROADMAP §11.2, PORTABILITY §11.2).
+//! through real TTBR0 switches (ROADMAP §11.2, PORTABILITY §11.2), and the
+//! TTBR0 each AP leaves the secondary stub on (ROADMAP §11.4).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -147,5 +148,74 @@ pub(crate) fn test_asid_4bit() -> Outcome {
         s += 1;
     }
     crate::arch::aarch64::cpu::tlbi_all();
+    Outcome::Ok
+}
+
+static TTBR0_ID_LIVE: AtomicU64 = AtomicU64::new(0);
+static TTBR0_SEEN: AtomicU64 = AtomicU64::new(0);
+
+fn ttbr0_on_ap(_: *mut ()) {
+    let id = crate::per_cpu_init::current().cpu_id;
+    if id >= 64 {
+        return;
+    }
+    let empty = crate::paging_init::empty_user_root();
+    let live =
+        crate::arch::aarch64::cpu::read_ttbr0() & vibeos::arch::aarch64::paging::DESC_ADDR_MASK;
+    // A user thread's root may map any low address; test only the empty one.
+    if live == empty
+        && crate::arch::aarch64::secondary::entry_pa()
+            .is_some_and(crate::arch::aarch64::cpu::stage1_read_translates)
+    {
+        // Relaxed: pairs with nothing; the Release `fetch_or` on `TTBR0_SEEN` below publishes it.
+        TTBR0_ID_LIVE.fetch_or(1u64 << id, Ordering::Relaxed);
+    }
+    // Release: pairs with the Acquire load in `test_ap_ttbr0_empty`.
+    TTBR0_SEEN.fetch_or(1u64 << id, Ordering::Release);
+}
+
+/// Every AP left the secondary stub with TTBR0 at the empty user root, and
+/// the stub's identity address faults there, on arrival and now (ROADMAP
+/// §11.4).
+pub(crate) fn test_ap_ttbr0_empty() -> Outcome {
+    let empty = crate::paging_init::empty_user_root();
+    if empty == 0 {
+        return Outcome::Fail("no empty TTBR0");
+    }
+    let Some(stub) = crate::arch::aarch64::secondary::entry_pa() else {
+        return Outcome::Fail("no stub pa");
+    };
+    let aps = super::ktest::ap_mask();
+    if aps == 0 {
+        return Outcome::Skip("no AP");
+    }
+    let mut i = 1u32;
+    while i < 64 {
+        if aps & (1u64 << i) != 0 {
+            let Some((ttbr0, id_live)) = crate::arch::aarch64::secondary::ap_entry_ttbr0(i) else {
+                return crate::fail_fmt!("cpu {i} recorded no arrival ttbr0");
+            };
+            let root = ttbr0 & vibeos::arch::aarch64::paging::DESC_ADDR_MASK;
+            if root != empty {
+                return crate::fail_fmt!("cpu {i} arrived on ttbr0 {root:#x} != empty {empty:#x}");
+            }
+            if id_live {
+                return crate::fail_fmt!("cpu {i} arrived with stub pa {stub:#x} mapped");
+            }
+        }
+        i += 1;
+    }
+    TTBR0_ID_LIVE.store(0, Ordering::SeqCst);
+    TTBR0_SEEN.store(0, Ordering::SeqCst);
+    crate::ipi_init::call_mask(aps, ttbr0_on_ap, core::ptr::null_mut(), true);
+    // Acquire: pairs with the Release `fetch_or` in `ttbr0_on_ap`.
+    if TTBR0_SEEN.load(Ordering::Acquire) != aps {
+        return Outcome::Fail("ap did not probe ttbr0");
+    }
+    // Relaxed: pairs with nothing; the Acquire load of `TTBR0_SEEN` above orders it.
+    let bad = TTBR0_ID_LIVE.load(Ordering::Relaxed);
+    if bad != 0 {
+        return crate::fail_fmt!("stub pa {stub:#x} translates on aps {bad:#x}");
+    }
     Outcome::Ok
 }

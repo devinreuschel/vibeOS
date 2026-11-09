@@ -135,14 +135,43 @@ pub const fn tlbi_va_operand(va: u64, asid: u16) -> u64 {
     ((va >> 12) & ((1u64 << 44) - 1)) | ((asid as u64) << 48)
 }
 
-/// `dmb oshst`, the kernel's `dma_wmb` (Linux arm64 DMA barriers; F098).
+/// `dma_wmb`'s instruction, `dmb oshst` (Linux arm64 DMA barriers; F098).
+/// A macro, so the kernel's `asm!` template and [`DMA_WMB`] are one text.
 /// tests/litmus/virtio_avail.litmus
-pub const DMA_WMB: &str = "dmb oshst";
-/// `dmb oshld`, the kernel's `dma_rmb`. tests/litmus/virtio_avail.litmus
-pub const DMA_RMB: &str = "dmb oshld";
-/// `dmb osh`, the kernel's `dma_mb`. tests/litmus/dma_mb.litmus and
-/// tests/litmus/dma_mb_used.litmus
-pub const DMA_MB: &str = "dmb osh";
+#[macro_export]
+macro_rules! aarch64_dma_wmb_insn {
+    () => {
+        "dmb oshst"
+    };
+}
+
+/// `dma_rmb`'s instruction, `dmb oshld`, one text as `aarch64_dma_wmb_insn`.
+/// tests/litmus/virtio_avail.litmus
+#[macro_export]
+macro_rules! aarch64_dma_rmb_insn {
+    () => {
+        "dmb oshld"
+    };
+}
+
+/// `dma_mb`'s instruction, `dmb osh`, one text as `aarch64_dma_wmb_insn`.
+/// tests/litmus/dma_mb.litmus and tests/litmus/dma_mb_used.litmus
+#[macro_export]
+macro_rules! aarch64_dma_mb_insn {
+    () => {
+        "dmb osh"
+    };
+}
+
+/// The text the kernel's `Barriers::dma_wmb` emits on aarch64.
+/// tests/litmus/virtio_avail.litmus
+pub const DMA_WMB: &str = crate::aarch64_dma_wmb_insn!();
+/// The text the kernel's `Barriers::dma_rmb` emits on aarch64.
+/// tests/litmus/virtio_avail.litmus
+pub const DMA_RMB: &str = crate::aarch64_dma_rmb_insn!();
+/// The text the kernel's `Barriers::dma_mb` emits on aarch64.
+/// tests/litmus/dma_mb.litmus and tests/litmus/dma_mb_used.litmus
+pub const DMA_MB: &str = crate::aarch64_dma_mb_insn!();
 
 /// One step of the I-cache sync a user page needs once it becomes
 /// executable (ROADMAP §11.2).
@@ -358,8 +387,13 @@ mod tests {
         assert!(!TTBR0_SWITCH.contains(&TlbOp::TlbiVmalle1is));
     }
 
+    /// The kernel's `Barriers::dma_*` on aarch64 assemble the macros' text,
+    /// so this pins what the kernel emits, not a copy of it.
     #[test]
     fn dma_barriers_are_outer_shareable() {
+        assert_eq!(crate::aarch64_dma_wmb_insn!(), "dmb oshst");
+        assert_eq!(crate::aarch64_dma_rmb_insn!(), "dmb oshld");
+        assert_eq!(crate::aarch64_dma_mb_insn!(), "dmb osh");
         assert_eq!(DMA_WMB, "dmb oshst");
         assert_eq!(DMA_RMB, "dmb oshld");
         assert_eq!(DMA_MB, "dmb osh");
