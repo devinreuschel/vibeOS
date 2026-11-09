@@ -155,15 +155,15 @@ $(eval $(call KERNEL_VARIANT,default,,$(ISO)))
 $(eval $(call KERNEL_VARIANT,panic,--features panic_test,$(ISO_PANIC)))
 # early-fault: an exception before the full exception setup, on both arches
 $(eval $(call KERNEL_VARIANT,early-fault,--features early_fault_test,$(ISO_EARLY_FAULT)))
-# x86-only ISO variants: #GP, nest/stop dumps. aarch64 `make prebuilt`
-# must not compile them (gp_test_trip is x86-only; ROADMAP §11.7 aarch64
-# tiers run default + ktest). Keep this order so x86 KERNEL_ELFS matches
-# tests/harness/test_build_outputs.py VARIANTS.
+# x86-only ISO variants: #GP and the nest dump. aarch64 `make prebuilt`
+# must not compile them (gp_test_trip is x86-only). The stop dump builds on
+# both: ROADMAP §11.3 runs it under GICv3 and GICv2. Keep this order so x86
+# KERNEL_ELFS matches tests/harness/test_build_outputs.py VARIANTS.
 ifeq ($(ARCH),x86_64)
 $(eval $(call KERNEL_VARIANT,gp,--features gp_test,$(ISO_GP)))
 $(eval $(call KERNEL_VARIANT,panic-nest,--features panic_nest_test,$(ISO_PANIC_NEST)))
-$(eval $(call KERNEL_VARIANT,panic-stop,--features panic_stop_test,$(ISO_PANIC_STOP)))
 endif
+$(eval $(call KERNEL_VARIANT,panic-stop,--features panic_stop_test,$(ISO_PANIC_STOP)))
 # ktest: in-guest registry, never packaged as production
 $(eval $(call KERNEL_VARIANT,ktest,--features kernel_tests,$(ISO_KTEST)))
 ifeq ($(ARCH),x86_64)
@@ -241,7 +241,7 @@ $(BUILD_OUT)/kernels/vibeos-ktest-irqoff.elf: export VIBEOS_USER_DIR := $(USER_O
 endif
 
 .PHONY: help check check-python check-msrv check-hooks all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
-        test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-early-fault test-e2e-mce test \
+        test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-panic-stop-gic2 test-e2e-isa-floor test-e2e-gp test-e2e-early-fault test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-vibefs-crash-1 test-vibefs-crash-2 test-vibefs-crash-plants test-e2e-uefi test-qmp test-forensics test-irqoff \
         test-aarch64 test-gic-fallback litmus
@@ -278,6 +278,8 @@ help:
 	  '  test-e2e-panic        panic-test dump contract' \
 	  '  test-e2e-panic-nest   irq_nest underflow: one dump, no reentered' \
 	  '  test-e2e-panic-stop   -smp 5: the dump stops every other CPU' \
+	  '  test-e2e-panic-stop-gic2  aarch64: the same under virt,gic-version=2' \
+	  '  test-e2e-isa-floor    aarch64: -cpu cortex-a72 under TCG prints the ISA floor refusal' \
 	  '  test-e2e-gp           #GP dump+halt contract' \
 	  '  test-e2e-early-fault  exception before the full exception setup' \
 	  '  test-e2e-mce          injected #MC dump+halt contract' \
@@ -578,10 +580,12 @@ vmcore: $(VMCORE)
 # drops, and holds paths relative to $(CURDIR). The named ELFs go too: a failed
 # run's guest core keeps the ELF behind its ISO (ROADMAP §10.7).
 ifeq ($(ARCH),aarch64)
-# The ISOs aarch64 per-push tiers run (ROADMAP §11.7): e2e, ktest shards,
-# the forensics tier's hang, and the §11.1 early-fault ISO.
-PREBUILT_FILES = $(ISO) $(ISO_KTEST) $(ISO_HANG) $(ISO_EARLY_FAULT) \
-	$(BUILD_OUT)/kernels/vibeos-default.elf $(BUILD_OUT)/kernels/vibeos-ktest.elf \
+# The ISOs aarch64 per-push tiers run (ROADMAP §11.7): e2e, the panic dump,
+# the stop dump under both GICs (§11.3), ktest shards, the forensics tier's
+# hang, and the §11.1 early-fault ISO.
+PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_HANG) $(ISO_EARLY_FAULT) \
+	$(BUILD_OUT)/kernels/vibeos-default.elf $(BUILD_OUT)/kernels/vibeos-panic.elf \
+	$(BUILD_OUT)/kernels/vibeos-panic-stop.elf $(BUILD_OUT)/kernels/vibeos-ktest.elf \
 	$(BUILD_OUT)/kernels/vibeos-hang.elf \
 	$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT) $(VMCORE)
 else
@@ -620,6 +624,12 @@ test-e2e-uefi: $(ISO)
 	    *) exit 2 ;; \
 	esac
 
+# The aarch64 ISA floor (ROADMAP §11.1): the production ISO on
+# `-cpu cortex-a72` (Armv8.0: no FEAT_LSE, no FEAT_PAN) under TCG prints the
+# refusal as its first kernel line, with no early exception before it.
+test-e2e-isa-floor: $(ISO)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) python3 -c 'from tests.harness.run_e2e import isa_floor_main; raise SystemExit(isa_floor_main())'
+
 test-e2e-panic: $(ISO_PANIC)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_PANIC) VIBEOS_EXPECT_PANIC=1 python3 tests/harness/run_e2e.py
 
@@ -637,6 +647,11 @@ test-e2e-panic-stop: $(ISO_PANIC_STOP)
 # exception handler's line, on either architecture (ROADMAP §11.1, F136).
 test-e2e-early-fault: $(ISO_EARLY_FAULT)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_EARLY_FAULT) VIBEOS_EARLY_FAULT=1 python3 tests/harness/run_e2e.py
+
+# The same scenario on aarch64's GICv2 (ROADMAP §11.3): its SGIs are
+# `GICD_SGIR` stores rather than `ICC_SGI1R_EL1` writes. aarch64 only.
+test-e2e-panic-stop-gic2: $(ISO_PANIC_STOP)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_PANIC_STOP) VIBEOS_SMP=5 VIBEOS_GIC=2 VIBEOS_PANIC_VARIANT=stop python3 tests/harness/run_e2e.py
 
 test-e2e-gp: $(ISO_GP)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_GP) VIBEOS_GP_TEST=1 python3 tests/harness/run_e2e.py
@@ -822,7 +837,7 @@ test-gic-fallback-9: $(ISO_KTEST)
 
 # aarch64 per-push ladder (ROADMAP §11.7). x86-only e2e (PIT, #GP, #MC,
 # 9 GiB, LAPIC fallback, vibefs-crash) stays on `make test`.
-test-aarch64: test-e2e test-e2e-early-fault test-forensics test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-7 test-kernel-8 test-kernel-9 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-kernel-smp4-6 test-kernel-smp4-7 test-kernel-smp4-8 test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6 test-gic-fallback-7 test-gic-fallback-8 test-gic-fallback-9
+test-aarch64: test-e2e test-e2e-early-fault test-e2e-isa-floor test-e2e-panic test-e2e-panic-stop test-e2e-panic-stop-gic2 test-forensics test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-7 test-kernel-8 test-kernel-9 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-kernel-smp4-6 test-kernel-smp4-7 test-kernel-smp4-8 test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6 test-gic-fallback-7 test-gic-fallback-8 test-gic-fallback-9
 
 .PHONY: litmus
 litmus:

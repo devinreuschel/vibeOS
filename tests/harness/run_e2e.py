@@ -9,12 +9,14 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import replace
 
-from tests.harness import frame, panic_dump, results
+from tests.harness import frame, panic_dump, registry, results
 from tests.harness.harness import (
     BOOT_ALLOWANCE_S,
     MCE_MCG_STATUS,
     MCE_UC_STATUS,
+    ROWS,
     SERIAL_ONLINE,
     EnvConfig,
     HarnessError,
@@ -36,6 +38,7 @@ from tests.harness.harness import (
     run_qemu_and_check,
     run_qemu_console_input,
     run_qemu_inject_mce,
+    run_qemu_until_exit,
     serial_tail,
     virtio_blk_args,
     virtualization_on,
@@ -437,6 +440,89 @@ def strace_main() -> int:
     return results.run_main(_strace)
 
 
+# The aarch64 ISA floor's refusal (ROADMAP §11.1): an Armv8.0 CPU, with
+# neither FEAT_LSE nor FEAT_PAN, under TCG, which the floor turns away.
+ISA_FLOOR_REFUSAL = "vibeOS: cpu: isa floor (lse+pan) missing"
+ISA_FLOOR_CPU = "cortex-a72"
+# How long the run reads on after the refusal before it kills QEMU: the
+# kernel halts there, so any later line (a second refusal, an exception)
+# would be a bug the check below names.
+ISA_FLOOR_SETTLE_S = 3.0
+
+
+def check_isa_floor_lines(lines: list[str]) -> None:
+    """The refusal is the run's only kernel line: the check runs before the
+    first log line, and the CPU halts after it."""
+    kl = frame.kernel_lines(lines)
+    if not kl or kl[0] != ISA_FLOOR_REFUSAL:
+        first = kl[0] if kl else "no kernel line"
+        raise HarnessError(
+            f"isa floor: first kernel line {first!r}, expected {ISA_FLOOR_REFUSAL!r}"
+        )
+    n = kl.count(ISA_FLOOR_REFUSAL)
+    if n != 1:
+        raise HarnessError(f"isa floor: {n} refusal lines, expected one")
+    if len(kl) != 1:
+        raise HarnessError(f"isa floor: kernel line after the refusal: {kl[1]!r}")
+
+
+def _isa_floor() -> int:
+    env = env_config(default_iso=default_iso(), default_timeout=BOOT_ALLOWANCE_S)
+    res = results.Results(env.tier, env.arch)
+    if env.arch != "aarch64":
+        print("[e2e] FAIL: the ISA floor test boots aarch64 only (ARCH=aarch64)", file=sys.stderr)
+        return 1
+    # TCG whatever VIBEOS_QEMU_ACCEL says: HVF and KVM run the host's CPU.
+    cfg = replace(env.qemu(), cpu=ISA_FLOOR_CPU, cpu_explicit=True, accel="tcg")
+    # Every aarch64 kernel failure line but the refusal fails the run, the
+    # early-exception line (`vibeOS: panic: early`) and `#UNDEF` among them.
+    sigs = tuple(
+        s for s in registry.signatures(ROWS, {frame.KERNEL}, "aarch64") if s != ISA_FLOOR_REFUSAL
+    )
+
+    # The run reads on for `ISA_FLOOR_SETTLE_S` after the refusal, then
+    # kills QEMU, so a line after it is seen; a failure line ends it.
+    def settle(line: str) -> float | None:
+        return ISA_FLOOR_SETTLE_S if kernel_text(line) == ISA_FLOOR_REFUSAL else None
+
+    try:
+        result = run_qemu_until_exit(
+            cfg, timeout_s=env.timeout, panic_signatures=sigs, kill_after=settle
+        )
+        check_isa_floor_lines(result.lines)
+    except HarnessError as e:
+        _record_missing(str(e))
+        res.add_boot(qemu_argv(cfg, None), cfg, None)
+        res.record("marker", "isa_floor_refusal", "failed")
+        print(f"[e2e] FAIL: {e}", file=sys.stderr)
+        return 1
+    res.record("marker", "isa_floor_refusal", "passed")
+    res.add_boot(qemu_argv(cfg, None), cfg, result.exit_code)
+    print(f"[e2e] ok: -cpu {ISA_FLOOR_CPU} refused: {ISA_FLOOR_REFUSAL!r}", file=sys.stderr)
+    print(
+        f"[e2e]   . the refusal is the only kernel line in {ISA_FLOOR_SETTLE_S} s after it;"
+        " no early exception",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def isa_floor_main() -> int:
+    """`make test-e2e-isa-floor`: boot the production ISO on an Armv8.0 CPU
+    and expect the ISA floor's refusal. No retry."""
+    return results.run_main(_isa_floor)
+
+
+def check_gic_version(lines: list[str], version: str) -> None:
+    """An aarch64 boot past GIC init printed `vibeOS: gic: v<version>`, the
+    GIC the harness asked QEMU for (`VIBEOS_GIC`), so a run meant for GICv2
+    cannot pass on GICv3."""
+    want = f"vibeOS: gic: v{version}"
+    got = [t for t in frame.kernel_lines(lines) if t in ("vibeOS: gic: v2", "vibeOS: gic: v3")]
+    if got != [want]:
+        raise HarnessError(f"gic: lines {got!r}, expected one {want!r}")
+
+
 # `VIBEOS_PANIC_VARIANT`: a panic-path build (ROADMAP §10.7), its ISO
 # variant, and the check its dump must pass.
 PANIC_VARIANTS = {
@@ -453,6 +539,10 @@ def _utest_verdict(env: EnvConfig, cfg: QemuConfig) -> UtestVerdict:
 
 # The frames the `#GP` backtrace lists, in this order (ROADMAP §10.7, F070).
 GP_FRAMES = ("gp_test_trip", "boot_rest")
+# The frames the panic-test backtrace lists, in this order (ROADMAP §10.7,
+# §11.7): the handler, `panic_fmt`, which the panic in `_start` calls, then
+# `_start` on the boot stack Limine handed it.
+PANIC_FRAMES = ("rust_begin_unwind", "panic_fmt", "_start")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -470,6 +560,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     iso = default_iso(PANIC_VARIANTS[panic_variant][0]) if panic_variant else default_iso()
     env = env_config(default_iso=iso, default_timeout=BOOT_ALLOWANCE_S)
+    if os.environ.get("VIBEOS_GIC") and env.arch != "aarch64":
+        print("[e2e] FAIL: VIBEOS_GIC selects an aarch64 GIC (ARCH=aarch64)", file=sys.stderr)
+        return 1
     if env_flag("VIBEOS_MCE_TEST"):
         return _mce_main(env)
     res = results.Results(env.tier, env.arch)
@@ -567,6 +660,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[e2e] FAIL: {e}", file=sys.stderr)
         return 1
     print("[e2e]   . serial online is the first kernel line", file=sys.stderr)
+    # The panic-test build panics before GIC init and prints no GIC line.
+    if env.arch == "aarch64" and (panic_variant or not expect_panic):
+        try:
+            check_gic_version(result.lines, env.gic_version)
+        except HarnessError as e:
+            res.record("marker", "gic_version", "failed")
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        res.record("marker", "gic_version", "passed")
+        print(f"[e2e]   . gic: v{env.gic_version}", file=sys.stderr)
     if gp_test:
         # F070: the walk starts at the interrupted frame, so the function
         # `gp_test_fault` returns to comes first, then its caller. Boot's
@@ -590,6 +693,17 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         res.record("marker", "early_fault_line", "passed")
         print("[e2e]   . early handler line ok", file=sys.stderr)
+    if expect_panic and not gp_test and not panic_variant:
+        # The walk follows the frame pointer from the handler through the
+        # recorded boot stack, the only known stack before the first thread.
+        try:
+            panic_dump.check_frames_in_order(result.lines, PANIC_FRAMES)
+        except HarnessError as e:
+            res.record("marker", "panic_backtrace_order", "failed")
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        res.record("marker", "panic_backtrace_order", "passed")
+        print(f"[e2e]   . backtrace: {' then '.join(PANIC_FRAMES)}", file=sys.stderr)
     if panic_variant:
         try:
             PANIC_VARIANTS[panic_variant][1](result.lines)

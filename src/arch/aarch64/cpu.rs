@@ -757,12 +757,16 @@ pub fn frame_pointer() -> u64 {
     fp
 }
 
-#[inline]
+/// The PC of this instruction, in the function it is inlined into. Not
+/// `x30`: after the function's first call that holds a return address
+/// into its caller, which a backtrace would print twice.
+#[inline(always)]
 pub fn instruction_pointer() -> u64 {
-    let lr: u64;
-    // SAFETY: approximate PC from LR; established here.
-    unsafe { asm!("mov {0}, x30", out(reg) lr, options(nomem, nostack, preserves_flags)) };
-    lr
+    let pc: u64;
+    // SAFETY: `adr` reads the PC into a register and touches nothing
+    // else; established here.
+    unsafe { asm!("adr {0}, .", out(reg) pc, options(nomem, nostack, preserves_flags)) };
+    pc
 }
 
 #[inline]
