@@ -203,7 +203,10 @@ impl Barriers for Arch {
         fence(Ordering::Release);
         // SAFETY: `dmb oshst` orders stores to device-visible memory. established here.
         unsafe {
-            core::arch::asm!("dmb oshst", options(nostack, preserves_flags));
+            core::arch::asm!(
+                vibeos::aarch64_dma_wmb_insn!(),
+                options(nostack, preserves_flags)
+            );
         }
         // Release: pairs with nothing.
         compiler_fence(Ordering::Release);
@@ -216,7 +219,10 @@ impl Barriers for Arch {
         fence(Ordering::Acquire);
         // SAFETY: `dmb oshld` orders loads from device-visible memory. established here.
         unsafe {
-            core::arch::asm!("dmb oshld", options(nostack, preserves_flags));
+            core::arch::asm!(
+                vibeos::aarch64_dma_rmb_insn!(),
+                options(nostack, preserves_flags)
+            );
         }
         // Acquire: pairs with nothing.
         compiler_fence(Ordering::Acquire);
@@ -228,7 +234,10 @@ impl Barriers for Arch {
     fn dma_mb() {
         // SAFETY: `dmb osh` is a full outer-shareable barrier. established here.
         unsafe {
-            core::arch::asm!("dmb osh", options(nostack, preserves_flags));
+            core::arch::asm!(
+                vibeos::aarch64_dma_mb_insn!(),
+                options(nostack, preserves_flags)
+            );
         }
     }
 
