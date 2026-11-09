@@ -213,8 +213,11 @@ CPU that runs a space shares one word; the slow path reads it again under the lo
 allocates there. The boot CPU builds the allocator before any user root loads, logs its width (or why
 ASIDs are off), and runs a local `tlbi vmalle1`. A root with no context, as some in-guest tests load,
 gets ASID 0, followed by a local invalidate of ASID 0 whenever another ASID-0 root was loaded since.
-A user leaf's `tlbi vale1is` names the loaded TTBR0's ASID; a space that is not loaded on the CPU
-changing it is not running, since its own pinned thread is the only one that changes its leaves.
+An unmap's `tlbi vale1is` names the space's own ASID, read from its word after a `dmb ish` that
+orders the read after the PTE store (`SpaceCtx::flush_page`, Linux arm64's `ASID(mm)`), so it reaches
+every CPU that holds the space's entries whether or not the unmapping CPU has the space loaded. A
+user VA that reaches the `PageTable` seam, which names no space, is invalidated with `tlbi vaale1is`,
+every ASID.
 A `kernel_tests` boot whose selection runs `asid_procs_4bit` caps the width at 4 bits, 15 usable
 ASIDs, so that test's 1,000 processes force rollovers; TCG drops its soft TLB on every ASID change,
 so the same build keeps each CPU's ASID-to-space pairs since its last flush and counts an alias.

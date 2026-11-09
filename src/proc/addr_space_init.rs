@@ -418,14 +418,11 @@ unsafe fn unmap_chunks(space: &mut Mm, va: u64, len: u64) -> Result<(), AsError>
     Ok(())
 }
 
-/// A flush for `space`'s pages when it is this CPU's user root
-/// (CR3; TTBR0 on aarch64). On aarch64 the `tlbi vale1is` names the loaded
-/// TTBR0's ASID, which is the space's (`arch::aarch64::cpu::tlbi_va`), and
-/// reaches every CPU. A space that is not loaded here is not running: its
-/// leaves change only from its own pinned thread, and the entries its ASID
-/// left on a CPU are unreachable until that ASID is handed out again, which
-/// waits for a rollover and each CPU's local flush before it loads the new
-/// generation (invariant I39).
+/// A flush for `space`'s pages when it is this CPU's user root (CR3;
+/// TTBR0 on aarch64), through the `PageTable` seam, for the map paths'
+/// rollback: those pages were mapped by this call, so only a CPU that has
+/// the space loaded can hold them, and on aarch64 the seam's user-VA
+/// invalidate drops them under every ASID (`arch::aarch64::cpu::tlbi_va`).
 fn local_flush(space: &Mm) -> impl FnMut(u64) + use<> {
     let loaded = Arch::user_root() == space.root();
     move |va| {
@@ -433,6 +430,14 @@ fn local_flush(space: &Mm) -> impl FnMut(u64) + use<> {
             Arch::flush_local(VirtAddr(va));
         }
     }
+}
+
+/// A flush for an unmap of pages `space` may have run on: by the space's
+/// own context (`SpaceCtx::flush_page`), on aarch64 the space's ASID on
+/// every CPU, whether or not this CPU has it loaded.
+fn space_flush<'a>(space: &Mm, ctx: &'a SpaceCtx) -> impl FnMut(u64) + use<'a> {
+    let loaded = Arch::user_root() == space.root();
+    move |va| ctx.flush_page(va, loaded)
 }
 
 /// `munmap` of `[va, va+len)` over `AddressSpace::unmap_free`, taking `PT`
@@ -447,14 +452,15 @@ fn local_flush(space: &Mm) -> impl FnMut(u64) + use<> {
 pub unsafe fn unmap(space: &Space, va: u64, len: u64) -> Result<(), AsError> {
     let mut mm = space.mm();
     // SAFETY: this fn's contract, `addr_space_init::unmap`.
-    unsafe { unmap_mm(&mut mm, va, len) }
+    unsafe { unmap_mm(&mut mm, &space.ctx, va, len) }
 }
 
-/// [`unmap`] on a space whose `mm` lock the caller holds.
+/// [`unmap`] on a space whose `mm` lock the caller holds; `ctx` is that
+/// space's context.
 ///
 /// # Safety
 /// Same contract as [`unmap`].
-unsafe fn unmap_mm(space: &mut Mm, va: u64, len: u64) -> Result<(), AsError> {
+unsafe fn unmap_mm(space: &mut Mm, ctx: &SpaceCtx, va: u64, len: u64) -> Result<(), AsError> {
     let end = va.checked_add(len).ok_or(AsError::Overflow)?;
     if len == 0 {
         // SAFETY: an empty range touches no leaf, which
@@ -463,15 +469,15 @@ unsafe fn unmap_mm(space: &mut Mm, va: u64, len: u64) -> Result<(), AsError> {
             space.unmap_free(va, 0, &mut BuddyPool, &mut |_| {})
         });
     }
-    let mut flush = local_flush(space);
+    let mut flush = space_flush(space, ctx);
     let mut cur = va;
     while cur < end {
         let ce = chunk_end(cur, end);
         with_pt_chunk((ce - cur) / PAGE_SIZE_4K, || {
             let mut pool = BuddyPool;
-            // SAFETY: this fn's contract; `flush` invalidates the page on
-            // this CPU, the only one that runs the space's thread
-            // (`thread_init::spawn_user` pins it).
+            // SAFETY: this fn's contract; `flush` invalidates the page by
+            // the space's ASID on every CPU, established by
+            // `arch::aarch64::asid::SpaceCtx::flush_page`.
             unsafe { space.unmap_free(cur, ce - cur, &mut pool, &mut flush) }
         })?;
         cur = ce;
@@ -486,6 +492,7 @@ unsafe fn unmap_mm(space: &mut Mm, va: u64, len: u64) -> Result<(), AsError> {
 /// break.
 pub fn brk(space: &Space, want: u64) -> u64 {
     let core = space.core();
+    let ctx = &space.ctx;
     let mut mm = space.mm();
     let space = &mut *mm;
     let moved = match space.brk_plan(want) {
@@ -494,7 +501,7 @@ pub fn brk(space: &Space, want: u64) -> u64 {
         BrkPlan::Grow { va, len } => brk_grow(space, core, va, len, want),
         // SAFETY: the heap's leaves were mapped from the buddy by
         // `brk_grow`, here, and `unmap_mm` supplies the flush.
-        BrkPlan::Shrink { va, len } => unsafe { unmap_mm(space, va, len) },
+        BrkPlan::Shrink { va, len } => unsafe { unmap_mm(space, ctx, va, len) },
     };
     // A failed move leaves the break where it was, as brk(2) returns it.
     if moved.is_ok() {

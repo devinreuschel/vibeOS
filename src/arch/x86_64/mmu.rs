@@ -95,6 +95,15 @@ impl SpaceCtx {
     pub const fn new() -> Self {
         Self
     }
+
+    /// Drop this space's translation of `va`: only this CPU's TLB can hold
+    /// it, and only while the space is loaded (`loaded`), since every CR3
+    /// write flushes the old space's entries.
+    pub fn flush_page(&self, va: u64, loaded: bool) {
+        if loaded {
+            <super::Arch as vibeos::arch::PageTable>::flush_local(vibeos::paging::VirtAddr(va));
+        }
+    }
 }
 
 /// Turn on the NX bit in page-table entries (EFER.NXE), so the kernel's NX

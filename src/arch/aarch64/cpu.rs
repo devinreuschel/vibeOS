@@ -247,6 +247,9 @@ fn exec_tlb(op: tlb::TlbOp, va_operand: u64) {
             tlb::TlbOp::TlbiVale1is => {
                 asm!("tlbi vale1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
             }
+            tlb::TlbOp::TlbiVaale1is => {
+                asm!("tlbi vaale1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
+            }
             tlb::TlbOp::TlbiVae1is => {
                 asm!("tlbi vae1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
             }
@@ -295,35 +298,49 @@ pub fn tlbi_local_all() {
     run_tlb(&tlb::ROLLOVER_LOCAL, 0);
 }
 
-/// The ASID a VA-form `tlbi` for `va` names: a user VA's entries are
-/// non-global and tagged with the loaded TTBR0's ASID, the only user space
-/// `PageTable::flush_local` acts on; a kernel VA's are global, which every
-/// ASID matches.
-fn va_asid(va: u64) -> u16 {
-    if vibeos::arch::aarch64::paging::is_kernel_va(vibeos::paging::VirtAddr(va)) {
-        0
-    } else {
-        (read_ttbr0() >> 48) as u16
-    }
+fn is_kernel_va(va: u64) -> bool {
+    vibeos::arch::aarch64::paging::is_kernel_va(vibeos::paging::VirtAddr(va))
 }
 
-/// Leaf TLB invalidate. Runs `tlb::LEAF_INVAL`, with the loaded space's
-/// ASID for a user VA.
+/// Leaf TLB invalidate through the `PageTable` seam, which names no space.
+/// A kernel VA's entries are global, which every ASID matches, so it runs
+/// `tlb::LEAF_INVAL` with ASID 0; a user VA's could carry any space's ASID,
+/// so it runs `tlb::LEAF_INVAL_ALL_ASIDS`. A caller that knows the space
+/// uses [`tlbi_user_va`].
 /// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
 /// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub fn tlbi_va(va: u64) {
-    run_tlb(&tlb::LEAF_INVAL, tlb::tlbi_va_operand(va, va_asid(va)));
+    if is_kernel_va(va) {
+        run_tlb(&tlb::LEAF_INVAL, tlb::tlbi_va_operand(va, 0));
+    } else {
+        run_tlb(&tlb::LEAF_INVAL_ALL_ASIDS, tlb::tlbi_va_operand(va, 0));
+    }
+}
+
+/// Leaf TLB invalidate of user VA `va` in the space whose ASID is `asid`,
+/// on every CPU (Linux arm64's `flush_tlb_page` with `ASID(mm)`). Runs
+/// `tlb::LEAF_INVAL`. Arm ARM DDI0487, "TLB maintenance requirements" and
+/// "Ordering and completion of TLB maintenance instructions": herd7 does not
+/// model the TLB.
+pub fn tlbi_user_va(va: u64, asid: u16) {
+    run_tlb(&tlb::LEAF_INVAL, tlb::tlbi_va_operand(va, asid));
 }
 
 /// Break-before-make maintenance after the invalid store. Runs
-/// `tlb::BBM_AFTER_INVALID`, with the loaded space's ASID for a user VA.
+/// `tlb::BBM_AFTER_INVALID` for a kernel VA (global entries, ASID 0) and
+/// `tlb::BBM_AFTER_INVALID_ALL_ASIDS` for a user VA, whose space the seam
+/// does not name.
 /// Arm ARM DDI0487, "Using break-before-make when updating translation
 /// table entries": herd7 does not model the TLB.
 pub(crate) fn bbm_break(va: u64) {
-    run_tlb(
-        &tlb::BBM_AFTER_INVALID,
-        tlb::tlbi_va_operand(va, va_asid(va)),
-    );
+    if is_kernel_va(va) {
+        run_tlb(&tlb::BBM_AFTER_INVALID, tlb::tlbi_va_operand(va, 0));
+    } else {
+        run_tlb(
+            &tlb::BBM_AFTER_INVALID_ALL_ASIDS,
+            tlb::tlbi_va_operand(va, 0),
+        );
+    }
 }
 
 /// `dsb ishst`: a space's table stores reach the walker before a TTBR0

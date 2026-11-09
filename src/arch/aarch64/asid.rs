@@ -11,7 +11,7 @@
 //! ASID-0 root was loaded since the last one. With ASIDs off every TTBR0
 //! load is ASID 0 and is followed by that invalidate.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering, fence};
 
 use vibeos::kalloc::TryBox;
 use vibeos::log::Level;
@@ -47,6 +47,32 @@ impl SpaceCtx {
     pub const fn new() -> Self {
         Self {
             word: AtomicU64::new(0),
+        }
+    }
+
+    /// Drop this space's translation of user VA `va` from every CPU's TLB,
+    /// by the space's own ASID (Linux arm64's `ASID(mm)`), whether or not
+    /// this CPU has it loaded. With no ASID yet (or ASIDs off) its entries
+    /// can only be ASID 0 on a CPU that has it loaded (`loaded` here).
+    ///
+    /// The fence orders the read of the word after the caller's PTE store:
+    /// either this read sees the ASID a concurrent switch-in stores, or that
+    /// switch's walk, after the `dsb ishst` in [`load_ttbr0`], sees the new
+    /// PTE. A space keeps its number while any CPU has it loaded (the
+    /// rollover reserves it), so the number read is the one its entries carry.
+    pub fn flush_page(&self, va: u64, loaded: bool) {
+        let asid = match ALLOC.try_get() {
+            Some(alloc) => {
+                // SeqCst: `dmb ish`, the PTE store before the word's load;
+                // pairs with the `dsb ishst` before `load_ttbr0`'s TTBR0 write.
+                fence(Ordering::SeqCst);
+                // Relaxed: pairs with nothing; the fence above orders it.
+                alloc.asid_of(self.word.load(Ordering::Relaxed))
+            }
+            None => 0,
+        };
+        if asid != 0 || loaded {
+            cpu::tlbi_user_va(va, asid as u16);
         }
     }
 }
