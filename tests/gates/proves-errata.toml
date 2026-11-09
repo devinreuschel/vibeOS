@@ -73,12 +73,14 @@ why = "the proof is the in-guest -smp 4 virtio-mmio test, not queue_notify"
 commit = "4ea066ae1ef3304ab3153179ae9fdd2fa4f03775"
 was = ""
 proves = """
-openat_ok -- `openat`, `dup3`, and fork-shaped
+open_uapi_flags -- `openat`, `dup3`, and fork-shaped
+utilities_table (existing: its redirections call `dup2`, which is `dup3` on aarch64) -- `openat`, `dup3`, and fork-shaped
+fork_exit_status (existing: `fork` is fork-shaped `clone` on aarch64) -- `openat`, `dup3`, and fork-shaped
 tls_survive -- `FS_BASE` saved and restored
 "user: tests ok" (existing: the e2e contract already requires /bin/tests to pass) -- `/bin/tests` from the Phase 10 user crate
 test_aarch64_serial_then_virtio_keyboard -- the harness types
 initrd_module_sized (existing: the §10.5 in-guest initrd test) -- the initrd, built by the same
-"serial-ok" (existing: the console echo the x86 e2e already matches) -- PL011 receive
+run_qemu_console_input (existing: the console-input boot types `echo serial-ok` on COM1, the PL011 on aarch64, and fails without the reply) -- PL011 receive
 ecam_bus_range_reg_is_first_bus -- PCIe through the ECAM the device tree names
 block_vblk_mmio_smp -- virtio-mmio transport as well
 dma_edu -- `test_dma_edu` programs each device address
@@ -93,7 +95,9 @@ el0_pan_every_cpu -- PAN enabled on every CPU
 el0_tagged -- tagged user pointers
 tls_thread_pointer_variant_i_is_aligned -- `TPIDR_EL0` for user TLS
 el0_tls_survive -- the user TLS base is per-thread
-openat_ok -- `openat` (with `AT_FDCWD`)
+open_uapi_flags -- `openat` (with `AT_FDCWD`)
+utilities_table (existing: its redirections call `dup2`, which is `dup3` on aarch64) -- `openat` (with `AT_FDCWD`)
+fork_exit_status (existing: `fork` is fork-shaped `clone` on aarch64) -- `openat` (with `AT_FDCWD`)
 stat_aarch64_layout_is_linux -- `struct stat` for `fstat`
 "user: tests ok" (existing: the e2e contract already requires /bin/tests to pass) -- `/sbin/init`, `/bin/sh`, `/bin/tests` from the user crate
 el0_fp_no_leak -- user FP and SIMD state
