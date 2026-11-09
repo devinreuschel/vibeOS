@@ -101,9 +101,12 @@ impl SpaceCore {
 
     /// The address of this space's [`SpaceCtx`], for `Tcb.as_ctx` beside
     /// the root: the core lives at least as long as a TCB names its root
-    /// (invariant I44), so the address stays valid that long.
+    /// (invariant I44), so the address stays valid that long. The
+    /// provenance is exposed here, so `arch::aarch64::asid::load_ttbr0` can
+    /// rebuild a pointer from the word `Tcb.as_ctx` holds (a `usize` keeps
+    /// `Tcb` `Send`) through `with_exposed_provenance` (AGENTS.md rule 6).
     pub fn ctx_addr(&self) -> usize {
-        core::ptr::from_ref(&self.ctx).addr()
+        core::ptr::from_ref(&self.ctx).expose_provenance()
     }
 
     /// The portable space, under its lock. Sleeps: never under a spinlock.

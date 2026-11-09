@@ -164,10 +164,13 @@ pub unsafe fn load_ttbr0(cpu_id: u32, root: u64, ctx: usize) -> u64 {
         && ctx != 0
         && root != empty
     {
+        let ptr = core::ptr::with_exposed_provenance::<SpaceCtx>(ctx);
         // SAFETY: invariant I44: `ctx` is the `SpaceCtx` of the live space
-        // whose root a TCB or the caller names (this fn's `# Safety`), read
-        // only through `&`; established by `addr_space_init::SpaceCore::ctx_addr`.
-        let space = unsafe { &*(ctx as *const SpaceCtx) };
+        // whose root a TCB or the caller names (this fn's `# Safety`), its
+        // provenance exposed from the core's allocation, and it is used only
+        // as `&` (its word is an atomic); established by
+        // `addr_space_init::SpaceCore::ctx_addr`.
+        let space = unsafe { &*ptr };
         let w = asid::switch(alloc, cpu_id, &space.word);
         if w != 0 {
             // A rollover since this CPU's last flush: drop every entry
