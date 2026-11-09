@@ -2,11 +2,13 @@
 
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::arch::Barriers;
 use vibeos::irq::{IrqChip, IrqError, IrqSpecifier, gic};
 use vibeos::log::Level;
 use vibeos::machine::PhysRange;
 use vibeos::paging::PhysAddr;
 
+use super::Arch;
 use super::gic_common::{
     CHIP, GICR_TYPER, Gic, Kind, LPI_BASE, LPI_SLOTS, SPI_SLOTS, XBASER_SHARE_IS,
     clean_table_if_needed, gic, mmio32, mmio32w, mmio64, mmio64w, note_shareability,
@@ -662,6 +664,18 @@ fn write_sgi1r(val: u64) {
     }
 }
 
+/// GICv2's SGI: one store to `GICD_SGIR` through the ordered
+/// `Barriers::mmio_write`, whose `dmb oshst` makes the stores the SGI
+/// publishes visible before the distributor sees it (DESIGN §4.7, §7.6).
+fn write_sgir(dist: u64, sgir: u32) {
+    let reg = dist.wrapping_add(GICD_SGIR) as *mut u32;
+    // SAFETY: `GICD_SGIR` is a write-only register of the distributor that
+    // `gic::init` mapped at `dist`, which stays mapped while the kernel
+    // runs, and a write only raises an SGI; established by
+    // `crate::arch::aarch64::gic::init`.
+    unsafe { Arch::mmio_write(reg, sgir) };
+}
+
 /// SGI to the calling CPU.
 pub fn send_sgi(intid: u32) {
     send_sgi_to(crate::arch::aarch64::percpu::cpu_id_hint(), intid);
@@ -693,12 +707,7 @@ pub fn send_sgi_to(cpu: u32, intid: u32) {
         },
         Kind::V2 => {
             let bit = (hw & 7) as u32;
-            let sgir = (intid & 0xF) | (1 << (16 + bit));
-            // SAFETY: ordered mmio_write (DESIGN §4.7). established here.
-            unsafe {
-                core::arch::asm!("dsb oshst", options(nostack, preserves_flags));
-                mmio32w(g.dist, GICD_SGIR, sgir);
-            }
+            write_sgir(g.dist, (intid & 0xF) | (1 << (16 + bit)));
         }
     }
 }
@@ -713,14 +722,7 @@ pub fn send_sgi_others(intid: u32) {
     };
     match g.kind {
         Kind::V3 => write_sgi1r((u64::from(intid & 0xF) << 24) | (1u64 << 40)),
-        Kind::V2 => {
-            let sgir = (intid & 0xF) | (1 << 24);
-            // SAFETY: ordered mmio_write (DESIGN §4.7). established here.
-            unsafe {
-                core::arch::asm!("dsb oshst", options(nostack, preserves_flags));
-                mmio32w(g.dist, GICD_SGIR, sgir);
-            }
-        }
+        Kind::V2 => write_sgir(g.dist, (intid & 0xF) | (1 << 24)),
     }
 }
 

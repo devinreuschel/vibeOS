@@ -512,6 +512,16 @@ def isa_floor_main() -> int:
     return results.run_main(_isa_floor)
 
 
+def check_gic_version(lines: list[str], version: str) -> None:
+    """An aarch64 boot past GIC init printed `vibeOS: gic: v<version>`, the
+    GIC the harness asked QEMU for (`VIBEOS_GIC`), so a run meant for GICv2
+    cannot pass on GICv3."""
+    want = f"vibeOS: gic: v{version}"
+    got = [t for t in frame.kernel_lines(lines) if t in ("vibeOS: gic: v2", "vibeOS: gic: v3")]
+    if got != [want]:
+        raise HarnessError(f"gic: lines {got!r}, expected one {want!r}")
+
+
 # `VIBEOS_PANIC_VARIANT`: a panic-path build (ROADMAP §10.7), its ISO
 # variant, and the check its dump must pass.
 PANIC_VARIANTS = {
@@ -545,6 +555,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     iso = default_iso(PANIC_VARIANTS[panic_variant][0]) if panic_variant else default_iso()
     env = env_config(default_iso=iso, default_timeout=BOOT_ALLOWANCE_S)
+    if os.environ.get("VIBEOS_GIC") and env.arch != "aarch64":
+        print("[e2e] FAIL: VIBEOS_GIC selects an aarch64 GIC (ARCH=aarch64)", file=sys.stderr)
+        return 1
     if env_flag("VIBEOS_MCE_TEST"):
         return _mce_main(env)
     res = results.Results(env.tier, env.arch)
@@ -636,6 +649,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[e2e] FAIL: {e}", file=sys.stderr)
         return 1
     print("[e2e]   . serial online is the first kernel line", file=sys.stderr)
+    # The panic-test build panics before GIC init and prints no GIC line.
+    if env.arch == "aarch64" and (panic_variant or not expect_panic):
+        try:
+            check_gic_version(result.lines, env.gic_version)
+        except HarnessError as e:
+            res.record("marker", "gic_version", "failed")
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        res.record("marker", "gic_version", "passed")
+        print(f"[e2e]   . gic: v{env.gic_version}", file=sys.stderr)
     if gp_test:
         # F070: the walk starts at the interrupted frame, so the function
         # `gp_test_fault` returns to comes first, then its caller. Boot's

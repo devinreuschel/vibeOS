@@ -679,6 +679,29 @@ class TestFirstKernelLine(unittest.TestCase):
         self.assertIsNone(kernel_text("user: tests ok"))
 
 
+class TestGicVersion(unittest.TestCase):
+    """An aarch64 boot names the GIC the harness asked for."""
+
+    def test_matching_version_passes(self) -> None:
+        run_e2e.check_gic_version([K("vibeOS: serial online"), K("vibeOS: gic: v2")], "2")
+        run_e2e.check_gic_version([K("vibeOS: gic: v3")], "3")
+
+    def test_other_version_fails(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "expected one 'vibeOS: gic: v2'"):
+            run_e2e.check_gic_version([K("vibeOS: gic: v3")], "2")
+
+    def test_missing_or_unframed_fails(self) -> None:
+        with self.assertRaises(HarnessError):
+            run_e2e.check_gic_version([K("vibeOS: serial online")], "3")
+        with self.assertRaises(HarnessError):
+            run_e2e.check_gic_version(["vibeOS: gic: v3"], "3")
+
+    def test_v2m_line_is_not_a_version(self) -> None:
+        v2m = "vibeOS: gic: v2m SPIs 80 + 64 are not all SPIs below 96; v2m absent"
+        lines = [K("vibeOS: gic: v2"), K(v2m)]
+        run_e2e.check_gic_version(lines, "2")
+
+
 class TestIsaFloorLines(unittest.TestCase):
     """`make test-e2e-isa-floor`: the refusal is the first kernel line, once."""
 
