@@ -1091,7 +1091,7 @@ near 60 s, the 9 GiB case moves to a target of its own, by the rule above that s
 | x86_64 | vibefs-crash-2 | `test-vibefs-crash-2` | 25 |
 | x86_64 | vibefs-crash-plants | `test-vibefs-crash-plants` | 15 |
 | x86_64 | forensics | `test-forensics` | 60 |
-| aarch64 | e2e-1 | `test-e2e` | 40 |
+| aarch64 | e2e-1 | `test-e2e`, `test-e2e-isa-floor` | 51 |
 | aarch64 | forensics | `test-forensics` | 60 |
 | aarch64 | kernel-1 | `test-kernel-1` | 40 |
 | aarch64 | kernel-2 | `test-kernel-2` | 40 |
@@ -1126,6 +1126,10 @@ aarch64's portable proof boots (`select`, `repeat`, `deadline-trip`, `planted`,
 `aff-off` stays on `test-kernel-smp4-5`. `hpet-off` and `fat` stay on x86: the FAT boot sends a
 self-IPI through `apic_init::send_ipi_cpu`, which does not deliver on aarch64. Those rows' figures
 are one to three boots at the x86 proof-boot cost, about 12 s each, until a `ci` run measures them.
+
+aarch64 e2e-1's `test-e2e-isa-floor` adds one short boot that ends 3 s after the ISA floor's refusal,
+about 11 s in a local TCG run at `464a29aa` (Apple M-series host, one QEMU at a time), until a `ci` run
+measures it.
 
 `test-e2e-init-fault` boots twice (`init_fault`, then `init_no_sh`, about 10 s more under TCG), so
 e2e-2's figure, measured before the second boot, is low by that much.

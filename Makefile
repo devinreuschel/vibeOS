@@ -238,7 +238,7 @@ $(BUILD_OUT)/kernels/vibeos-ktest-irqoff.elf: export VIBEOS_USER_DIR := $(USER_O
 endif
 
 .PHONY: help check check-python check-msrv check-hooks all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
-        test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test \
+        test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-isa-floor test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-vibefs-crash-1 test-vibefs-crash-2 test-vibefs-crash-plants test-e2e-uefi test-qmp test-forensics test-irqoff \
         test-aarch64 test-gic-fallback litmus
@@ -275,6 +275,7 @@ help:
 	  '  test-e2e-panic        panic-test dump contract' \
 	  '  test-e2e-panic-nest   irq_nest underflow: one dump, no reentered' \
 	  '  test-e2e-panic-stop   -smp 5: the dump stops every other CPU' \
+	  '  test-e2e-isa-floor    aarch64: -cpu cortex-a72 under TCG prints the ISA floor refusal' \
 	  '  test-e2e-gp           #GP dump+halt contract' \
 	  '  test-e2e-mce          injected #MC dump+halt contract' \
 	  '  test-e2e-pit          PIT calibration fallback' \
@@ -616,6 +617,12 @@ test-e2e-uefi: $(ISO)
 	    *) exit 2 ;; \
 	esac
 
+# The aarch64 ISA floor (ROADMAP §11.1): the production ISO on
+# `-cpu cortex-a72` (Armv8.0: no FEAT_LSE, no FEAT_PAN) under TCG prints the
+# refusal as its first kernel line, with no early exception before it.
+test-e2e-isa-floor: $(ISO)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) python3 -c 'from tests.harness.run_e2e import isa_floor_main; raise SystemExit(isa_floor_main())'
+
 test-e2e-panic: $(ISO_PANIC)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_PANIC) VIBEOS_EXPECT_PANIC=1 python3 tests/harness/run_e2e.py
 
@@ -813,7 +820,7 @@ test-gic-fallback-9: $(ISO_KTEST)
 
 # aarch64 per-push ladder (ROADMAP §11.7). x86-only e2e (PIT, #GP, #MC,
 # 9 GiB, LAPIC fallback, vibefs-crash) stays on `make test`.
-test-aarch64: test-e2e test-forensics test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-7 test-kernel-8 test-kernel-9 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-kernel-smp4-6 test-kernel-smp4-7 test-kernel-smp4-8 test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6 test-gic-fallback-7 test-gic-fallback-8 test-gic-fallback-9
+test-aarch64: test-e2e test-e2e-isa-floor test-forensics test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-7 test-kernel-8 test-kernel-9 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-kernel-smp4-6 test-kernel-smp4-7 test-kernel-smp4-8 test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6 test-gic-fallback-7 test-gic-fallback-8 test-gic-fallback-9
 
 .PHONY: litmus
 litmus:

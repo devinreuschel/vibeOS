@@ -485,7 +485,7 @@ jobs:
             runner: ubuntu-26.04-arm
             apt: qemu-system-arm qemu-efi-aarch64
             tier: e2e-1
-            targets: test-e2e
+            targets: test-e2e test-e2e-isa-floor
             jobs: 2
           - arch: aarch64
             runner: ubuntu-26.04-arm

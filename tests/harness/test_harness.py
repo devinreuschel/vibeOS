@@ -21,7 +21,7 @@ from unittest import mock
 
 import tests.harness.run_e2e as run_e2e
 import tests.harness.run_ktest as run_ktest
-from tests.harness import frame, results
+from tests.harness import frame, registry, results
 from tests.harness.harness import (
     AARCH64_FORENSICS,
     AP_ONLINE,
@@ -677,6 +677,38 @@ class TestFirstKernelLine(unittest.TestCase):
         self.assertIsNone(kernel_text("vibeOS: heap ok"))
         self.assertIsNone(kernel_text("limine: Loading executable"))
         self.assertIsNone(kernel_text("user: tests ok"))
+
+
+class TestIsaFloorLines(unittest.TestCase):
+    """`make test-e2e-isa-floor`: the refusal is the first kernel line, once."""
+
+    REFUSAL = run_e2e.ISA_FLOOR_REFUSAL
+
+    def test_refusal_first_passes(self) -> None:
+        run_e2e.check_isa_floor_lines(["limine: Loading executable", K(self.REFUSAL)])
+
+    def test_serial_online_first_fails(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            run_e2e.check_isa_floor_lines([K("vibeOS: serial online"), K(self.REFUSAL)])
+        self.assertIn("first kernel line 'vibeOS: serial online'", str(cm.exception))
+
+    def test_no_kernel_line_fails(self) -> None:
+        with self.assertRaises(HarnessError):
+            run_e2e.check_isa_floor_lines(["limine: Loading executable", self.REFUSAL])
+
+    def test_line_after_refusal_fails(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            run_e2e.check_isa_floor_lines([K(self.REFUSAL), K("vibeOS: serial online")])
+        self.assertIn("kernel line after the refusal", str(cm.exception))
+
+    def test_twice_fails(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            run_e2e.check_isa_floor_lines([K(self.REFUSAL), K(self.REFUSAL)])
+        self.assertIn("2 refusal lines", str(cm.exception))
+
+    def test_refusal_is_registered(self) -> None:
+        rows = [r for r in registry.load_rows() if r.text == self.REFUSAL]
+        self.assertEqual([(r.kind, r.arch) for r in rows], [("failure", "aarch64")])
 
 
 # The memory diagnostics of a real `make test-e2e` boot.

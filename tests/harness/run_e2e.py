@@ -9,12 +9,14 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import replace
 
-from tests.harness import frame, panic_dump, results
+from tests.harness import frame, panic_dump, registry, results
 from tests.harness.harness import (
     BOOT_ALLOWANCE_S,
     MCE_MCG_STATUS,
     MCE_UC_STATUS,
+    ROWS,
     SERIAL_ONLINE,
     EnvConfig,
     HarnessError,
@@ -35,6 +37,7 @@ from tests.harness.harness import (
     run_qemu_and_check,
     run_qemu_console_input,
     run_qemu_inject_mce,
+    run_qemu_until_exit,
     serial_tail,
     virtio_blk_args,
     virtualization_on,
@@ -434,6 +437,79 @@ def strace_main() -> int:
     """`make test-e2e-strace`: boot with `VIBEOS_CMDLINE=vibeos.strace=1` and
     check the command-line echo and the syscall trace. No retry."""
     return results.run_main(_strace)
+
+
+# The aarch64 ISA floor's refusal (ROADMAP §11.1): an Armv8.0 CPU, with
+# neither FEAT_LSE nor FEAT_PAN, under TCG, which the floor turns away.
+ISA_FLOOR_REFUSAL = "vibeOS: cpu: isa floor (lse+pan) missing"
+ISA_FLOOR_CPU = "cortex-a72"
+# How long the run reads on after the refusal before it kills QEMU: the
+# kernel halts there, so any later line (a second refusal, an exception)
+# would be a bug the check below names.
+ISA_FLOOR_SETTLE_S = 3.0
+
+
+def check_isa_floor_lines(lines: list[str]) -> None:
+    """The refusal is the run's only kernel line: the check runs before the
+    first log line, and the CPU halts after it."""
+    kl = frame.kernel_lines(lines)
+    if not kl or kl[0] != ISA_FLOOR_REFUSAL:
+        first = kl[0] if kl else "no kernel line"
+        raise HarnessError(
+            f"isa floor: first kernel line {first!r}, expected {ISA_FLOOR_REFUSAL!r}"
+        )
+    n = kl.count(ISA_FLOOR_REFUSAL)
+    if n != 1:
+        raise HarnessError(f"isa floor: {n} refusal lines, expected one")
+    if len(kl) != 1:
+        raise HarnessError(f"isa floor: kernel line after the refusal: {kl[1]!r}")
+
+
+def _isa_floor() -> int:
+    env = env_config(default_iso=default_iso(), default_timeout=BOOT_ALLOWANCE_S)
+    res = results.Results(env.tier, env.arch)
+    if env.arch != "aarch64":
+        print("[e2e] FAIL: the ISA floor test boots aarch64 only (ARCH=aarch64)", file=sys.stderr)
+        return 1
+    # TCG whatever VIBEOS_QEMU_ACCEL says: HVF and KVM run the host's CPU.
+    cfg = replace(env.qemu(), cpu=ISA_FLOOR_CPU, cpu_explicit=True, accel="tcg")
+    # Every aarch64 kernel failure line but the refusal fails the run, the
+    # early-exception line (`vibeOS: panic: early`) and `#UNDEF` among them.
+    sigs = tuple(
+        s for s in registry.signatures(ROWS, {frame.KERNEL}, "aarch64") if s != ISA_FLOOR_REFUSAL
+    )
+
+    # The run reads on for `ISA_FLOOR_SETTLE_S` after the refusal, then
+    # kills QEMU, so a line after it is seen; a failure line ends it.
+    def settle(line: str) -> float | None:
+        return ISA_FLOOR_SETTLE_S if kernel_text(line) == ISA_FLOOR_REFUSAL else None
+
+    try:
+        result = run_qemu_until_exit(
+            cfg, timeout_s=env.timeout, panic_signatures=sigs, kill_after=settle
+        )
+        check_isa_floor_lines(result.lines)
+    except HarnessError as e:
+        _record_missing(str(e))
+        res.add_boot(qemu_argv(cfg, None), cfg, None)
+        res.record("marker", "isa_floor_refusal", "failed")
+        print(f"[e2e] FAIL: {e}", file=sys.stderr)
+        return 1
+    res.record("marker", "isa_floor_refusal", "passed")
+    res.add_boot(qemu_argv(cfg, None), cfg, result.exit_code)
+    print(f"[e2e] ok: -cpu {ISA_FLOOR_CPU} refused: {ISA_FLOOR_REFUSAL!r}", file=sys.stderr)
+    print(
+        f"[e2e]   . the refusal is the only kernel line in {ISA_FLOOR_SETTLE_S} s after it;"
+        " no early exception",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def isa_floor_main() -> int:
+    """`make test-e2e-isa-floor`: boot the production ISO on an Armv8.0 CPU
+    and expect the ISA floor's refusal. No retry."""
+    return results.run_main(_isa_floor)
 
 
 # `VIBEOS_PANIC_VARIANT`: a panic-path build (ROADMAP §10.7), its ISO
