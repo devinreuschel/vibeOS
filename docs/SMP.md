@@ -202,10 +202,13 @@ pointer and branches to Rust `ap_entry_aarch64` with the `PerCpu` pointer in `x0
 each system register it reads or writes, each TLBI and DSB, and each ISB, STLR, SMC, HVC, and
 WFI.
 
-`ap_entry_aarch64` then masks IRQs, notes `CTR_EL0`, sets PAN, clears `TPIDRRO_EL0`, installs the
-per-CPU base and the idle thread as `current`, loads `VBAR`, writes the empty user root to TTBR0
-again (`syscall_init::init_ap`), releases the debug OS Lock, and prints the exception-level
-marker. It enables this core's GIC interface (`apic_init::enable_ap`), and a core with no
+`ap_entry_aarch64` then masks IRQs, sets PAN, clears `TPIDRRO_EL0`, installs the per-CPU base and
+the idle thread as `current`, and loads `VBAR`. It keeps the empty user root the stub loaded in
+TTBR0 until its first `asid::load_ttbr0`. It meets its `CTR_EL0` into the cache-line meet
+(`cpu::note_cache`), which can refuse it: a core whose writeback granule is larger than a page,
+or than the DMA granule frozen at `smp: done`, prints the registered refusal line through
+`marker!` and parks before `ready`, so the boot CPU counts it lost. Then it releases the debug OS
+Lock and prints the exception-level marker. It enables this core's GIC interface (`apic_init::enable_ap`), and a core with no
 redistributor parks there, before `ready`, so the boot CPU times it out; then it arms its timer
 and claims the bring-up handshake, and a core that lost it parks. The winner marks itself online,
 prints `sched: cpu<n> ready`, publishes `ready`, unmasks IRQs, and enters `idle_loop`.

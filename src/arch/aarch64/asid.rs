@@ -1,5 +1,11 @@
 //! aarch64 ASIDs: the kernel half of `vibeos::mm::asid` (ROADMAP §11.2,
-//! PORTABILITY §11.2). Every TTBR0 load goes through [`load_ttbr0`].
+//! PORTABILITY §11.2). Every TTBR0 load of a user root goes through
+//! [`load_ttbr0`]. The raw writes are of ASID-0 roots before this CPU loads
+//! any user root, each followed by a local `tlbi vmalle1` before an ASID
+//! is handed out: the boot CPU's TTBR1 takeover (`mmu::takeover_ttbr1`)
+//! and its empty-root write in `syscall_init::init_bsp`, before
+//! [`init_bsp`] builds the allocator, and each AP's entry stub
+//! (`secondary`).
 //!
 //! With ASIDs on, a user root is loaded with its space's ASID in TTBR0's
 //! bits 63:48 (`TCR_EL1.A1` clear) and no invalidate: the allocator keeps

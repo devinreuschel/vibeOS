@@ -196,6 +196,9 @@ unsafe fn takeover_ttbr1(new_root: u64) {
         crate::boot::halt_with("vibeOS: paging: ttbr0 tcr");
     }
     let (mair, tcr) = cpu::mair_tcr();
+    // Raw TTBR0 writes, not `asid::load_ttbr0`: they come before the ASID
+    // allocator and before any user root, load ASID-0 tables that hold no
+    // user mapping, and each is followed by `tlbi vmalle1` here.
     // SAFETY: `id` maps `tramp` executable at its PA, `reserved` and
     // `empty` are zeroed tables, and `new_root` maps the return and the
     // stack. established here.
