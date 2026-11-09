@@ -401,9 +401,7 @@ fn bump_counter() {
 /// The `svc` body's Rust half: the process layer's `syscall`.
 pub fn enter(frame: &mut UserFrame) {
     bump_counter();
-    let nr = frame.x[8] as u32 as u64;
-    frame.orig_x0 = frame.x[0];
-    frame.syscallno = nr;
+    let nr = frame.svc_entry();
     vibeos::trace!(SyscallEnter, nr, frame.x[0]);
     // Acquire: pairs with the Release store in `set_syscall_handler`.
     let h = HANDLER.load(Ordering::Acquire);

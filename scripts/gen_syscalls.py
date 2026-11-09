@@ -20,7 +20,10 @@ architecture, its arguments' C types in order, and its pointer declarations
   and `USER_END` and `USER_MAP_END` from `crates/core/src/mm/paging.rs`;
 - the block between `<!-- gen_syscalls: begin syscall-table -->` and
   `<!-- gen_syscalls: end syscall-table -->` in docs/SYSCALL.md §3, whose
-  `errors` column lists each row's `errors`.
+  `errors` column lists each row's `errors`;
+- the `aarch64-registers` block in docs/SYSCALL.md §1.1, aarch64's register
+  table, from `AARCH64`, the convention whose `rule` the aarch64 table above
+  is generated with.
 
 Each row's `errors` must name `KError` rows, and each `ktest` attribution
 an errno of its row's `errors` and an in-guest test registered under
@@ -71,6 +74,39 @@ KTEST_REG = re.compile(r'\btest\(\s*"([A-Za-z0-9_.-]+)"')
 USER_ERRNO_OUT = Path("user/src/errno.rs")
 
 MAX_ARGS = 6
+
+
+@dataclass(frozen=True)
+class Convention:
+    """One architecture's Linux syscall convention: the trap instruction, the number's register
+    and the `NrRule` that reads it, the argument registers in order, and the result register."""
+
+    insn: str
+    nr_reg: str
+    rule: str
+    rule_text: str
+    args: tuple[str, ...]
+    ret: str
+
+
+def reg_index(reg: str) -> int:
+    """`x<n>`'s `n`."""
+    if not re.fullmatch(r"x([0-9]|[12][0-9]|30)", reg):
+        raise TableError(f"{reg!r} is no general register x0 to x30")
+    return int(reg[1:])
+
+
+# aarch64 (ROADMAP §11.6): Linux arm64's. The kernel reads it through the generated
+# `aarch64::{NR_REG, ARG_REGS, RET_REG}` (`trap::Abi`, `UserFrame::svc_entry`), and
+# SYSCALL.md §1.1's table is written from it; the user runtime's `svc` wrappers follow it.
+AARCH64 = Convention(
+    insn="svc #0",
+    nr_reg="x8",
+    rule="Low32",
+    rule_text="the low 32 bits, read as unsigned, as Linux's arm64 `invoke_syscall` reads them",
+    args=("x0", "x1", "x2", "x3", "x4", "x5"),
+    ret="x0",
+)
 
 # C type -> (Rust type, `CType` variant, recorder `Val` variant, signed).
 SCALARS: dict[str, tuple[str, str, bool]] = {
@@ -715,8 +751,11 @@ def kernel_params(row: Row) -> str:
     return "".join(f", {a.name}: {a.ty.kernel_rust}" for a in row.args)
 
 
-def render_arch(table: Table, arch: str, rule: str, doc: str) -> list[str]:
-    """`arch`'s numbers, `TABLE`, `call` and `dispatch` as an inline `pub mod`."""
+def render_arch(
+    table: Table, arch: str, rule: str, doc: str, conv: Convention | None = None
+) -> list[str]:
+    """`arch`'s numbers, `TABLE`, `call` and `dispatch` as an inline `pub mod`, and with
+    `conv` its convention's registers, which the port's `SyscallAbi` reads."""
     rows = [r for r in table.rows if r.nr(arch) is not None]
     size = max((r.nr(arch) or 0) for r in rows) + 1
     out = [
@@ -748,6 +787,19 @@ def render_arch(table: Table, arch: str, rule: str, doc: str) -> list[str]:
         "    /// The table dispatch indexes by number.",
         f"    pub static TABLE: NrTable = NrTable::new(NrRule::{rule}, &SLOTS);",
         "",
+    ]
+    if conv is not None:
+        regs = ", ".join(str(reg_index(r)) for r in conv.args)
+        out += [
+            f"    /// The `x` register `{conv.insn}` takes the number in (SYSCALL.md §1.1).",
+            f"    pub const NR_REG: usize = {reg_index(conv.nr_reg)};",
+            "    /// The `x` registers of the arguments, in order.",
+            f"    pub const ARG_REGS: [usize; {len(conv.args)}] = [{regs}];",
+            "    /// The `x` register the result goes in.",
+            f"    pub const RET_REG: usize = {reg_index(conv.ret)};",
+            "",
+        ]
+    out += [
         "    /// Call `sys`'s handler, each register cut to its argument's C type.",
         "    pub fn call<H: Handlers + ?Sized>(h: &mut H, sys: Sys, regs: &[u64; 6])"
         " -> SysResult {",
@@ -914,8 +966,9 @@ def render_kernel(table: Table) -> str:
     out += render_arch(
         table,
         "aarch64",
-        "Low32",
-        "aarch64: the number is the low 32 bits of `x8`, unsigned (ROADMAP §11.6).",
+        AARCH64.rule,
+        f"aarch64: the number is the low 32 bits of `{AARCH64.nr_reg}`, unsigned (ROADMAP §11.6).",
+        AARCH64,
     )
     out += [
         "",
@@ -1419,6 +1472,24 @@ def render_md(table: Table) -> str:
     return "\n" + "\n".join(out) + "\n\n"
 
 
+def render_aarch64_registers(table: Table) -> str:
+    """SYSCALL.md §1.1's register table, from `AARCH64`, the convention that also sets the
+    generated aarch64 table's `NrRule`."""
+    del table
+    c = AARCH64
+    out = [
+        "| Role | Register | Notes |",
+        "|------|----------|--------|",
+        f"| trap | `{c.insn}` | from EL0 |",
+        f"| number | `{c.nr_reg}` | {c.rule_text} (`NrRule::{c.rule}`); asm-generic numbers |",
+    ]
+    for i, reg in enumerate(c.args):
+        note = " saved as `orig_x0` for a restart " if reg == c.ret else " "
+        out.append(f"| arg {i} | `{reg}` |{note}|")
+    out.append(f"| return | `{c.ret}` | the result or `-errno`, as on x86_64 (§2) |")
+    return "\n" + "\n".join(out) + "\n\n"
+
+
 # -------------------------------------------------------------- registry
 
 
@@ -1436,6 +1507,7 @@ EMITTERS: list[Emitter] = [
     Emitter(X86_OUT, render_x86),
     Emitter(USER_OUT, render_user_x86),
     Emitter(USER_AARCH64_OUT, render_user_aarch64),
+    Emitter(SYSCALL_MD, render_aarch64_registers, "aarch64-registers"),
     Emitter(SYSCALL_MD, render_md, "syscall-table"),
     Emitter(SYSCALL_MD, render_errno_md, "errno-table"),
     Emitter(USER_ERRNO_OUT, render_user_errno),

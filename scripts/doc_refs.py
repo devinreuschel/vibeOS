@@ -20,8 +20,16 @@ script checks, over every tracked file outside the dated records (EXCLUDE):
   each backticked Enforced by name exists in the tree (resolve_enforcer), and no row whose Status
   starts with *enforced* has `none` there;
 - the boot order as one table: BOOT.md §3.3 holds one table, followed only by the ordering
-  list, its one-line lead-in and `Planned` paragraphs, and each backticked Marker cell names an
-  x86_64 contract row of tests/contract/markers.toml, with `order` never decreasing down the table.
+  list, its one-line lead-in and `Planned` paragraphs. Its Marker column names x86_64 contract
+  rows of tests/contract/markers.toml and its `aarch64 marker` column aarch64 ones, each cell
+  `(none)` or backticked markers, with `order` never decreasing down the column; each column
+  names every contract row of its architecture that no `*_test` build alone prints, and none
+  twice, and every row's `aarch64` cell says what that step does on aarch64;
+- the aarch64 secondary stub: the steps SMP.md §7.3's `The stub, in order:` paragraph names in
+  backticks are exactly the `global_asm!` stub's in src/arch/aarch64/secondary.rs, in its order:
+  each system register it reads or writes, each `tlbi`, `dsb`, `dmb`, `dc`, `ic`, and `at`, and
+  each `isb`, `stlr`, `smc`, `hvc`, `wfi`, and `eret` (STUB_DESCRIPTIVE lists the registers it
+  may name that are no step); a tree with one of the two files and not the other is an error.
 
 `--where x.y` prints the file and anchor that hold DESIGN §x.y.
 """
@@ -620,16 +628,32 @@ def _marker_key(text: str) -> str:
     return PLACEHOLDER.sub("\0", text.removeprefix("vibeOS: ")).strip()
 
 
-def contract_markers(markers_toml: str) -> dict[str, int | None]:
-    """Each x86_64 contract marker's normalized text and its `order`."""
+def contract_markers(markers_toml: str, arch: str = "x86_64") -> dict[str, int | None]:
+    """Each `arch` contract marker's normalized text and its `order`."""
+    return {k: order for k, (order, _) in _arch_contract(markers_toml, arch).items()}
+
+
+def _arch_contract(markers_toml: str, arch: str) -> dict[str, tuple[int | None, bool]]:
+    """Each `arch` contract marker's key, its `order`, and whether the table must name it: every
+    row but one only a `*_test` build prints (a positive `when` term ending in `_test`)."""
     data = tomllib.loads(markers_toml)
-    out: dict[str, int | None] = {}
+    out: dict[str, tuple[int | None, bool]] = {}
     for row in data.get("marker", []):
-        if row.get("kind") != "contract" or row.get("arch") not in ("both", "x86_64"):
+        if row.get("kind") != "contract" or row.get("arch") not in ("both", arch):
             continue
         order = row.get("order")
-        out[_marker_key(str(row.get("text", "")))] = order if isinstance(order, int) else None
+        when = [str(t) for t in row.get("when", [])]
+        required = not any(t.endswith("_test") and not t.startswith("!") for t in when)
+        out[_marker_key(str(row.get("text", "")))] = (
+            order if isinstance(order, int) else None,
+            required,
+        )
     return out
+
+
+# Each marker column of the §3.3 table, and the architecture whose contract rows it names.
+BOOT_MARKER_COLUMNS = (("Marker", "x86_64"), ("aarch64 marker", "aarch64"))
+BOOT_ARCH_COLUMN = "aarch64"
 
 
 def _section_lines(text: str, number: str) -> list[tuple[int, str]]:
@@ -656,7 +680,8 @@ def _section_lines(text: str, number: str) -> list[tuple[int, str]]:
 
 def check_boot_order(boot: str, markers_toml: str) -> list[str]:
     """BOOT.md §3.3 holds one table, then only an `:`-ended lead-in, its list, and `Planned`
-    paragraphs; each Marker cell names a contract marker, in non-decreasing `order`."""
+    paragraphs; each marker column names its architecture's contract markers, all of them, in
+    non-decreasing `order`, and no `aarch64` cell is empty."""
     errors: list[str] = []
     body = _section_lines(boot, BOOT_SECTION)
     if not body:
@@ -678,29 +703,59 @@ def check_boot_order(boot: str, markers_toml: str) -> list[str]:
         where = tables[1][0][0] if len(tables) > 1 else body[0][0]
         return [f"{BOOT}:{where}: §{BOOT_SECTION} holds {len(tables)} tables, not one"]
     errors.extend(_check_after_table(after))
-    known = contract_markers(markers_toml)
     rows = tables[0]
     header = [c.strip() for _, c in _split_cells(rows[0][1])]
-    if "Marker" not in header:
-        return errors + [f"{BOOT}:{rows[0][0]}: §{BOOT_SECTION}'s table has no Marker column"]
-    col = header.index("Marker")
-    last: tuple[int, str] | None = None
-    for n, line in rows[1:]:
-        if _is_delimiter_row(line):
+    body_rows = [
+        (n, [c.strip() for _, c in _split_cells(line)])
+        for n, line in rows[1:]
+        if not _is_delimiter_row(line)
+    ]
+    for column, arch in BOOT_MARKER_COLUMNS:
+        if column not in header:
+            errors.append(f"{BOOT}:{rows[0][0]}: §{BOOT_SECTION}'s table has no {column} column")
             continue
-        cells = [c.strip() for _, c in _split_cells(line)]
+        errors.extend(_check_marker_column(body_rows, header.index(column), column, arch,
+                                           _arch_contract(markers_toml, arch)))
+    if BOOT_ARCH_COLUMN not in header:
+        errors.append(
+            f"{BOOT}:{rows[0][0]}: §{BOOT_SECTION}'s table has no {BOOT_ARCH_COLUMN} column"
+        )
+    else:
+        col = header.index(BOOT_ARCH_COLUMN)
+        for n, cells in body_rows:
+            if col >= len(cells) or not cells[col]:
+                errors.append(f"{BOOT}:{n}: empty {BOOT_ARCH_COLUMN} cell")
+    return errors
+
+
+def _check_marker_column(
+    body_rows: list[tuple[int, list[str]]],
+    col: int,
+    column: str,
+    arch: str,
+    known: dict[str, tuple[int | None, bool]],
+) -> list[str]:
+    """One marker column: each cell `(none)` or backticked `arch` contract markers, `order`
+    never decreasing, and every required marker named."""
+    errors: list[str] = []
+    seen: set[str] = set()
+    last: tuple[int, str] | None = None
+    for n, cells in body_rows:
         cell = cells[col] if col < len(cells) else ""
         if cell == "(none)":
             continue
         names = TICKED_NAME.findall(cell)
         if not names:
-            errors.append(f"{BOOT}:{n}: Marker cell is neither `(none)` nor backticked markers")
+            errors.append(f"{BOOT}:{n}: {column} cell is neither `(none)` nor backticked markers")
         for name in names:
             key = _marker_key(name)
             if key not in known:
-                errors.append(f"{BOOT}:{n}: marker {name} is no contract row of {MARKERS}")
+                errors.append(f"{BOOT}:{n}: marker {name} is no {arch} contract row of {MARKERS}")
                 continue
-            order = known[key]
+            if key in seen:
+                errors.append(f"{BOOT}:{n}: marker {name} is named twice in the {column} column")
+            seen.add(key)
+            order = known[key][0]
             if order is None:
                 continue
             if last is not None and order < last[0]:
@@ -708,6 +763,13 @@ def check_boot_order(boot: str, markers_toml: str) -> list[str]:
                     f"{BOOT}:{n}: marker {name} (order {order}) after {last[1]} (order {last[0]})"
                 )
             last = (order, name)
+    first = body_rows[0][0] if body_rows else 0
+    for key, (_, required) in sorted(known.items()):
+        if required and key not in seen:
+            text = key.replace("\0", "<n>")
+            errors.append(
+                f"{BOOT}:{first}: {arch} contract marker {text} is in no {column} cell"
+            )
     return errors
 
 
@@ -745,6 +807,139 @@ def _check_after_table(after: list[tuple[int, str]]) -> list[str]:
     return errors
 
 
+# ---- The aarch64 secondary stub, step by step (SMP.md §7.3, ROADMAP §11.4) ----
+
+SMP = "docs/SMP.md"
+SMP_SECTION = "7.3"
+STUB = "src/arch/aarch64/secondary.rs"
+STUB_LEAD = "The stub, in order:"
+# The `s3_*` encodings the stub reads or writes, by their architectural names.
+SYSREG_ENCODINGS = {
+    "S3_4_C1_C2_2": "HCRX_EL2",
+    "S3_4_C1_C1_4": "HFGRTR_EL2",
+    "S3_4_C1_C1_5": "HFGWTR_EL2",
+    "S3_4_C1_C1_6": "HFGITR_EL2",
+    "S3_4_C3_C1_4": "HDFGRTR_EL2",
+    "S3_4_C3_C1_5": "HDFGWTR_EL2",
+    "S3_4_C3_C1_6": "HAFGRTR_EL2",
+}
+# Registers the paragraph may name that are no step of the stub: where the boot CPU found the
+# flag the stub reads from its block.
+STUB_DESCRIPTIVE = frozenset({"ID_AA64PFR0_EL1", "ID_AA64DFR0_EL1"})
+SYSREG_NAME = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_EL[0-3]")
+# Instructions that are a step by their mnemonic alone, and those that are one with their operand.
+STUB_BARE = frozenset({"isb", "stlr", "smc", "hvc", "wfi", "eret"})
+STUB_WITH_OPERAND = frozenset({"tlbi", "dsb", "dmb", "dc", "ic", "at"})
+ASM_STRING = re.compile(r'^\s*"([^"]*)",?\s*(?://.*)?$')
+
+
+def stub_steps(source: str) -> tuple[list[str], list[str]]:
+    """The steps of the `global_asm!` stub in `source`, in order: each system register an `mrs`
+    reads or an `msr` writes, each `tlbi`, `dsb`, `dmb`, `dc`, `ic`, and `at` with its operand,
+    and each `isb`, `stlr`, `smc`, `hvc`, `wfi`, and `eret`; and the errors found. A string that
+    holds several instructions, split by `;` or `\\n`, gives each its own step."""
+    steps: list[str] = []
+    errors: list[str] = []
+    start = source.find("global_asm!(")
+    if start < 0:
+        return [], [f"{STUB}: no global_asm! stub"]
+    for line in source[start:].splitlines()[1:]:
+        if line.strip().startswith(");"):
+            break
+        m = ASM_STRING.match(line)
+        if m is None:
+            continue
+        for insn in re.split(r";|\\n", m.group(1)):
+            errors.extend(_stub_insn(insn, steps))
+    return steps, errors
+
+
+def _stub_insn(insn: str, steps: list[str]) -> list[str]:
+    """Append `insn`'s step, if it is one, to `steps`; the errors found."""
+    ops = insn.replace(",", " ").split()
+    if not ops:
+        return []
+    reg = ""
+    if ops[0] == "msr" and len(ops) > 1:
+        reg = ops[1]
+    elif ops[0] == "mrs" and len(ops) > 2:
+        reg = ops[2]
+    elif ops[0] in STUB_WITH_OPERAND and len(ops) > 1:
+        steps.append(f"{ops[0]} {ops[1].lower()}")
+    elif ops[0] in STUB_BARE:
+        steps.append(ops[0])
+    if not reg:
+        return []
+    name = reg.upper()
+    if name.startswith("S3_"):
+        if name not in SYSREG_ENCODINGS:
+            return [f"{STUB}: {reg} has no name in doc_refs.SYSREG_ENCODINGS"]
+        name = SYSREG_ENCODINGS[name]
+    steps.append(name)
+    return []
+
+
+def _stub_token(text: str) -> str | None:
+    """A backticked span of the stub paragraph as a stub step, or None when it names none."""
+    words = text.split()
+    if not words:
+        return None
+    if words[0] in STUB_WITH_OPERAND and len(words) == 2:
+        return f"{words[0]} {words[1].lower()}"
+    if len(words) == 1 and words[0] in STUB_BARE:
+        return words[0]
+    reg = words[0].split(".")[0].upper()
+    if len(words) == 1 and SYSREG_NAME.fullmatch(reg) and reg not in STUB_DESCRIPTIVE:
+        return reg
+    return None
+
+
+def check_stub_doc(smp: str, source: str) -> list[str]:
+    """SMP.md §7.3's `The stub, in order:` paragraph names the stub's steps in backticks
+    (`HCR_EL2`, `tlbi vmalle1`, `dsb nsh`, `isb`, `stlr`, `smc`), exactly: each step once where
+    the stub runs it, and no step it does not run."""
+    steps, errors = stub_steps(source)
+    if not steps and not errors:
+        errors.append(f"{STUB}: the stub has no steps")
+    para: list[tuple[int, str]] = []
+    for n, line in _section_lines(smp, SMP_SECTION):
+        if para and not line.strip():
+            break
+        if para or line.startswith(STUB_LEAD):
+            para.append((n, line))
+    if not para:
+        return errors + [f"{SMP}: §{SMP_SECTION} has no paragraph that starts {STUB_LEAD!r}"]
+    named: list[tuple[int, str]] = []
+    for n, line in para:
+        for m in TICKED_NAME.finditer(line):
+            step = _stub_token(m.group(1))
+            if step is not None:
+                named.append((n, step))
+    for i in range(max(len(steps), len(named))):
+        want = steps[i] if i < len(steps) else None
+        got = named[i] if i < len(named) else None
+        if got is not None and got[1] == want:
+            continue
+        before = f"after `{steps[i - 1]}`" if i > 0 else "first"
+        if got is None:
+            errors.append(
+                f"{SMP}:{para[-1][0]}: the stub paragraph ends before step {i + 1}, `{want}` "
+                f"{before}, as {STUB} runs it"
+            )
+        elif want is None:
+            errors.append(
+                f"{SMP}:{got[0]}: the stub paragraph names `{got[1]}` after the stub's last "
+                f"step; {STUB} runs no more"
+            )
+        else:
+            errors.append(
+                f"{SMP}:{got[0]}: the stub paragraph names `{got[1]}` as step {i + 1}, where "
+                f"{STUB} runs `{want}` {before}"
+            )
+        break
+    return errors
+
+
 def in_scope(path: str) -> bool:
     return not path.startswith(EXCLUDE)
 
@@ -765,6 +960,12 @@ def check_tree(files: Mapping[str, str]) -> list[str]:
         errors.extend(check_register(files[REGISTER], tree_names(files)))
     if BOOT in files and MARKERS in files:
         errors.extend(check_boot_order(files[BOOT], files[MARKERS]))
+    if SMP in files or STUB in files:
+        missing = [p for p in (SMP, STUB) if p not in files]
+        for path in missing:
+            errors.append(f"{path}: missing; the aarch64 stub check reads it with its pair")
+        if not missing:
+            errors.extend(check_stub_doc(files[SMP], files[STUB]))
     return sorted(errors)
 
 

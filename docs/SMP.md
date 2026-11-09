@@ -171,19 +171,41 @@ MMU and D-cache off (`src/arch/aarch64/secondary.rs`), through PSCI `CPU_ON` on 
 Point of Coherency (`dc cvac`, `dsb sy`), and passes the page's physical address as `context_id`.
 The parameter pages, the identity tables, and `ttbr0_empty` are never freed: they live for the boot,
 one page per CPU plus a fixed table count (`secondary::IDENTITY_TABLES`), so that leak is bounded.
-The stub, in order: checks the ISA floor (FEAT_LSE and FEAT_PAN) and stores `STATUS_FEATURE` then
-`CPU_OFF` if either is missing; when the block says EL2, writes `HCR_EL2` whole and an `isb`, then
-`tlbi vmalle1` and `dsb nsh` (an E2H/TGE change leaves the local TLB stale), then the rest of the
-EL2 controls on the port's one list whole from the block (`CPTR_EL2`, `CNTHCTL_EL2`, `HSTR_EL2`,
-`MDCR_EL2`, `ICC_SRE_EL2`, `HCRX_EL2` and the FGT registers where the ID bits say so,
-`CNTVOFF_EL2` = 0, `SCTLR_EL2` with `M`, `C`, and `I` clear) before any `*_EL1` access; writes
-`MAIR`, `TCR`, `TTBR1`, and the identity `TTBR0` from the block, and `CNTKCTL_EL1` only at EL1
-(VHE aliases it to `CNTHCTL_EL2`); runs `tlbi vmalle1` and `dsb nsh` before the `isb` that publishes
-`SCTLR.M`, then enables the MMU with the boot CPU's whole `SCTLR_EL1`; jumps to the TTBR1 continue
-address; points `TTBR0` at
-the empty user root and invalidates the local TLB; then stores `STATUS_ARRIVED`, its first shared
-write. Rust `ap_entry_aarch64` then installs the per-CPU base, GIC, and timer, prints the
-exception-level marker, claims the bring-up handshake, and publishes `ready` only when it won.
+The stub, in order: reads `ID_AA64ISAR0_EL1` and `ID_AA64MMFR1_EL1` and, when FEAT_LSE or FEAT_PAN
+is missing, keeps `STATUS_FEATURE` in a register in place of `STATUS_ARRIVED` and goes on, since it
+writes no shared memory before its MMU is on. When the block says EL2, it writes `HCR_EL2` whole
+and an `isb`, then `tlbi vmalle1`, `dsb nsh`, and `isb` (an E2H/TGE change leaves the local TLB
+stale), then the rest of the EL2 controls on the port's one list whole from the block: `CPTR_EL2`,
+`CNTHCTL_EL2`, `HSTR_EL2`, `MDCR_EL2`, `ICC_SRE_EL2` when the block's flag says the boot CPU found
+the GIC system registers (from `ID_AA64PFR0_EL1.GIC`), `HCRX_EL2` when its flag says FEAT_HCX, the
+fine-grained trap registers `HFGRTR_EL2`, `HFGWTR_EL2`, `HFGITR_EL2`, `HDFGRTR_EL2`, and
+`HDFGWTR_EL2` when its flag says FEAT_FGT, and `HAFGRTR_EL2` only when a further flag says
+FEAT_AMUv1 as well; then `CNTVOFF_EL2` = 0, an `isb`, and `SCTLR_EL2` with M, C, and I clear, all
+before any `*_EL1` access. It writes `CNTKCTL_EL1` only at EL1 (VHE aliases it to CNTHCTL_EL2,
+written above with the same value), `PMUSERENR_EL0` when the block's flag says the boot CPU found
+PMUv3 (from `ID_AA64DFR0_EL1.PMUVer`), then `CPACR_EL1`, `MAIR_EL1`, `TCR_EL1`, the identity
+`TTBR0_EL1`, and `TTBR1_EL1`, each the boot CPU's value from the block; runs `tlbi vmalle1`,
+`dsb nsh`, and `isb`, then enables the MMU with the boot CPU's whole `SCTLR_EL1` and an `isb`;
+jumps to the TTBR1 continue address; loads the parameter page's TTBR1 address, its stack, its Rust
+entry, and its `PerCpu` pointer while the identity map still maps the page; points `TTBR0_EL1` at
+the empty user root with an `isb`, then runs `tlbi vmalle1`, `dsb nsh`, and `isb`, so no identity
+entry survives; loads the PSCI conduit from the page; then stores its status with `stlr` through
+the page's TTBR1 address, its first shared write and its last access to the page, ordered after
+every load above for the boot CPU's Acquire in `smp_init::wait_secondary_status` (AGENTS.md rule
+5), and runs `dsb ish`. With `STATUS_FEATURE` it calls PSCI `CPU_OFF` through `smc`, or through
+`hvc` when the conduit is HVC, and waits in `wfi` should that return; otherwise it loads its stack
+pointer and branches to Rust `ap_entry_aarch64` with the `PerCpu` pointer in `x0`.
+`scripts/doc_refs.py` checks that this paragraph names the stub's steps exactly, in its order:
+each system register it reads or writes, each TLBI and DSB, and each ISB, STLR, SMC, HVC, and
+WFI.
+
+`ap_entry_aarch64` then masks IRQs, notes `CTR_EL0`, sets PAN, clears `TPIDRRO_EL0`, installs the
+per-CPU base and the idle thread as `current`, loads `VBAR`, writes the empty user root to TTBR0
+again (`syscall_init::init_ap`), releases the debug OS Lock, and prints the exception-level
+marker. It enables this core's GIC interface (`apic_init::enable_ap`), and a core with no
+redistributor parks there, before `ready`, so the boot CPU times it out; then it arms its timer
+and claims the bring-up handshake, and a core that lost it parks. The winner marks itself online,
+prints `sched: cpu<n> ready`, publishes `ready`, unmasks IRQs, and enters `idle_loop`.
 
 ## 7.4 AP bring-up sequence
 
@@ -661,9 +683,10 @@ Calling contract, on both architectures. On x86_64 an invalidation may wait for 
 with IF=0, so the TLB-maintenance operation of the §11.1 seam is called only where
 [§2.9](INVARIANTS.md#29-preemption-and-interrupt-state) rule 2 allows a cross-CPU wait: never in NMI, `#MC`, or
 `#DB` context, never from a serviced shootdown or call-function handler, and never under the log-ring
-TAS, whose waiters service no IPIs. The aarch64 implementation asserts the same contexts in debug
-builds, although its broadcast waits for no peer, so work run first on aarch64 cannot add a deadlock
-that only x86_64 hits.
+TAS, whose waiters service no IPIs. The aarch64 implementation does not check these contexts yet:
+the ROADMAP §11.2 box for the Inner Shareable forms adds a debug-build assert of them, although its
+broadcast waits for no peer, so that work run first on aarch64 cannot add a deadlock that only
+x86_64 hits.
 
 The initiator waits with interrupts disabled (`InterruptGuard` around publish → IPI → ack → clear
 waiters). A waiter with IF off cannot take an incoming shootdown as an IRQ, which would deadlock two
