@@ -15,6 +15,7 @@ from scripts.doc_refs import (
     check_citations,
     check_links,
     check_register,
+    check_stub_doc,
     check_tree,
     contract_markers,
     design_index,
@@ -24,6 +25,7 @@ from scripts.doc_refs import (
     resolve_enforcer,
     roadmap_index,
     slug,
+    stub_steps,
     tree_names,
     where,
 )
@@ -428,13 +430,13 @@ order = 5
 
 BOOT_HEAD = "# 3. Boot\n\n## 3.3 `_start` order\n\nIntro.\n\n"
 BOOT_TABLE = (
-    "| # | Step | Marker | Why here |\n"
-    "|---|------|--------|----------|\n"
-    "| 1 | Serial | `serial online` | First. |\n"
-    "| 2 | Limine | `limine: rev 3 ok` | Then. |\n"
-    "| 6 | PMM | `pmm: N free 4KiB frames` | Frames. |\n"
-    "| 15b | Scan | (none) | Alone. |\n"
-    "| 16 | SMP | `smp: tsc skew <n> cycles` | No order. |\n"
+    "| # | Step | Marker | aarch64 | aarch64 marker | Why here |\n"
+    "|---|------|--------|---------|----------------|----------|\n"
+    "| 1 | Serial | `serial online` | PL011. | `serial online`, `el2: <n> ok` | First. |\n"
+    "| 2 | Limine | `limine: rev 3 ok` | Same. | (none) | Then. |\n"
+    "| 6 | PMM | `pmm: N free 4KiB frames` | Same. | `pmm: N free 4KiB frames` | Frames. |\n"
+    "| 15b | Scan | (none) | Same. | (none) | Alone. |\n"
+    "| 16 | SMP | `smp: tsc skew <n> cycles` | PSCI. | `smp: tsc skew <n> cycles` | No order. |\n"
 )
 BOOT_TAIL = (
     "\nOrdering rules:\n\n- one\n  wrapped\n- two\n\nPlanned (ROADMAP §25.4): later.\n"
@@ -460,6 +462,9 @@ class TestBootOrder(unittest.TestCase):
                          _marker_key("vibeOS: pmm: <n> free 4KiB frames"))
         self.assertNotIn(_marker_key("el2: <n> ok"), known)
         self.assertNotIn(_marker_key("ktest: ok <name>"), known)
+        arm = contract_markers(MARKERS_TOML, "aarch64")
+        self.assertEqual(arm[_marker_key("el2: <n> ok")], 15)
+        self.assertNotIn(_marker_key("limine: rev 3 ok"), arm)
 
     def test_second_table(self) -> None:
         errors = self.run_on(boot(tail="\nMore:\n\n| x | y |\n|---|---|\n" + BOOT_TAIL))
@@ -481,29 +486,203 @@ class TestBootOrder(unittest.TestCase):
     def test_unknown_marker(self) -> None:
         table = BOOT_TABLE.replace("`limine: rev 3 ok`", "`limine: rev N okay`")
         errors = self.run_on(boot(table))
-        self.assertEqual(len(errors), 1)
+        self.assertEqual(len(errors), 2, errors)
         self.assertRegex(errors[0], r"^docs/BOOT\.md:10: marker limine: rev N okay is no "
-                                    r"contract row of tests/contract/markers\.toml$")
+                                    r"x86_64 contract row of tests/contract/markers\.toml$")
+        self.assertRegex(errors[1], r"^docs/BOOT\.md:\d+: x86_64 contract marker "
+                                    r"limine: rev 3 ok is in no Marker cell$")
 
     def test_aarch64_only_marker_is_unknown(self) -> None:
         table = BOOT_TABLE.replace("`limine: rev 3 ok`", "`el2: <n> ok`")
-        self.assertEqual(len(self.run_on(boot(table))), 1)
+        errors = self.run_on(boot(table))
+        self.assertTrue(any("marker el2: <n> ok is no x86_64 contract row" in e for e in errors),
+                        errors)
+
+    def test_x86_only_marker_in_aarch64_column(self) -> None:
+        table = BOOT_TABLE.replace("| Same. | (none) | Then. |",
+                                   "| Same. | `limine: rev 3 ok` | Then. |")
+        errors = self.run_on(boot(table))
+        self.assertEqual(len(errors), 1, errors)
+        self.assertRegex(errors[0], r"^docs/BOOT\.md:10: marker limine: rev 3 ok is no "
+                                    r"aarch64 contract row")
 
     def test_markers_out_of_order(self) -> None:
-        table = (BOOT_TABLE.replace("| 2 | Limine | `limine: rev 3 ok` | Then. |\n", "")
-                 + "| 2 | Limine | `limine: rev 3 ok` | Then. |\n")
+        row = "| 2 | Limine | `limine: rev 3 ok` | Same. | (none) | Then. |\n"
+        table = BOOT_TABLE.replace(row, "") + row
         errors = self.run_on(boot(table))
         self.assertEqual(len(errors), 1)
         self.assertRegex(errors[0], r"marker limine: rev 3 ok \(order 20\) after "
                                     r"pmm: N free 4KiB frames \(order 40\)")
 
+    def test_aarch64_markers_out_of_order(self) -> None:
+        table = BOOT_TABLE.replace("`serial online`, `el2: <n> ok`",
+                                   "`el2: <n> ok`, `serial online`")
+        errors = self.run_on(boot(table))
+        self.assertEqual(len(errors), 1, errors)
+        self.assertRegex(errors[0], r"marker serial online \(order 10\) after el2: <n> ok "
+                                    r"\(order 15\)")
+
+    def test_missing_aarch64_marker(self) -> None:
+        table = BOOT_TABLE.replace("`serial online`, `el2: <n> ok`", "`serial online`")
+        errors = self.run_on(boot(table))
+        self.assertEqual(len(errors), 1, errors)
+        self.assertRegex(errors[0], r"aarch64 contract marker el2: <n> ok is in no "
+                                    r"aarch64 marker cell$")
+
+    def test_test_build_marker_not_required(self) -> None:
+        toml = MARKERS_TOML + (
+            '\n[[marker]]\ntext = "vibeOS: hang_test: armed"\nkind = "contract"\n'
+            'arch = "both"\nsource = "kernel"\nsection = "§4.2"\norder = 50\n'
+            'when = ["hang_test", "!panic_test"]\n'
+        )
+        self.assertEqual(check_boot_order(boot(), toml), [])
+
+    def test_marker_named_twice(self) -> None:
+        pmm = "`pmm: N free 4KiB frames`"
+        table = BOOT_TABLE.replace(f"| Same. | {pmm} |",
+                                   f"| Same. | {pmm}, `pmm: <n> free 4KiB frames` |")
+        errors = self.run_on(boot(table))
+        self.assertEqual(
+            errors,
+            ["docs/BOOT.md:11: marker pmm: <n> free 4KiB frames is named twice in the "
+             "aarch64 marker column"],
+        )
+
+    def test_needs_aarch64_columns(self) -> None:
+        table = (
+            "| # | Step | Marker | Why here |\n|---|------|--------|----------|\n"
+            "| 1 | Serial | `serial online` | First. |\n"
+        )
+        errors = self.run_on(boot(table))
+        self.assertTrue(any("has no aarch64 marker column" in e for e in errors), errors)
+        self.assertTrue(any("has no aarch64 column" in e for e in errors), errors)
+
+    def test_empty_aarch64_cell(self) -> None:
+        table = BOOT_TABLE.replace("| PSCI. |", "|  |")
+        errors = self.run_on(boot(table))
+        self.assertEqual(len(errors), 1, errors)
+        self.assertRegex(errors[0], r"^docs/BOOT\.md:\d+: empty aarch64 cell$")
+
     def test_none_and_unordered_rows_skipped(self) -> None:
-        table = BOOT_TABLE + "| 17 | Console | (none) | x |\n"
+        table = BOOT_TABLE + "| 17 | Console | (none) | x | (none) | x |\n"
         self.assertEqual(self.run_on(boot(table)), [])
 
     def test_plain_marker_cell(self) -> None:
-        table = BOOT_TABLE + "| 17 | Console | console ok | x |\n"
+        table = BOOT_TABLE + "| 17 | Console | console ok | x | (none) | x |\n"
         self.assertEqual(len(self.run_on(boot(table))), 1)
+
+
+STUB_RS = (
+    "global_asm!(\n"
+    '    ".pushsection .text",\n'
+    '    "vibeos_secondary_entry:",\n'
+    '    "    mrs x1, ID_AA64ISAR0_EL1",\n'
+    '    "    ldr x1, [x0, #{hcr}]",\n'
+    '    "    msr hcr_el2, x1",\n'
+    '    "    isb",\n'
+    "    // E2H changes the regime.\n"
+    '    "    tlbi vmalle1",\n'
+    '    "    dsb nsh",\n'
+    '    "    msr s3_4_c1_c2_2, x1",\n'
+    '    "    msr cpacr_el1, x1",\n'
+    '    "    stlr x19, [x6]",\n'
+    '    "    dsb ish",\n'
+    '    "    smc #0",\n'
+    '    "    wfi",\n'
+    "    hcr = const 8,\n"
+    ");\n"
+    'unsafe { asm!("msr ttbr0_el1, {0}", in(reg) v) };\n'
+)
+SMP_MD = (
+    "# 7. SMP\n\n## 7.3 AP trampoline\n\nIntro.\n\n"
+    "The stub, in order: reads `ID_AA64ISAR0_EL1.Atomic`; writes `HCR_EL2` and an `isb`, then\n"
+    "`tlbi vmalle1` and `dsb nsh`, `HCRX_EL2` when its flag (from `ID_AA64PFR0_EL1`) says so,\n"
+    "`CPACR_EL1` with M clear (`x0`, `STATUS_FEATURE`), stores with `stlr`, runs `dsb ish`, and\n"
+    "calls `smc` and then `wfi`.\n"
+    "\n`ap_entry_aarch64` clears `TPIDRRO_EL0` and runs `isb`.\n\n## 7.4 Next\n\n`TTBR0_EL1`.\n"
+)
+
+
+class TestStubDoc(unittest.TestCase):
+    def test_steps(self) -> None:
+        self.assertEqual(
+            stub_steps(STUB_RS),
+            (["ID_AA64ISAR0_EL1", "HCR_EL2", "isb", "tlbi vmalle1", "dsb nsh", "HCRX_EL2",
+              "CPACR_EL1", "stlr", "dsb ish", "smc", "wfi"], []),
+        )
+
+    def test_clean(self) -> None:
+        self.assertEqual(check_stub_doc(SMP_MD, STUB_RS), [])
+
+    def test_doc_drops_a_register(self) -> None:
+        errors = check_stub_doc(SMP_MD.replace("`HCRX_EL2` when", "HCRX_EL2 when"), STUB_RS)
+        self.assertEqual(
+            errors,
+            ["docs/SMP.md:9: the stub paragraph names `CPACR_EL1` as step 6, where "
+             "src/arch/aarch64/secondary.rs runs `HCRX_EL2` after `dsb nsh`"],
+        )
+
+    def test_doc_drops_a_barrier(self) -> None:
+        errors = check_stub_doc(SMP_MD.replace(", runs `dsb ish`,", ","), STUB_RS)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("names `smc` as step 9, where src/arch/aarch64/secondary.rs runs "
+                      "`dsb ish` after `stlr`", errors[0])
+
+    def test_doc_out_of_order(self) -> None:
+        doc = SMP_MD.replace("`tlbi vmalle1` and `dsb nsh`", "`dsb nsh` and `tlbi vmalle1`")
+        errors = check_stub_doc(doc, STUB_RS)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("names `dsb nsh` as step 4", errors[0])
+
+    def test_stub_loses_a_step_the_doc_names(self) -> None:
+        errors = check_stub_doc(SMP_MD, STUB_RS.replace('    "    isb",\n', ""))
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("names `isb` as step 3, where src/arch/aarch64/secondary.rs runs "
+                      "`tlbi vmalle1` after `HCR_EL2`", errors[0])
+
+    def test_stub_stlr_becomes_str(self) -> None:
+        errors = check_stub_doc(SMP_MD, STUB_RS.replace("stlr x19", "str x19"))
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("names `stlr` as step 8, where src/arch/aarch64/secondary.rs runs "
+                      "`dsb ish` after `CPACR_EL1`", errors[0])
+
+    def test_stub_gains_a_last_step(self) -> None:
+        stub = STUB_RS.replace('    "    wfi",\n', '    "    wfi",\n    "    isb",\n')
+        errors = check_stub_doc(SMP_MD, stub)
+        self.assertEqual(
+            errors,
+            ["docs/SMP.md:10: the stub paragraph ends before step 12, `isb` after `wfi`, as "
+             "src/arch/aarch64/secondary.rs runs it"],
+        )
+
+    def test_doc_names_a_step_too_many(self) -> None:
+        errors = check_stub_doc(SMP_MD.replace("then `wfi`.", "then `wfi` and `hvc`."), STUB_RS)
+        self.assertEqual(
+            errors,
+            ["docs/SMP.md:10: the stub paragraph names `hvc` after the stub's last step; "
+             "src/arch/aarch64/secondary.rs runs no more"],
+        )
+
+    def test_named_only_after_the_paragraph(self) -> None:
+        stub = STUB_RS.replace('    "    wfi",\n', '    "    wfi",\n    "    msr ttbr0_el1, x1",\n')
+        errors = check_stub_doc(SMP_MD, stub)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("ends before step 12, `TTBR0_EL1`", errors[0])
+
+    def test_unknown_encoding(self) -> None:
+        stub = STUB_RS.replace("s3_4_c1_c2_2", "s3_0_c9_c9_0")
+        errors = check_stub_doc(SMP_MD.replace("`HCRX_EL2` when", "HCRX_EL2 when"), stub)
+        self.assertEqual(
+            errors,
+            ["src/arch/aarch64/secondary.rs: s3_0_c9_c9_0 has no name in "
+             "doc_refs.SYSREG_ENCODINGS"],
+        )
+
+    def test_no_paragraph(self) -> None:
+        errors = check_stub_doc(SMP_MD.replace("The stub, in order:", "The stub:"), STUB_RS)
+        self.assertEqual(
+            errors, ["docs/SMP.md: §7.3 has no paragraph that starts 'The stub, in order:'"]
+        )
 
 
 class LinkTest(unittest.TestCase):

@@ -184,6 +184,22 @@ impl UserFrame {
         f
     }
 
+    /// At an `svc` from EL0: saves `x0` as `orig_x0` for a restart and
+    /// records the number, the low 32 bits of `x8` read as unsigned, as
+    /// Linux's arm64 `invoke_syscall` reads it (SYSCALL.md §1.1). Returns
+    /// the number.
+    pub fn svc_entry(&mut self) -> u64 {
+        let nr = u64::from(self.reg(syscall_table::aarch64::NR_REG) as u32);
+        self.orig_x0 = self.reg(syscall_table::aarch64::RET_REG);
+        self.syscallno = nr;
+        nr
+    }
+
+    /// `x<n>`, or 0 past `x30`.
+    fn reg(&self, n: usize) -> u64 {
+        self.x.get(n).copied().unwrap_or(0)
+    }
+
     /// A successful `execve`'s frame: [`new_user`] plus the syscall
     /// number the exit is still returning from. `new_user` writes -1.
     pub const fn exec_from(pc: u64, sp: u64, nr: u64) -> Self {
@@ -206,14 +222,15 @@ impl SyscallAbi for Abi {
     }
 
     fn arg(f: &UserFrame, i: usize) -> u64 {
-        match i {
-            0..=5 => f.x[i],
-            _ => 0,
-        }
+        syscall_table::aarch64::ARG_REGS
+            .get(i)
+            .map_or(0, |&r| f.reg(r))
     }
 
     fn set_ret(f: &mut UserFrame, v: u64) {
-        f.x[0] = v;
+        if let Some(r) = f.x.get_mut(syscall_table::aarch64::RET_REG) {
+            *r = v;
+        }
     }
 
     fn ip(f: &UserFrame) -> u64 {
@@ -241,7 +258,7 @@ impl SyscallAbi for Abi {
     }
 
     fn restart(f: &mut UserFrame) {
-        f.x[0] = f.orig_x0;
+        Self::set_ret(f, f.orig_x0);
         f.pc = f.pc.wrapping_sub(4);
     }
 }
@@ -460,6 +477,40 @@ mod tests {
         for slot in 0u8..16 {
             let _ = decode(slot, 0);
         }
+    }
+
+    /// SYSCALL.md §1.1: the number is the low 32 bits of `x8`, unsigned,
+    /// arguments are `x0` to `x5`, and the result goes in `x0`.
+    #[test]
+    fn svc_entry_reads_low_32_of_x8_unsigned() {
+        let mut f = UserFrame::new_user(0x40_1004, 0x7fff_f000);
+        f.x = core::array::from_fn(|i| 0x100 + i as u64);
+        for (x8, want) in [
+            (64, 64),
+            (0xFFFF_FFFF_0000_0040, 0x40),
+            (0x8000_0040, 0x8000_0040),
+            (u64::MAX, 0xFFFF_FFFF),
+        ] {
+            let mut g = f;
+            g.x[8] = x8;
+            assert_eq!(g.svc_entry(), want, "x8 {x8:#x}");
+            assert_eq!(Abi::nr(&g), want, "x8 {x8:#x}");
+            assert_eq!(g.orig_x0, 0x100);
+        }
+        // A number with bit 31 set is no table row: ENOSYS, not a negative
+        // index.
+        assert_eq!(Abi::table().lookup(0x8000_0040), None);
+        assert_eq!(
+            Abi::table().lookup(0xFFFF_FFFF_0000_0040),
+            Some(crate::proc::syscall::Sys::Write)
+        );
+        for i in 0..6 {
+            assert_eq!(Abi::arg(&f, i), 0x100 + i as u64);
+        }
+        assert_eq!(Abi::arg(&f, 6), 0);
+        let mut r = f;
+        Abi::set_ret(&mut r, (-9i64) as u64);
+        assert_eq!(r.x[0] as i64, -9);
     }
 
     #[test]
