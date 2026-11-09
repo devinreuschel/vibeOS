@@ -360,6 +360,8 @@ global_asm!(
     "    ldr x1, [x1, #{off}]",
     "    cbnz x1, 13f",
     "12:",
+    // The `ldar` of the overflow SP that `init_full` publishes with a Release
+    // store: tests/litmus/publish_last.litmus.
     "    adrp x1, VIBEOS_OVERFLOW_SP",
     "    add x1, x1, :lo12:VIBEOS_OVERFLOW_SP",
     "    ldar x1, [x1]",

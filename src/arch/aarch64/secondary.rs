@@ -41,7 +41,8 @@ global_asm!(
     "    msr hcr_el2, x1",
     "    isb",
     // E2H/TGE changes the regime. TLB contents from reset or retention
-    // are not architecturally clean (#260).
+    // are not architecturally clean (#260). Arm ARM DDI0487, "TLB maintenance requirements":
+    // herd7 does not model the TLB.
     "    tlbi vmalle1",
     "    dsb nsh",
     "    isb",
@@ -112,7 +113,7 @@ global_asm!(
     "    ldr x1, [x0, #{ttbr1}]",
     "    msr ttbr1_el1, x1",
     // SCTLR_EL2.M is clear above. Drop the old regime before the
-    // SCTLR_EL1 write that sets M.
+    // SCTLR_EL1 write that sets M. Arm ARM DDI0487, "TLB maintenance requirements".
     "    tlbi vmalle1",
     "    dsb nsh",
     "    isb",
@@ -130,15 +131,19 @@ global_asm!(
     "    ldr x1, [x0, #{ttbr0_empty}]",
     "    msr ttbr0_el1, x1",
     "    isb",
+    // Drop the identity TTBR0's entries: Arm ARM DDI0487, "TLB maintenance requirements".
     "    tlbi vmalle1",
     "    dsb nsh",
     "    isb",
     // The status store is the stub's last access to the param page (rule
     // 5): the conduit is loaded first, and `stlr` orders every load above
-    // before it for the boot CPU's Acquire in `wait_secondary_status`.
+    // before it for the boot CPU's Acquire in `wait_secondary_status`:
+    // tests/litmus/secondary_status.litmus.
     "    ldr x1, [x5, #{hvc}]",
     "    add x6, x5, #{status}",
     "    stlr x19, [x6]",
+    // Arm ARM DDI0487, "Memory barriers" (the DSB): the status store completes before
+    // the PSCI call below, which herd7 does not model.
     "    dsb ish",
     "    cmp x19, #{feature}",
     "    b.ne 4f",
@@ -366,7 +371,9 @@ pub fn build_identity(pas: &[u64]) -> Option<(u64, u64, TryBox<[u64; IDENTITY_TA
 }
 
 /// `dc cvac` over `[va, va+len)`, one op per `CTR_EL0.DminLine` line, then
-/// `dsb sy`.
+/// `dsb sy`. Arm ARM DDI0487, "Ordering and completion of data and instruction
+/// cache instructions": the `dsb` completes the cleans before a non-coherent
+/// reader is told; herd7 does not model cache maintenance.
 pub fn clean_poc(va: u64, len: usize) {
     let line = sysreg::dcache_line_bytes(crate::arch::aarch64::cpu::read_ctr_el0()) as u64;
     let start = va & !(line - 1);

@@ -584,7 +584,8 @@ impl TickClock {
     }
 
     /// One sequence bump. The CPU 0 tick is the only writer, so a Relaxed
-    /// `fetch_add` suffices for the count itself.
+    /// `fetch_add` suffices for the count itself. tests/litmus/seqlock.litmus,
+    /// tests/litmus/seqlock_odd.litmus and tests/litmus/seqlock_odd_llsc.litmus
     fn bump(&self) {
         // The loom models' variants (ROADMAP §10.8): F098's lone AcqRel
         // `fetch_add`, and the bump without its leading fence.
@@ -622,6 +623,7 @@ impl TickClock {
     }
 
     /// ISR path. No alloc, no logging. One writer at a time.
+    /// tests/litmus/seqlock.litmus
     pub fn write(&self, s: Snapshot) {
         self.write_copy0(s);
         self.write_copy1(s);
@@ -634,7 +636,7 @@ impl TickClock {
     }
 
     /// The published snapshot; None before the first write. Retries only
-    /// when `seq` changed.
+    /// when `seq` changed. tests/litmus/seqlock.litmus
     pub fn read(&self) -> Option<Snapshot> {
         loop {
             // Acquire: pairs with the leading Release fence in `bump`.

@@ -52,7 +52,8 @@ impl<const WORDS: usize> WakeInbox<WORDS> {
     /// Queue `slot`: a Release `fetch_or` of its bit, then a Release
     /// `fetch_or` of its word's summary bit, so a drain that sees the
     /// summary bit sees the slot's bit. False only for a slot at or past
-    /// `WORDS * 64`, which queues nothing.
+    /// `WORDS * 64`, which queues nothing. tests/litmus/wake_inbox.litmus;
+    /// tests/litmus/wake_inbox_no_release.litmus drops the Release.
     pub fn push(&self, slot: usize) -> bool {
         let w = slot / 64;
         let Some(word) = self.words.get(w) else {
@@ -80,7 +81,8 @@ impl<const WORDS: usize> WakeInbox<WORDS> {
     /// Acquire `swap(0)` of each word it flags, calling `f(slot)` for each
     /// set bit in ascending order. True if `f` ran. A push that races the
     /// drain sets its summary bit after its slot bit, so a slot this drain
-    /// misses is flagged for the next one.
+    /// misses is flagged for the next one. tests/litmus/wake_inbox.litmus;
+    /// tests/litmus/wake_inbox_no_acquire.litmus drops the Acquire.
     ///
     /// Runs on the owner CPU with interrupts masked through the port `A`
     /// (DESIGN §7.6), so a reschedule IPI's drain cannot interleave with
@@ -197,7 +199,7 @@ impl CallSlot {
 
     /// Publish one round. `Site::CallPublishRelaxed` stores the even count
     /// Relaxed. `Site::CallPublishOnAcked` is the old order: `acked` is the
-    /// release word and `round` does not move.
+    /// release word and `round` does not move. tests/litmus/call_function.litmus
     pub fn publish(&self, func: *mut (), arg: *mut (), waiters: u64) {
         if variant::pick(Site::CallPublishOnAcked, false, true) {
             // Relaxed: the Release store of `acked` below publishes it; pairs with nothing.
@@ -230,7 +232,7 @@ impl CallSlot {
     }
 
     /// `(round, func, arg)` when `me` should run this round. `seen` is the
-    /// even round this CPU already took, or 0.
+    /// even round this CPU already took, or 0. tests/litmus/call_function.litmus
     pub fn poll(&self, me: u64, seen: u64) -> Option<(u64, *mut (), *mut ())> {
         if me == 0 {
             return None;
@@ -275,7 +277,7 @@ impl CallSlot {
     }
 
     /// Ack after the closure. Last access to `arg` (DESIGN §2.8).
-    /// `Site::CallAckRelaxed` uses Relaxed.
+    /// `Site::CallAckRelaxed` uses Relaxed. tests/litmus/call_function.litmus
     pub fn ack(&self, me: u64) {
         // Release: pairs with the Acquire load in the initiator's wait.
         // Relaxed: the loom variant; pairs with nothing.

@@ -136,6 +136,7 @@ impl AsidAlloc {
 
     /// Fast path: CAS `active[cpu]` to `word` while `word`'s generation
     /// is current. A store instead of CAS is `Site::AsidFastStore`.
+    /// tests/litmus/asid_cas.litmus
     pub fn switch_fast(&self, cpu: u32, word: AsidWord) -> bool {
         if cpu >= self.ncpus || !self.current(word) {
             return false;
@@ -225,6 +226,7 @@ impl AsidAlloc {
 
     /// New generation; exchange each `active` for 0 and reserve it.
     /// `Site::AsidSkipReserve` skips the reservation.
+    /// tests/litmus/asid_cas.litmus
     fn rollover(&self) {
         let mask = self.asid_mask();
         let step = mask + 1;

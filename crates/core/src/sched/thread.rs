@@ -319,6 +319,7 @@ impl OnCpu {
 
     /// The switch tail's last access to the TCB it switched off, after
     /// `switch_context` has saved every piece of the thread's CPU state.
+    /// tests/litmus/publish_last.litmus
     #[inline(always)]
     pub fn clear(&self) {
         // Release: pairs with the Acquire load in `is_clear`, so a CPU that
@@ -335,7 +336,7 @@ impl OnCpu {
     }
 
     /// True once no CPU runs or is switching off the thread: `spawn_inner`'s
-    /// Dead-slot reuse check and the reaper.
+    /// Dead-slot reuse check and the reaper. tests/litmus/publish_last.litmus
     #[inline(always)]
     pub fn is_clear(&self) -> bool {
         // Acquire: pairs with the Release store in `clear`.

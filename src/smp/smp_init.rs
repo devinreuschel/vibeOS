@@ -1354,6 +1354,8 @@ fn alloc_param_page() -> Option<u64> {
     Some(pa)
 }
 
+/// The status the secondary stub publishes with `stlr`, read with an Acquire
+/// fence before the param page is reused. tests/litmus/secondary_status.litmus
 #[cfg(target_arch = "aarch64")]
 fn wait_secondary_status(param_va: u64) -> u64 {
     let status = param_va.wrapping_add(vibeos::arch::aarch64::psci::SecondaryParam::STATUS as u64)

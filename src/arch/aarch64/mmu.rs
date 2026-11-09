@@ -26,6 +26,7 @@ global_asm!(
     "msr tcr_el1, x3",
     "msr ttbr1_el1, x0",
     "isb",
+    // Arm ARM DDI0487, "TLB maintenance requirements": herd7 does not model the TLB.
     "tlbi vmalle1",
     "dsb nsh",
     "isb",
@@ -169,7 +170,9 @@ fn trampoline() -> Option<(u64, [u64; 4], usize)> {
     }
 }
 
-/// Install `new_root` as TTBR1 through a reserved empty root.
+/// Install `new_root` as TTBR1 through a reserved empty root. Arm ARM
+/// DDI0487, "TLB maintenance requirements" and "Synchronization requirements
+/// for AArch64 System registers": herd7 does not model the TLB.
 ///
 /// # Safety
 /// `new_root` maps this CPU's code, stack, and everything the return

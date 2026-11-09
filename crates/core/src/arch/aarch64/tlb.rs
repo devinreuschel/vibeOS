@@ -31,8 +31,9 @@ pub enum TlbOp {
 }
 
 impl TlbOp {
-    /// Instruction this op emits (Arm ARM DDI0487). The kernel's `exec_tlb`
-    /// uses the same text.
+    /// Instruction this op emits. The kernel's `exec_tlb` uses the same
+    /// text. Arm ARM DDI0487, "TLB maintenance requirements": herd7 does not model
+    /// the TLB.
     pub const fn mnemonic(self) -> &'static str {
         match self {
             Self::DsbIshst => "dsb ishst",
@@ -51,6 +52,8 @@ impl TlbOp {
 
 /// Leaf change: the kernel's `tlbi_va` runs this after the descriptor
 /// store. Permission-only and global→nG use the same maintenance.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub const LEAF_INVAL: [TlbOp; 4] = [
     TlbOp::DsbIshst,
     TlbOp::TlbiVale1is,
@@ -59,6 +62,8 @@ pub const LEAF_INVAL: [TlbOp; 4] = [
 ];
 
 /// Full EL1 invalidation: the kernel's `tlbi_all` runs this.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub const ALL_INVAL: [TlbOp; 4] = [
     TlbOp::DsbIshst,
     TlbOp::TlbiVmalle1is,
@@ -67,6 +72,8 @@ pub const ALL_INVAL: [TlbOp; 4] = [
 ];
 
 /// Table page freed: `vae1is` instead of `vale1is`.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub const TABLE_INVAL: [TlbOp; 4] = [
     TlbOp::DsbIshst,
     TlbOp::TlbiVae1is,
@@ -75,6 +82,8 @@ pub const TABLE_INVAL: [TlbOp; 4] = [
 ];
 
 /// One ASID (not a rollover). A rollover broadcasts nothing.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub const ASID_INVAL: [TlbOp; 4] = [
     TlbOp::DsbIshst,
     TlbOp::TlbiAside1is,
@@ -83,6 +92,8 @@ pub const ASID_INVAL: [TlbOp; 4] = [
 ];
 
 /// Flush-pending CPU before it loads an ASID of the new generation.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub const ROLLOVER_LOCAL: [TlbOp; 3] = [TlbOp::TlbiVmalle1, TlbOp::DsbNsh, TlbOp::Isb];
 
 /// After a TTBR0 write, with the `isb` that follows it. Local only: every
@@ -91,6 +102,8 @@ pub const ROLLOVER_LOCAL: [TlbOp; 3] = [TlbOp::TlbiVmalle1, TlbOp::DsbNsh, TlbOp
 /// The broadcast `vmalle1is` would also drop global kernel entries on every
 /// CPU. The leading `dsb ishst` orders the PTE stores made before the switch
 /// ahead of the local invalidate. The kernel's `tlbi_asid0_local` runs this.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub const TTBR0_SWITCH: [TlbOp; 4] = [
     TlbOp::DsbIshst,
     TlbOp::TlbiAside1,
@@ -99,13 +112,18 @@ pub const TTBR0_SWITCH: [TlbOp; 4] = [
 ];
 
 /// Break-before-make, after the invalid store and before the new one.
-/// The kernel's `bbm_break` runs this.
+/// The kernel's `bbm_break` runs this. Arm ARM DDI0487, "Using
+/// break-before-make when updating translation table entries": herd7 does
+/// not model the TLB.
 pub const BBM_AFTER_INVALID: [TlbOp; 3] = [TlbOp::DsbIshst, TlbOp::TlbiVale1is, TlbOp::DsbIsh];
 /// Break-before-make, after the new store. The kernel's `bbm_make` runs this.
+/// Arm ARM DDI0487, "Using break-before-make when updating translation
+/// table entries": herd7 does not model the TLB.
 pub const BBM_AFTER_MAKE: [TlbOp; 2] = [TlbOp::DsbIshst, TlbOp::Isb];
 /// A new table's zeroed words, before the descriptor that links it. The
-/// kernel's `publish_table` runs this (Arm ARM DDI0487: a table walk is not
-/// ordered after a plain store).
+/// kernel's `publish_table` runs this. Arm ARM DDI0487, "Ordering of memory
+/// accesses from translation table walks": a walk is not ordered after a
+/// plain store, and herd7 does not model the walk.
 pub const PUBLISH_TABLE: [TlbOp; 1] = [TlbOp::DsbIshst];
 
 /// `TLBI VA*E1` / `VA*E1IS` register operand (Arm ARM DDI0487).
@@ -117,9 +135,13 @@ pub const fn tlbi_va_operand(va: u64, asid: u16) -> u64 {
     ((va >> 12) & ((1u64 << 44) - 1)) | ((asid as u64) << 48)
 }
 
-/// `dmb oshst` / `dmb oshld` / `dmb osh` (Linux arm64 DMA barriers; F098).
+/// `dmb oshst`, the kernel's `dma_wmb` (Linux arm64 DMA barriers; F098).
+/// tests/litmus/virtio_avail.litmus
 pub const DMA_WMB: &str = "dmb oshst";
+/// `dmb oshld`, the kernel's `dma_rmb`. tests/litmus/virtio_avail.litmus
 pub const DMA_RMB: &str = "dmb oshld";
+/// `dmb osh`, the kernel's `dma_mb`. tests/litmus/dma_mb.litmus and
+/// tests/litmus/dma_mb_used.litmus
 pub const DMA_MB: &str = "dmb osh";
 
 /// One step of the I-cache sync a user page needs once it becomes
@@ -235,6 +257,8 @@ pub fn lines(start: u64, len: u64, line: u64) -> impl Iterator<Item = u64> {
 /// Run the sync over `[start, start+len)`: `run(op, va)` for each step, in
 /// order, `va` the line for `DcCvau` and `IcIvau` and 0 for a barrier. The
 /// kernel's `sync_icache` runs the instruction for each.
+/// Arm ARM DDI0487, "Synchronization and coherency issues between data and
+/// instruction accesses": herd7 does not model instruction fetch.
 pub fn sync_range(info: CacheInfo, start: u64, len: u64, mut run: impl FnMut(IcacheOp, u64)) {
     let mut ops = [IcacheOp::Isb; 5];
     let n = icache_sync(info.idc, info.dic, &mut ops);
