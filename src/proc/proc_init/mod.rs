@@ -512,10 +512,11 @@ fn start_loaded(
         }
     };
     let root = loaded.space.root().as_u64();
+    let ctx = loaded.space.ctx_addr();
     let frame = UserFrame::new_user(loaded.entry, loaded.rsp);
     let fs = loaded.fs;
     let space = loaded.space;
-    let h = match thread_init::spawn_user(name, user_thread_entry, pid, root, &frame) {
+    let h = match thread_init::spawn_user(name, user_thread_entry, pid, root, ctx, &frame) {
         Ok(h) => h,
         Err(e) => {
             with_sched_table(|s, t| release_pid(s, t, pid));

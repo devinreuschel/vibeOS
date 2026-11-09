@@ -207,6 +207,25 @@ for ASID 0 on every TTBR0 switch, and says so at boot. The allocator is portable
 `vibeos-core`, which host tests and a loom model run (ROADMAP §10.8). x86_64's PCID (ROADMAP §18.3)
 is a separate scheme, §7.9's flush generations.
 
+The kernel half is `arch::aarch64::asid`, through which every TTBR0 load goes. The space's word is
+an atomic in `addr_space_init::SpaceCore`, which `Tcb.as_ctx` names beside `Tcb.as_cr3`, so every
+CPU that runs a space shares one word; the slow path reads it again under the lock and stores what it
+allocates there. The boot CPU builds the allocator before any user root loads, logs its width (or why
+ASIDs are off), and runs a local `tlbi vmalle1`. Each secondary core gets the boot CPU's `TCR_EL1`,
+so where that sets `AS`, a core whose `ID_AA64MMFR0_EL1.ASIDBits` reports fewer than 16 bits
+refuses in its entry stub (`STATUS_ASID`) and calls PSCI `CPU_OFF`, and the boot CPU logs it and
+takes the bring-up failure path, as Linux's `verify_cpu_asid_bits` does. A root with no context, as some in-guest tests load,
+gets ASID 0, followed by a local invalidate of ASID 0 whenever another ASID-0 root was loaded since.
+An unmap's `tlbi vale1is` names the space's own ASID, read from its word after a `dmb ish` that
+orders the read after the PTE store (`SpaceCtx::flush_page`, Linux arm64's `ASID(mm)`), so it reaches
+every CPU that holds the space's entries whether or not the unmapping CPU has the space loaded. A
+user VA that reaches the `PageTable` seam, which names no space, is invalidated with `tlbi vaale1is`,
+every ASID.
+A `kernel_tests` boot whose `vibeos.ktest=` names `asid_procs_4bit`, an opt-in row that the
+harness's `asid-4bit` proof boot runs alone at `-smp 4`, caps the width at 4 bits, 15 usable ASIDs, so
+that test's 1,000 processes force rollovers, while every other boot keeps the hardware width; TCG drops its soft TLB on every ASID change,
+so the same build keeps each CPU's ASID-to-space pairs since its last flush and counts an alias.
+
 Why: a rollover that only broadcasts a flush is not safe. A CPU still running an address space from
 the old generation refills its TLB under that ASID after the flush, and the address space that
 receives the ASID next reads and writes through those entries. Reserving the running ASIDs, and

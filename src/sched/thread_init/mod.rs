@@ -1014,6 +1014,7 @@ pub fn spawn_user(
     entry: fn(),
     pid: u32,
     root: u64,
+    ctx: usize,
     frame: &UserFrame,
 ) -> Result<ThreadHandle, SpawnError> {
     let h = spawn_inner(
@@ -1036,6 +1037,9 @@ pub fn spawn_user(
         let (Some(tcb), Some(top)) = (tcb, top) else {
             panic!("spawn_user: thread {} has no stack", h.id().0);
         };
+        // Beside the `as_cr3` that `spawn_inner` wrote, before the thread
+        // can run.
+        tcb.as_ctx = ctx;
         let at = top - USER_FRAME_BYTES as u64;
         // SAFETY: invariant I25: `[top - USER_FRAME_BYTES, top)` is the
         // user frame of this thread's own kernel stack, mapped and unused:
@@ -1255,6 +1259,7 @@ fn fill_tcb(
     tcb.run_tsc = 0;
     tcb.wait_outcome = WaitOutcome::Woken;
     tcb.as_cr3 = as_cr3;
+    tcb.as_ctx = 0;
     tcb.fpu = initial_fxsave();
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
@@ -1417,11 +1422,15 @@ pub fn current_pid() -> u32 {
     }
 }
 
-pub fn set_pid_cr3(id: ThreadId, pid: u32, root: u64) {
+/// Record `pid`, `root`, and the address of `root`'s space context
+/// (`SpaceCore::ctx_addr`, or 0 for none) in thread `id`'s TCB, under
+/// SCHED, so a switch reads the root and its context together.
+pub fn set_pid_cr3(id: ThreadId, pid: u32, root: u64, ctx: usize) {
     with_sched(|s| {
         if let Some(t) = s.get_mut(id) {
             t.pid = pid;
             t.as_cr3 = root;
+            t.as_ctx = ctx;
         }
     });
 }

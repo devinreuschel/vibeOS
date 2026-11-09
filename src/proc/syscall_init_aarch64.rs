@@ -44,6 +44,9 @@ pub unsafe fn init_bsp() {
         unsafe { crate::arch::aarch64::cpu::write_ttbr0(empty) };
     }
     crate::log_init::apply_boot_level();
+    // SAFETY: invariant I22: the boot CPU, once, before `smp: done` and
+    // before any user root loads (this fn's `# Safety`); established here.
+    unsafe { crate::arch::aarch64::asid::init_bsp() };
 }
 
 /// # Safety
@@ -214,8 +217,9 @@ pub fn exec_fp() {
 #[expect(dead_code, reason = "aarch64 has no TSS RSP0")]
 pub unsafe fn set_rsp0_for(_cpu: &mut PerCpu, _tcb: &Tcb) {}
 
-/// Load `tcb`'s TTBR0 if it differs. A kernel thread (`as_cr3` 0) gets
-/// the empty user root.
+/// Load `tcb`'s TTBR0 if it differs, with its space's ASID
+/// (`arch::aarch64::asid::load_ttbr0`), so the switch flushes nothing. A
+/// kernel thread (`as_cr3` 0) gets the empty user root, ASID 0.
 ///
 /// # Safety
 /// `cpu` is this CPU's `PerCpu`, held with IRQs masked as `on_switch`
@@ -230,11 +234,13 @@ pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
         return true;
     }
+    let ctx = if tcb.as_cr3 == 0 { 0 } else { tcb.as_ctx };
     // SAFETY: invariant I44: `want` is the empty user root or a TCB's
-    // TTBR0, which stays allocated while that TCB names it; established
-    // by `addr_space_init::SpaceCore`'s drop and `paging_init::install`.
-    unsafe { crate::arch::aarch64::cpu::write_ttbr0(want) };
-    crate::arch::aarch64::cpu::tlbi_asid0_local();
+    // TTBR0, which stays allocated while that TCB names it, and `ctx` is
+    // 0 or the context of that root's space, set and cleared with it
+    // (`thread_init::set_pid_cr3`); established by
+    // `addr_space_init::SpaceCore`'s drop and `paging_init::install`.
+    unsafe { crate::arch::aarch64::asid::load_ttbr0(cpu.cpu_id, want, ctx) };
     // Release: pairs with the Acquire load in `addr_space_init::root_holder`.
     cpu.remote.as_cr3.store(want, Ordering::Release);
     false

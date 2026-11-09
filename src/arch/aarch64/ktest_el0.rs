@@ -820,7 +820,7 @@ pub(crate) fn current_migrate_if1() -> Outcome {
         let id = h.id();
         ids[i] = id;
         let pid = PID_MAX.saturating_add(1).saturating_add(i as u32);
-        thread_init::set_pid_cr3(id, pid, 0);
+        thread_init::set_pid_cr3(id, pid, 0, 0);
         // Release: pairs with the Acquire load of MIGRATE_TCB in `migrate_body`.
         MIGRATE_TCB[i].store(thread_init::tcb_ptr(id), Ordering::Release);
         // Release: pairs with the Acquire load of MIGRATE_PID in `migrate_body`.
@@ -844,7 +844,7 @@ pub(crate) fn current_migrate_if1() -> Outcome {
         )
     };
     for id in ids {
-        thread_init::set_pid_cr3(id, 0, 0);
+        thread_init::set_pid_cr3(id, 0, 0, 0);
     }
     // Release: pairs with the Acquire load of MIGRATE_EXIT in `migrate_body`.
     MIGRATE_EXIT.store(true, Ordering::Release);

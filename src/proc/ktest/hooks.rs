@@ -27,7 +27,7 @@ pub(crate) fn load_cr3(space: &Space) {
     // kernel's, and only the core's free frees it, which refuses a root this
     // CPU has loaded or recorded, and `space` holds a reference meanwhile;
     // established by `addr_space_init::SpaceCore`'s drop.
-    unsafe { addr_space_init::load_cr3_u64(space.root().as_u64()) };
+    unsafe { addr_space_init::load_cr3_u64(space.root().as_u64(), space.ctx_addr()) };
 }
 
 /// This CPU's recorded root is `space`'s: a [`load_cr3`] of it skipped the

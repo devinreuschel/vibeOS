@@ -173,7 +173,10 @@ The parameter pages, the identity tables, and `ttbr0_empty` are never freed: the
 one page per CPU plus a fixed table count (`secondary::IDENTITY_TABLES`), so that leak is bounded.
 The stub, in order: reads `ID_AA64ISAR0_EL1` and `ID_AA64MMFR1_EL1` and, when FEAT_LSE or FEAT_PAN
 is missing, keeps `STATUS_FEATURE` in a register in place of `STATUS_ARRIVED` and goes on, since it
-writes no shared memory before its MMU is on. When the block says EL2, it writes `HCR_EL2` whole
+writes no shared memory before its MMU is on; then, when no feature is missing and the block's
+TCR value sets its AS bit (16-bit ASIDs, ROADMAP §11.2), reads `ID_AA64MMFR0_EL1` and keeps `STATUS_ASID`
+when its ASIDBits field does not report 16 bits, as Linux's `verify_cpu_asid_bits` refuses such a
+core. When the block says EL2, it writes `HCR_EL2` whole
 and an `isb`, then `tlbi vmalle1`, `dsb nsh`, and `isb` (an E2H/TGE change leaves the local TLB
 stale), then the rest of the EL2 controls on the port's one list whole from the block: `CPTR_EL2`,
 `CNTHCTL_EL2`, `HSTR_EL2`, `MDCR_EL2`, `ICC_SRE_EL2` when the block's flag says the boot CPU found
@@ -192,7 +195,7 @@ the empty user root with an `isb`, then runs `tlbi vmalle1`, `dsb nsh`, and `isb
 entry survives; loads the PSCI conduit from the page; then stores its status with `stlr` through
 the page's TTBR1 address, its first shared write and its last access to the page, ordered after
 every load above for the boot CPU's Acquire in `smp_init::wait_secondary_status` (AGENTS.md rule
-5), and runs `dsb ish`. With `STATUS_FEATURE` it calls PSCI `CPU_OFF` through `smc`, or through
+5), and runs `dsb ish`. With `STATUS_FEATURE` or `STATUS_ASID` it calls PSCI `CPU_OFF` through `smc`, or through
 `hvc` when the conduit is HVC, and waits in `wfi` should that return; otherwise it loads its stack
 pointer and branches to Rust `ap_entry_aarch64` with the `PerCpu` pointer in `x0`.
 `scripts/doc_refs.py` checks that this paragraph names the stub's steps exactly, in its order:
@@ -400,7 +403,7 @@ as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's table instead.
 | aarch64 | V0-V31, FPCR, FPSR | `Tcb.fpu` (`Fxsave.bytes` plus `fpcr`/`fpsr`) | the FP binding below: `fp_save` / `fp_load` in `syscall_init` | switched (ROADMAP §11.6, F069) |
 | aarch64 | `TPIDR_EL0` (user TLS) | `Tcb.tls_base` | `on_switch`, its one owner, as on x86_64: it saves the live `TPIDR_EL0` for an outgoing user thread and loads the incoming one's; EL0 writes it with `msr` at any time, so only the live register is current between switches | switched, in the same commit as x86_64 `FS_BASE` (F022). `fork` and `clone` copy the live register, and `execve` writes `tls_base` and the register under one interrupt guard. The stack-overflow stub stashes the faulting `x0` here: the fatal path uses the register as scratch and halts, and the `kstack_overflow` test (`src/arch/aarch64/ktest.rs`) longjmps out of its catch and clears nothing, so the stashed `x0` stays in the register (§11.5 rule 6) |
 | aarch64 | `TPIDRRO_EL0` | not saved; 0 | every CPU writes 0 at bring-up, and only the stack-overflow stub writes it again: the fatal path halts after the stash, and the `kstack_overflow` test (`src/arch/aarch64/ktest.rs`) clears it after its catch (§11.5 rule 6) | EL0 can read it, so no return to EL0 finds a kernel value in it |
-| aarch64 | `TTBR0_EL1` and its ASID | the address space | the `TTBR0` switch in `on_switch`, skipped when the address space is shared; a kernel thread loads the empty user root | switched; ASIDs from ROADMAP §11.2; the ASID rides in the same TTBR0 write (§11.2) |
+| aarch64 | `TTBR0_EL1` and its ASID | the address space: its root in `Tcb.as_cr3` and its ASID word in `addr_space_init::SpaceCore`'s `SpaceCtx`, which `Tcb.as_ctx` names, both set and cleared together (`thread_init::set_pid_cr3`, `spawn_user`) | `switch_cr3_for` in `on_switch` through `arch::aarch64::asid::load_ttbr0`, skipped when the root is unchanged; a kernel thread loads the empty user root, ASID 0 | switched: the ASID rides in the same TTBR0 write and no switch invalidates, except a CPU's local `tlbi vmalle1` before its first ASID of a new generation ([§11.2](PORTABILITY.md#112-address-space-on-aarch64), ROADMAP §11.2); with ASIDs off, every switch flushes ASID 0 |
 | aarch64 | `DBGBVR`/`DBGBCR`, `DBGWVR`/`DBGWCR`, `MDSCR_EL1.MDE` | the thread's decoded debug slots | the switch, by the Debug state paragraph below | not built: ROADMAP §17.4 |
 | aarch64 | `MDSCR_EL1.SS` | the thread's step flag, with `SPSR.SS` in its frame | set at the return to EL0 and cleared at entry from EL0, by the Debug state paragraph below | not built: ROADMAP §17.4 |
 | aarch64 | SVE and SME state | not saved | nothing | not per-thread: every CPU clears `CPACR_EL1.ZEN` and `SMEN`, so EL0 use gets `SIGILL` (ROADMAP §11.6); §23.1 adds their rows |
@@ -674,7 +677,9 @@ root, and on aarch64 points TTBR0 at the empty user root.
 On aarch64 the DESIGN §11.1 seam's invalidation is the Inner Shareable broadcast sequence (ROADMAP §11.2):
 `dsb ishst` after the descriptor store, then `tlbi vale1is` for a leaf (`vae1is` when a table page
 is freed, `aside1is` for one ASID), then `dsb ish`, and `isb` on the issuing core. A VA-form
-operand holds VA[55:12] in bits 43:0, the ASID in bits 63:48, and a zero TTL hint in bits 47:44.
+operand holds VA[55:12] in bits 43:0, the ASID in bits 63:48 (for a user VA the space's own,
+from its ASID word; a kernel VA's entries are global, so 0; a user VA through the `PageTable` seam,
+which names no space, uses `vaale1is`, every ASID), and a zero TTL hint in bits 47:44.
 The ROADMAP §4.10 KVA-free deferral is satisfied once the `dsb ish` completes, so the shootdown
 hook sends no IPI.
 An ASID rollover broadcasts nothing: each flush-pending CPU runs `tlbi vmalle1`, `dsb nsh`, and

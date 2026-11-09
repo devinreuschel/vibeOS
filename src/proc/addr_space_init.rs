@@ -22,7 +22,7 @@ use vibeos::pmm::Frames;
 use vibeos::proc::fill::FILL_BATCH;
 use vibeos::thread::ThreadId;
 
-use crate::arch::current::{AddressSpace, Arch};
+use crate::arch::current::{AddressSpace, Arch, SpaceCtx};
 use crate::paging_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
@@ -62,6 +62,9 @@ pub struct SpaceCore {
     /// The regions and the page tables below the root. A sleeping lock:
     /// it ranks before `PT`, which each chunk of work under it takes.
     mm: BlockingMutex<Mm>,
+    /// The port's context for this space (the aarch64 ASID word), which a
+    /// TCB names beside the root (`Tcb.as_ctx`).
+    ctx: SpaceCtx,
 }
 
 /// One `users` reference to a space: the process's thread's, or a pin's.
@@ -94,6 +97,16 @@ impl SpaceCore {
     /// The root table's physical address.
     pub fn root(&self) -> PhysAddr {
         PhysAddr(self.root.as_ref().map_or(0, Frames::base))
+    }
+
+    /// The address of this space's [`SpaceCtx`], for `Tcb.as_ctx` beside
+    /// the root: the core lives at least as long as a TCB names its root
+    /// (invariant I44), so the address stays valid that long. The
+    /// provenance is exposed here, so `arch::aarch64::asid::load_ttbr0` can
+    /// rebuild a pointer from the word `Tcb.as_ctx` holds (a `usize` keeps
+    /// `Tcb` `Send`) through `with_exposed_provenance` (AGENTS.md rule 6).
+    pub fn ctx_addr(&self) -> usize {
+        core::ptr::from_ref(&self.ctx).expose_provenance()
     }
 
     /// The portable space, under its lock. Sleeps: never under a spinlock.
@@ -170,6 +183,7 @@ pub fn create() -> Result<NewSpace, AsError> {
     let core = SpaceCore {
         root: Some(root),
         mm: BlockingMutex::new(mm),
+        ctx: SpaceCtx::new(),
     };
     // A failed allocation drops `core`, whose drop frees the root.
     UsersArc::try_new(core)
@@ -407,8 +421,11 @@ unsafe fn unmap_chunks(space: &mut Mm, va: u64, len: u64) -> Result<(), AsError>
     Ok(())
 }
 
-/// A flush for `space`'s pages when it is this CPU's user root
-/// (CR3; TTBR0 on aarch64).
+/// A flush for `space`'s pages when it is this CPU's user root (CR3;
+/// TTBR0 on aarch64), through the `PageTable` seam, for the map paths'
+/// rollback: those pages were mapped by this call, so only a CPU that has
+/// the space loaded can hold them, and on aarch64 the seam's user-VA
+/// invalidate drops them under every ASID (`arch::aarch64::cpu::tlbi_va`).
 fn local_flush(space: &Mm) -> impl FnMut(u64) + use<> {
     let loaded = Arch::user_root() == space.root();
     move |va| {
@@ -416,6 +433,14 @@ fn local_flush(space: &Mm) -> impl FnMut(u64) + use<> {
             Arch::flush_local(VirtAddr(va));
         }
     }
+}
+
+/// A flush for an unmap of pages `space` may have run on: by the space's
+/// own context (`SpaceCtx::flush_page`), on aarch64 the space's ASID on
+/// every CPU, whether or not this CPU has it loaded.
+fn space_flush<'a>(space: &Mm, ctx: &'a SpaceCtx) -> impl FnMut(u64) + use<'a> {
+    let loaded = Arch::user_root() == space.root();
+    move |va| ctx.flush_page(va, loaded)
 }
 
 /// `munmap` of `[va, va+len)` over `AddressSpace::unmap_free`, taking `PT`
@@ -430,14 +455,15 @@ fn local_flush(space: &Mm) -> impl FnMut(u64) + use<> {
 pub unsafe fn unmap(space: &Space, va: u64, len: u64) -> Result<(), AsError> {
     let mut mm = space.mm();
     // SAFETY: this fn's contract, `addr_space_init::unmap`.
-    unsafe { unmap_mm(&mut mm, va, len) }
+    unsafe { unmap_mm(&mut mm, &space.ctx, va, len) }
 }
 
-/// [`unmap`] on a space whose `mm` lock the caller holds.
+/// [`unmap`] on a space whose `mm` lock the caller holds; `ctx` is that
+/// space's context.
 ///
 /// # Safety
 /// Same contract as [`unmap`].
-unsafe fn unmap_mm(space: &mut Mm, va: u64, len: u64) -> Result<(), AsError> {
+unsafe fn unmap_mm(space: &mut Mm, ctx: &SpaceCtx, va: u64, len: u64) -> Result<(), AsError> {
     let end = va.checked_add(len).ok_or(AsError::Overflow)?;
     if len == 0 {
         // SAFETY: an empty range touches no leaf, which
@@ -446,15 +472,15 @@ unsafe fn unmap_mm(space: &mut Mm, va: u64, len: u64) -> Result<(), AsError> {
             space.unmap_free(va, 0, &mut BuddyPool, &mut |_| {})
         });
     }
-    let mut flush = local_flush(space);
+    let mut flush = space_flush(space, ctx);
     let mut cur = va;
     while cur < end {
         let ce = chunk_end(cur, end);
         with_pt_chunk((ce - cur) / PAGE_SIZE_4K, || {
             let mut pool = BuddyPool;
-            // SAFETY: this fn's contract; `flush` invalidates the page on
-            // this CPU, the only one that runs the space's thread
-            // (`thread_init::spawn_user` pins it).
+            // SAFETY: this fn's contract; `flush` invalidates the page by
+            // the space's ASID on every CPU, established by
+            // `arch::aarch64::asid::SpaceCtx::flush_page`.
             unsafe { space.unmap_free(cur, ce - cur, &mut pool, &mut flush) }
         })?;
         cur = ce;
@@ -469,6 +495,7 @@ unsafe fn unmap_mm(space: &mut Mm, va: u64, len: u64) -> Result<(), AsError> {
 /// break.
 pub fn brk(space: &Space, want: u64) -> u64 {
     let core = space.core();
+    let ctx = &space.ctx;
     let mut mm = space.mm();
     let space = &mut *mm;
     let moved = match space.brk_plan(want) {
@@ -477,7 +504,7 @@ pub fn brk(space: &Space, want: u64) -> u64 {
         BrkPlan::Grow { va, len } => brk_grow(space, core, va, len, want),
         // SAFETY: the heap's leaves were mapped from the buddy by
         // `brk_grow`, here, and `unmap_mm` supplies the flush.
-        BrkPlan::Shrink { va, len } => unsafe { unmap_mm(space, va, len) },
+        BrkPlan::Shrink { va, len } => unsafe { unmap_mm(space, ctx, va, len) },
     };
     // A failed move leaves the break where it was, as brk(2) returns it.
     if moved.is_ok() {
@@ -608,7 +635,9 @@ fn root_holder(root: u64) -> Option<RootHolder> {
 }
 
 /// Load `want` into CR3 unless this CPU already has it (or it is 0), and
-/// record it in this CPU's `PerCpuRemote.as_cr3`.
+/// record it in this CPU's `PerCpuRemote.as_cr3`. On aarch64 TTBR0 gets
+/// the space's ASID when `ctx` names its context
+/// (`arch::aarch64::asid::load_ttbr0`); x86_64 ignores `ctx`.
 ///
 /// # Safety
 /// `want` is 0, or the physical address of a PML4 whose kernel half is the
@@ -616,8 +645,9 @@ fn root_holder(root: u64) -> Option<RootHolder> {
 /// the kernel root, the caller has recorded it in the current thread's
 /// `Tcb.as_cr3` before the call (`execve` does, through
 /// `thread_init::set_pid_cr3`), so the core's free sees it (invariant
-/// I44).
-pub unsafe fn load_cr3_u64(want: u64) {
+/// I44). `ctx` is 0 or `SpaceCore::ctx_addr` of the space whose root is
+/// `want`, which that TCB or the caller keeps alive.
+pub unsafe fn load_cr3_u64(want: u64, ctx: usize) {
     per_cpu_init::with_current(|cpu| {
         // Relaxed: only this CPU stores its `as_cr3`; pairs with nothing.
         if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
@@ -625,20 +655,17 @@ pub unsafe fn load_cr3_u64(want: u64) {
         }
         #[cfg(target_arch = "aarch64")]
         // SAFETY: invariant I44: `want` is a user root (TTBR0) that stays
-        // allocated while loaded (this fn's contract,
-        // `addr_space_init::load_cr3_u64`).
+        // allocated while loaded, and `ctx` is 0 or its live space's context
+        // (this fn's contract, `addr_space_init::load_cr3_u64`).
         unsafe {
-            crate::arch::aarch64::cpu::write_ttbr0(want);
-            // `msr ttbr0_el1` does not flush, unlike an x86 CR3 write;
-            // `switch_cr3_for` already pairs its write with this local
-            // ASID-0 flush.
-            crate::arch::aarch64::cpu::tlbi_asid0_local();
+            crate::arch::aarch64::asid::load_ttbr0(cpu.cpu_id, want, ctx);
         }
         #[cfg(not(target_arch = "aarch64"))]
         // SAFETY: invariant I44: `want` is a user PML4 that stays
         // allocated while loaded (this fn's contract,
         // `addr_space_init::load_cr3_u64`).
         unsafe {
+            let _ = ctx;
             Arch::set_root(PhysAddr(want));
         }
         // Release: pairs with the Acquire load in `root_holder`.
@@ -651,12 +678,12 @@ pub fn load_kernel_cr3() {
     // SAFETY: the empty user root comes from `paging_init::install`,
     // which published it and nothing frees; no TCB need name it.
     unsafe {
-        load_cr3_u64(paging_init::empty_user_root());
+        load_cr3_u64(paging_init::empty_user_root(), 0);
     }
     #[cfg(not(target_arch = "aarch64"))]
     // SAFETY: the kernel root comes from `paging_init::install`, which
     // published it and nothing frees; no TCB need name it.
     unsafe {
-        load_cr3_u64(paging_init::kernel_cr3());
+        load_cr3_u64(paging_init::kernel_cr3(), 0);
     }
 }

@@ -310,17 +310,20 @@ pub fn read_ttbr1() -> u64 {
     v
 }
 
-/// Computed `MAIR_EL1` and `TCR_EL1`. The TTBR1 takeover writes them.
-pub fn mair_tcr() -> (u64, u64) {
+/// Whether `ID_AA64MMFR0_EL1.ASIDBits` reports 16-bit ASIDs: what
+/// `TCR_EL1.AS` is set from, and the allocator's width (`vibeos::asid::width`).
+pub fn asid16() -> bool {
     let mmfr0: u64;
     // SAFETY: ID register; established here.
     unsafe {
         asm!("mrs {0}, ID_AA64MMFR0_EL1", out(reg) mmfr0, options(nomem, nostack, preserves_flags));
     }
-    (
-        sysreg::mair_el1(),
-        sysreg::tcr_el1(sysreg::asid16_from_mmfr0(mmfr0)),
-    )
+    sysreg::asid16_from_mmfr0(mmfr0)
+}
+
+/// Computed `MAIR_EL1` and `TCR_EL1`. The TTBR1 takeover writes them.
+pub fn mair_tcr() -> (u64, u64) {
+    (sysreg::mair_el1(), sysreg::tcr_el1(asid16()))
 }
 
 pub fn read_tcr() -> u64 {
@@ -343,6 +346,9 @@ fn exec_tlb(op: tlb::TlbOp, va_operand: u64) {
             tlb::TlbOp::DsbIshst => asm!("dsb ishst", options(nostack, preserves_flags)),
             tlb::TlbOp::TlbiVale1is => {
                 asm!("tlbi vale1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
+            }
+            tlb::TlbOp::TlbiVaale1is => {
+                asm!("tlbi vaale1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
             }
             tlb::TlbOp::TlbiVae1is => {
                 asm!("tlbi vae1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
@@ -383,19 +389,66 @@ pub fn tlbi_asid0_local() {
     run_tlb(&tlb::TTBR0_SWITCH, 0);
 }
 
-/// Leaf TLB invalidate. Runs `tlb::LEAF_INVAL`. ASID 0: TTBR0 does not
-/// carry one yet (ROADMAP §11.2).
+/// Local flush of every stage-1 EL1 entry, before a CPU that a rollover
+/// marked flush-pending loads an ASID of the new generation. Runs
+/// `tlb::ROLLOVER_LOCAL`; broadcasts nothing (ROADMAP §11.2). Arm ARM
+/// DDI0487, "Ordering and completion of TLB maintenance instructions": the
+/// `dsb nsh` completes the local `tlbi` before the `isb` and the TTBR0 write.
+pub fn tlbi_local_all() {
+    run_tlb(&tlb::ROLLOVER_LOCAL, 0);
+}
+
+fn is_kernel_va(va: u64) -> bool {
+    vibeos::arch::aarch64::paging::is_kernel_va(vibeos::paging::VirtAddr(va))
+}
+
+/// Leaf TLB invalidate through the `PageTable` seam, which names no space.
+/// A kernel VA's entries are global, which every ASID matches, so it runs
+/// `tlb::LEAF_INVAL` with ASID 0; a user VA's could carry any space's ASID,
+/// so it runs `tlb::LEAF_INVAL_ALL_ASIDS`. A caller that knows the space
+/// uses [`tlbi_user_va`].
 /// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
 /// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub fn tlbi_va(va: u64) {
-    run_tlb(&tlb::LEAF_INVAL, tlb::tlbi_va_operand(va, 0));
+    if is_kernel_va(va) {
+        run_tlb(&tlb::LEAF_INVAL, tlb::tlbi_va_operand(va, 0));
+    } else {
+        run_tlb(&tlb::LEAF_INVAL_ALL_ASIDS, tlb::tlbi_va_operand(va, 0));
+    }
+}
+
+/// Leaf TLB invalidate of user VA `va` in the space whose ASID is `asid`,
+/// on every CPU (Linux arm64's `flush_tlb_page` with `ASID(mm)`). Runs
+/// `tlb::LEAF_INVAL`. Arm ARM DDI0487, "TLB maintenance requirements" and
+/// "Ordering and completion of TLB maintenance instructions": herd7 does not
+/// model the TLB.
+pub fn tlbi_user_va(va: u64, asid: u16) {
+    run_tlb(&tlb::LEAF_INVAL, tlb::tlbi_va_operand(va, asid));
 }
 
 /// Break-before-make maintenance after the invalid store. Runs
-/// `tlb::BBM_AFTER_INVALID`. Arm ARM DDI0487, "Using break-before-make when
-/// updating translation table entries": herd7 does not model the TLB.
+/// `tlb::BBM_AFTER_INVALID` for a kernel VA (global entries, ASID 0) and
+/// `tlb::BBM_AFTER_INVALID_ALL_ASIDS` for a user VA, whose space the seam
+/// does not name.
+/// Arm ARM DDI0487, "Using break-before-make when updating translation
+/// table entries": herd7 does not model the TLB.
 pub(crate) fn bbm_break(va: u64) {
-    run_tlb(&tlb::BBM_AFTER_INVALID, tlb::tlbi_va_operand(va, 0));
+    if is_kernel_va(va) {
+        run_tlb(&tlb::BBM_AFTER_INVALID, tlb::tlbi_va_operand(va, 0));
+    } else {
+        run_tlb(
+            &tlb::BBM_AFTER_INVALID_ALL_ASIDS,
+            tlb::tlbi_va_operand(va, 0),
+        );
+    }
+}
+
+/// `dsb ishst`: a space's table stores reach the walker before a TTBR0
+/// write that names it under an ASID, where no local invalidate follows.
+/// Arm ARM DDI0487, "TLB maintenance requirements": a table store is seen by
+/// the walker only after a DSB.
+pub fn dsb_ishst() {
+    run_tlb(&[tlb::TlbOp::DsbIshst], 0);
 }
 
 /// Barriers after the new store of break-before-make. Runs

@@ -14,6 +14,9 @@ pub enum TlbOp {
     DsbIshst,
     /// Leaf change: `tlbi vale1is`.
     TlbiVale1is,
+    /// Leaf change of a user VA whose space the caller does not name:
+    /// `tlbi vaale1is`, every ASID.
+    TlbiVaale1is,
     /// Table page freed: `tlbi vae1is`.
     TlbiVae1is,
     /// One ASID: `tlbi aside1is`.
@@ -40,6 +43,7 @@ impl TlbOp {
         match self {
             Self::DsbIshst => "dsb ishst",
             Self::TlbiVale1is => "tlbi vale1is",
+            Self::TlbiVaale1is => "tlbi vaale1is",
             Self::TlbiVae1is => "tlbi vae1is",
             Self::TlbiAside1is => "tlbi aside1is",
             Self::TlbiAside1 => "tlbi aside1",
@@ -98,9 +102,10 @@ pub const ASID_INVAL: [TlbOp; 4] = [
 /// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub const ROLLOVER_LOCAL: [TlbOp; 3] = [TlbOp::TlbiVmalle1, TlbOp::DsbNsh, TlbOp::Isb];
 
-/// After a TTBR0 write, with the `isb` that follows it. Local only: every
-/// user root is ASID 0 until ASIDs are wired, and a CPU's TLB holds user
-/// entries only from roots it loaded, each flushed when it switched away.
+/// After a TTBR0 write of an ASID-0 root, with the `isb` that follows it:
+/// with ASIDs off every user root is ASID 0, and an ASID-0 test root's
+/// entries must not outlive it (the kernel's `arch::aarch64::asid`). Local
+/// only: a CPU's TLB holds ASID-0 user entries only from roots it loaded.
 /// The broadcast `vmalle1is` would also drop global kernel entries on every
 /// CPU. The leading `dsb ishst` orders the PTE stores made before the switch
 /// ahead of the local invalidate. The kernel's `tlbi_asid0_local` runs this.
@@ -118,6 +123,25 @@ pub const TTBR0_SWITCH: [TlbOp; 4] = [
 /// break-before-make when updating translation table entries": herd7 does
 /// not model the TLB.
 pub const BBM_AFTER_INVALID: [TlbOp; 3] = [TlbOp::DsbIshst, TlbOp::TlbiVale1is, TlbOp::DsbIsh];
+
+/// [`LEAF_INVAL`] for a user VA through the `PageTable` seam, which names no
+/// space: `vaale1is` drops the VA under every ASID, so it is right whichever
+/// space's ASID tagged the entries. A caller that knows the space runs
+/// `LEAF_INVAL` with its ASID instead. Arm ARM DDI0487, "TLB maintenance
+/// requirements": herd7 does not model the TLB.
+pub const LEAF_INVAL_ALL_ASIDS: [TlbOp; 4] = [
+    TlbOp::DsbIshst,
+    TlbOp::TlbiVaale1is,
+    TlbOp::DsbIsh,
+    TlbOp::Isb,
+];
+
+/// [`BBM_AFTER_INVALID`] for a user VA through the `PageTable` seam, every
+/// ASID, as [`LEAF_INVAL_ALL_ASIDS`]. Arm ARM DDI0487, "Using
+/// break-before-make when updating translation table entries": herd7 does
+/// not model the TLB.
+pub const BBM_AFTER_INVALID_ALL_ASIDS: [TlbOp; 3] =
+    [TlbOp::DsbIshst, TlbOp::TlbiVaale1is, TlbOp::DsbIsh];
 /// Break-before-make, after the new store. The kernel's `bbm_make` runs this.
 /// Arm ARM DDI0487, "Using break-before-make when updating translation
 /// table entries": herd7 does not model the TLB.
@@ -420,6 +444,30 @@ mod tests {
         let user = tlbi_va_operand(0x0000_0000_0040_2000, 7);
         assert_eq!(user, 0x0007_0000_0000_0402);
         assert_eq!((user >> 44) & 0xF, 0, "TTL");
+    }
+
+    /// A user VA through the `PageTable` seam names no space, so its leaf
+    /// and break-before-make invalidates drop the VA under every ASID, with
+    /// the same barriers as the one-ASID forms.
+    #[test]
+    fn seam_user_invalidates_cover_every_asid() {
+        for (all, one) in [
+            (LEAF_INVAL_ALL_ASIDS.as_slice(), LEAF_INVAL.as_slice()),
+            (
+                BBM_AFTER_INVALID_ALL_ASIDS.as_slice(),
+                BBM_AFTER_INVALID.as_slice(),
+            ),
+        ] {
+            assert_eq!(all.len(), one.len());
+            for (a, o) in all.iter().zip(one) {
+                if *o == TlbOp::TlbiVale1is {
+                    assert_eq!(*a, TlbOp::TlbiVaale1is);
+                } else {
+                    assert_eq!(a, o);
+                }
+            }
+        }
+        assert_eq!(TlbOp::TlbiVaale1is.mnemonic(), "tlbi vaale1is");
     }
 
     #[test]

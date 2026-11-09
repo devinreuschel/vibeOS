@@ -130,7 +130,7 @@ SHARDS: dict[str, Shard] = {
     "test-kernel-smp4-5": Shard(
         "test-kernel-smp4",
         boots=("fat", "vblk-readonly", "vblk-bad-sector", "stalled-ap"),
-        aarch64_boots=("aff-off",),
+        aarch64_boots=("aff-off", "asid-4bit"),
     ),
     **_rows("test-lapic-fallback", "user_single_step"),
     "test-lapic-fallback-4": Shard(
@@ -147,7 +147,7 @@ SHARDS: dict[str, Shard] = {
 # registry ranges, so these are extra shards: stacking a proof boot on a
 # range shard would put the tier over the 60 s budget. `hpet-off` stays on
 # x86. `fat` stays on x86: its self-IPI is not delivered on aarch64.
-# `aff-off` stays on `test-kernel-smp4-5`'s `aarch64_boots`. GICv2
+# `aff-off` and `asid-4bit` stay on `test-kernel-smp4-5`'s `aarch64_boots`. GICv2
 # reruns the `-smp 2` ones as `test-gic-fallback-<k>`.
 AARCH64_PROOF: dict[str, Shard] = {
     "test-kernel-7": Shard("test-kernel", boots=("select", "repeat")),

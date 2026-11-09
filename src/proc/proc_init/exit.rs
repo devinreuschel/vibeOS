@@ -73,7 +73,7 @@ pub(super) fn finish_exit(wait_status: u32, fault: Option<u64>) -> ! {
     if let Some(space) = old {
         // The TCB stops naming the root before the kernel root is loaded,
         // so a switch back in between cannot reload it (invariant I44).
-        thread_init::set_pid_cr3(tid, 0, 0);
+        thread_init::set_pid_cr3(tid, 0, 0, 0);
         crate::arch::gs::force_kernel();
         addr_space_init::load_kernel_cr3();
         // The thread's `users` put, after every lock: the last one tears

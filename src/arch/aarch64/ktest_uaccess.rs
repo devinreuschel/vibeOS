@@ -54,7 +54,7 @@ fn with_stray_page<R>(
     let r = {
         let _g = InterruptGuard::enter();
         // SAFETY: `space.root` is a user TTBR0 `create` built; established here.
-        unsafe { addr_space_init::load_cr3_u64(space.root().as_u64()) };
+        unsafe { addr_space_init::load_cr3_u64(space.root().as_u64(), space.ctx_addr()) };
         let r = probe();
         addr_space_init::load_kernel_cr3();
         r

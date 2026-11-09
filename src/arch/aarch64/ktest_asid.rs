@@ -1,153 +1,219 @@
-//! aarch64 ASID proof: a 4-bit generation allocator's rollovers, checked
-//! through real TTBR0 switches (ROADMAP §11.2, PORTABILITY §11.2), and the
-//! TTBR0 each AP leaves the secondary stub on (ROADMAP §11.4).
+//! aarch64 ASID proof (ROADMAP §11.2, PORTABILITY §11.2): 1,000 short-lived
+//! processes under the `kernel_tests` 4-bit cap, each writing and checking
+//! a private pattern at one shared VA while its CPU switches among them.
+//!
+//! An opt-in row: the harness's `asid-4bit` proof boot names [`CAP`]
+//! alone, and that boot runs with 15 usable ASIDs
+//! (`arch::aarch64::asid::init_bsp`), so the processes force rollovers on
+//! every CPU while other CPUs run theirs. Each CPU keeps [`PER_CPU`]
+//! processes alive at once and they yield to each other, so a switch goes
+//! from one process straight to another. TCG keeps a CPU's soft TLB across
+//! a TTBR0 write that leaves the ASID unchanged, so an ASID that named two
+//! live spaces on one CPU between its flushes would hand one process the
+//! other's frame, and its check would fail. TCG drops that TLB whenever the
+//! ASID changes, so a missing rollover flush shows only in the kernel's
+//! record of each CPU's ASID-to-space pairs since its last flush
+//! (`arch::aarch64::asid::aliases`), which the test also checks, and in
+//! guest memory under HVF.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use vibeos::kalloc::TryBox;
-use vibeos::mm::asid::{self, AsidAlloc};
-use vibeos::paging::PageFlags;
-use vibeos::pmm::Frames;
+use vibeos::thread::ThreadId;
 
-use crate::arch::current::InterruptGuard;
-use crate::ktest::Outcome;
+use crate::arch::aarch64::asid;
+use crate::ktest::user::{self, Image, Layout, user_code};
+use crate::ktest::{Outcome, sleep_until, spawn_thread_on};
+use crate::per_cpu_init;
+use crate::thread_init;
 
-const USER_VA: u64 = 0x1_0000;
-const ASID_SHIFT: u64 = 48;
-const ASID_SPACES: u32 = 1000;
-const ASID_DATA_WINDOW: usize = 64;
-/// The frames `test_asid_4bit` keeps mapped. Static, not a `TryBox`: a
-/// `try_new([0; N])` builds its array on the stack first.
-static ASID_WINDOW: [AtomicU64; ASID_DATA_WINDOW] = [const { AtomicU64::new(0) }; ASID_DATA_WINDOW];
-fn free_pa(pa: u64) {
-    if pa == 0 {
-        return;
-    }
-    // SAFETY: `pa` is a buddy page this test allocated and no longer maps.
-    // established here.
-    unsafe {
-        crate::pmm_init::with_buddy(|b| b.free(Frames::from_entry(pa, 0)));
-    }
+/// The registry row the 4-bit cap serves.
+const CAP: &str = asid::CAP_TEST;
+/// The processes this test runs in all.
+const PROCS: u32 = 1_000;
+/// Processes alive at once on each CPU.
+const PER_CPU: usize = 5;
+/// Code at the first page; the pattern goes in the two after it.
+const LAYOUT: Layout = Layout {
+    vaddr: 0x4000_0000,
+    memsz: Some(0x3000),
+    writable: true,
+};
+
+// Pattern: pid in bits 63:32 over a constant, plus the round. Thirty-two
+// words at a 256-byte stride over the two pages after the code page,
+// written, then one `sched_yield`, then checked, twenty rounds. Exit 0 when
+// every check held, 1 at the first word that did not.
+user_code!(
+    ASID_PATTERN,
+    "
+    mov x8, #172
+    svc #0
+    lsl x20, x0, #32
+    movz x9, #0xA5C3
+    movk x9, #0x5A3C, lsl #16
+    orr x20, x20, x9
+    adr x21, .
+    lsr x21, x21, #12
+    lsl x21, x21, #12
+    add x21, x21, #0x1000
+    mov w19, #20
+1:
+    mov x22, x21
+    mov x23, #32
+2:
+    eor x24, x20, x23
+    str x24, [x22]
+    add x22, x22, #256
+    subs x23, x23, #1
+    b.ne 2b
+    mov x8, #124
+    svc #0
+    mov x22, x21
+    mov x23, #32
+3:
+    ldr x25, [x22]
+    eor x24, x20, x23
+    cmp x25, x24
+    b.ne 9f
+    add x22, x22, #256
+    subs x23, x23, #1
+    b.ne 3b
+    add x20, x20, #1
+    subs w19, w19, #1
+    b.ne 1b
+    mov x0, xzr
+    mov x8, #93
+    svc #0
+9:
+    mov x0, #1
+    mov x8, #93
+    svc #0
+    "
+);
+
+/// Processes claimed so far, shared by every CPU's spawner; a claim at or
+/// past [`PROCS`] starts nothing.
+static CLAIMED: AtomicU32 = AtomicU32::new(0);
+static PASSED: AtomicU32 = AtomicU32::new(0);
+/// The first failure's wait status, or `u64::MAX - 1` for a spawn error.
+static FIRST_BAD: AtomicU64 = AtomicU64::new(u64::MAX);
+static SPAWNERS_DONE: AtomicU32 = AtomicU32::new(0);
+
+fn note_bad(v: u64) {
+    // AcqRel: the first failure wins; pairs with the Acquire load in
+    // `test_asid_procs_4bit`. Relaxed: the failure load; pairs with nothing.
+    let _ = FIRST_BAD.compare_exchange(u64::MAX, v, Ordering::AcqRel, Ordering::Relaxed);
 }
 
-pub(crate) fn test_asid_4bit() -> Outcome {
-    let ncpus = crate::per_cpu_init::cpu_count().max(2) as u32;
-    let Some(alloc) = AsidAlloc::try_boxed(4, ncpus) else {
-        return Outcome::Fail("4-bit AsidAlloc");
-    };
-    let saved = crate::arch::aarch64::cpu::read_ttbr0();
-    let cpu = 0u32;
-    let flags = PageFlags::empty()
-        .with(PageFlags::PRESENT)
-        .with(PageFlags::WRITABLE)
-        .with(PageFlags::USER);
-    // The allocator starts with no flush pending, so this CPU's TLB may hold
-    // entries from an earlier run of this test. Flush before the first space.
-    crate::arch::aarch64::cpu::tlbi_all();
-    let mut i = 0u32;
-    while i < ASID_SPACES {
-        if crate::ktest::deadline_within(1_000) == Some(true) {
-            // SAFETY: restore the empty TTBR0 this CPU had. established here.
-            unsafe { crate::arch::aarch64::cpu::write_ttbr0(saved) };
-            return Outcome::Fail("asid deadline");
-        }
-        let Some(l0) = crate::paging_init::alloc_zeroed(0) else {
-            return Outcome::Fail("asid l0");
-        };
-        let Some(data) = crate::paging_init::alloc_zeroed(0) else {
-            free_pa(l0);
-            return Outcome::Fail("asid data");
-        };
-        // The word goes in through the physmap, so the read through USER_VA
-        // below is the first access through this space's translation.
-        let pattern = 0xA5A5_0000u64 | u64::from(i);
-        let phys = crate::paging_init::hhdm_offset().wrapping_add(data) as *mut u64;
-        // SAFETY: `data` is a buddy page this test owns, and HHDM maps it
-        // (I14). established here.
-        unsafe { phys.write_volatile(pattern) };
-        let Ok(mut tables) = TryBox::try_new([0u64; 8]) else {
-            free_pa(data);
-            free_pa(l0);
-            return Outcome::Fail("asid tables");
-        };
-        let mut n = 0usize;
-        tables[n] = l0;
-        n += 1;
-        // SAFETY: `l0` is the root this test allocated, an HHDM-mapped table page. established here.
-        if !unsafe {
-            crate::arch::aarch64::secondary::map_va(
-                l0,
-                USER_VA,
-                data,
-                &mut tables[..],
-                &mut n,
-                flags,
-            )
-        } {
-            let mut t = 0;
-            while t < n {
-                free_pa(tables[t]);
-                t += 1;
-            }
-            free_pa(data);
-            return Outcome::Fail("asid map");
-        }
-        let mut word = 0u64;
-        let packed = asid::switch(&alloc, cpu, &mut word);
-        if packed == 0 {
-            let mut t = 0;
-            while t < n {
-                free_pa(tables[t]);
-                t += 1;
-            }
-            free_pa(data);
-            return Outcome::Fail("asid alloc");
-        }
-        // Only a rollover sets flush-pending, so only a rollover flushes.
-        // Deleting this flush left the test green under TCG, where every switch
-        // here changes the ASID. HVF did not reach the test with or without the
-        // flush, so no accel here is shown to catch a missing flush.
-        if alloc.take_flush(cpu) {
-            crate::arch::aarch64::cpu::tlbi_all();
-        }
-        let asid = u64::from(alloc.asid_of(packed));
-        let got = {
-            // IRQs off while the test's TTBR0 is live: a switch away would load
-            // another root under this space's ASID.
-            let _irq = InterruptGuard::enter();
-            // SAFETY: `l0` is this space's TTBR0 root; ASID is the allocator's.
-            // established here.
-            unsafe { crate::arch::aarch64::cpu::write_ttbr0(l0 | (asid << ASID_SHIFT)) };
-            crate::arch::aarch64::cpu::clear_pan();
-            // SAFETY: USER_VA is mapped in this TTBR0; PAN is clear. established here.
-            let got = unsafe { core::ptr::read_volatile(USER_VA as *const u64) };
-            crate::arch::aarch64::cpu::set_pan();
-            // SAFETY: `saved` is the empty root this CPU had. established here.
-            unsafe { crate::arch::aarch64::cpu::write_ttbr0(saved) };
-            got
-        };
-        let mut t = 0;
-        while t < n {
-            free_pa(tables[t]);
-            t += 1;
-        }
-        // Keep this space's frame until ASID_DATA_WINDOW later spaces have
-        // taken theirs, so a stale entry never names this space's frame.
-        let slot = (i as usize) % ASID_DATA_WINDOW;
-        // Relaxed: this test is the only writer of the window; pairs with nothing.
-        free_pa(ASID_WINDOW[slot].swap(data, Ordering::Relaxed));
-        if got != pattern {
-            return crate::fail_fmt!("asid {i} got {got:#x} want {pattern:#x}");
-        }
-        i += 1;
+/// Claim up to `n` of the processes not yet started.
+fn take(n: usize) -> usize {
+    let mut got = 0;
+    // Relaxed: each claim is one unique index; pairs with nothing.
+    while got < n && CLAIMED.fetch_add(1, Ordering::Relaxed) < PROCS {
+        got += 1;
     }
-    let mut s = 0;
-    while s < ASID_DATA_WINDOW {
-        // Relaxed: as above; pairs with nothing.
-        free_pa(ASID_WINDOW[s].swap(0, Ordering::Relaxed));
-        s += 1;
+    got
+}
+
+/// One CPU's spawner: batches of [`PER_CPU`] processes, which run pinned
+/// here (`thread_init::spawn_user` pins to the spawner's CPU), until none
+/// are left.
+fn spawner() {
+    loop {
+        let n = take(PER_CPU);
+        if n == 0 {
+            break;
+        }
+        let mut pids = [0u32; PER_CPU];
+        for slot in pids.iter_mut().take(n) {
+            match user::spawn(&Image::Code(ASID_PATTERN, LAYOUT), &["asid"]) {
+                Ok(pid) => *slot = pid,
+                Err(_) => note_bad(u64::MAX - 1),
+            }
+        }
+        for &pid in pids.iter().take(n) {
+            if pid == 0 {
+                continue;
+            }
+            let st = user::wait(pid);
+            if vibeos::proc::wifexited(st) && vibeos::proc::wexitstatus(st) == 0 {
+                // Relaxed: a count read after `SPAWNERS_DONE`'s Acquire; pairs with nothing.
+                PASSED.fetch_add(1, Ordering::Relaxed);
+            } else {
+                note_bad(u64::from(st));
+            }
+        }
     }
-    crate::arch::aarch64::cpu::tlbi_all();
+    // Release: pairs with the Acquire load in `test_asid_procs_4bit`.
+    SPAWNERS_DONE.fetch_add(1, Ordering::Release);
+}
+
+pub(crate) fn test_asid_procs_4bit() -> Outcome {
+    let ncpus = per_cpu_init::cpu_count() as u32;
+    let bits = asid::bits();
+    // The cap holds wherever 15 ASIDs exceed the CPUs; past that the port
+    // runs without ASIDs, and this test checks that fallback instead.
+    if ncpus < 15 && bits != Some(vibeos::mm::asid::TEST_CAP_BITS) {
+        return crate::fail_fmt!("asid width {bits:?}: the boot did not select {CAP}");
+    }
+    let gen0 = asid::generation();
+    let aliases0 = asid::aliases();
+    // Relaxed: set before any spawner starts, which `spawn_thread_on` orders; pairs with nothing.
+    CLAIMED.store(0, Ordering::Relaxed);
+    // Relaxed: as LEFT; pairs with nothing.
+    PASSED.store(0, Ordering::Relaxed);
+    // Relaxed: as LEFT; pairs with nothing.
+    FIRST_BAD.store(u64::MAX, Ordering::Relaxed);
+    // Relaxed: as LEFT; pairs with nothing.
+    SPAWNERS_DONE.store(0, Ordering::Relaxed);
+    let mask = per_cpu_init::online_mask();
+    let mut ids = [ThreadId::NONE; 64];
+    let mut started = 0u32;
+    for cpu in 0..64u32 {
+        if mask & (1u64 << cpu) != 0 {
+            ids[cpu as usize] = spawn_thread_on("asid-spawner", spawner, cpu).id();
+            started += 1;
+        }
+    }
+    // Acquire: pairs with the Release add in `spawner`.
+    let done = sleep_until(|| SPAWNERS_DONE.load(Ordering::Acquire) == started, 170_000);
+    let joined = sleep_until(
+        || {
+            ids.iter()
+                .all(|&id| id == ThreadId::NONE || thread_init::exited(id))
+        },
+        2_000,
+    );
+    if !done {
+        // Relaxed: progress for the failure line; pairs with nothing.
+        let claimed = CLAIMED.load(Ordering::Relaxed).min(PROCS);
+        return crate::fail_fmt!("spawners not done, {claimed} of {PROCS} processes started");
+    }
+    // Acquire: pairs with the AcqRel compare-exchange in `note_bad`.
+    match FIRST_BAD.load(Ordering::Acquire) {
+        u64::MAX => {}
+        v if v == u64::MAX - 1 => return Outcome::Fail("spawn failed"),
+        st => return crate::fail_fmt!("a process read another's pattern: status {st:#x}"),
+    }
+    // Relaxed: ordered after every spawner's adds by `SPAWNERS_DONE`; pairs with nothing.
+    let passed = PASSED.load(Ordering::Relaxed);
+    if passed != PROCS {
+        return crate::fail_fmt!("{passed} of {PROCS} processes passed");
+    }
+    let aliases = asid::aliases().saturating_sub(aliases0);
+    if aliases != 0 {
+        return crate::fail_fmt!("{aliases} loads gave an ASID a second space before a flush");
+    }
+    let rollovers = asid::generation().saturating_sub(gen0) >> bits.unwrap_or(0);
+    crate::ktest_info!("asid bits={bits:?} cpus={ncpus} rollovers={rollovers}");
+    // 15 usable, at most `ncpus` reserved: each generation serves at most 15
+    // new spaces, so 1,000 spaces need more than 60 rollovers.
+    if bits.is_some() && rollovers < 60 {
+        return crate::fail_fmt!("only {rollovers} rollovers");
+    }
+    if !joined {
+        return Outcome::Fail("a spawner did not exit");
+    }
     Outcome::Ok
 }
 
