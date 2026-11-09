@@ -19,7 +19,6 @@ use super::walk::*;
 use super::*;
 use core::mem::{offset_of, size_of};
 
-use crate::arch::stub::Arch;
 use crate::irq::stop::StopHow;
 use crate::log::trace::{self, Event, RECORD_SIZE, RECORDS_PER_CPU, RecordData, TRACE_MAGIC};
 use crate::log::vmcoreinfo::Info;
@@ -28,7 +27,7 @@ use crate::paging::PageFlags;
 use crate::sched::ReadyQueue;
 use crate::thread::{CpuContext, Tcb, ThreadState};
 
-type K<'a, 'b> = Kernel<'a, SliceCore<'b>, Arch>;
+type K<'a, 'b> = Kernel<'a, SliceCore<'b>, X86_64>;
 type KRing = Ring<RING_CAP, MSG_CAP>;
 type KRecord = Record<MSG_CAP>;
 
@@ -101,21 +100,62 @@ fn core_parse_reads_loads_and_notes() {
 fn prstatus_regs_at_linux_offsets() {
     let d = synth::prstatus(3, 0x1111, 0x2222, 0x3333);
     assert_eq!(d.len(), 336);
-    let r = prstatus_regs(&d).unwrap();
+    let r = prstatus_regs(&d, Machine::X86_64).unwrap();
     assert_eq!(
         r,
         PrRegs {
             pid: 3,
-            rip: 0x1111,
-            rsp: 0x2222,
-            rbp: 0x3333,
-            rflags: 2
+            pc: 0x1111,
+            sp: 0x2222,
+            fp: 0x3333,
+            flags: 2
         }
     );
     // `pr_reg` starts at 112; `rip` is its 17th word, `rbp` its 5th.
     assert_eq!(&d[112 + 16 * 8..112 + 17 * 8], &0x1111u64.to_le_bytes());
     assert_eq!(&d[112 + 4 * 8..112 + 5 * 8], &0x3333u64.to_le_bytes());
-    assert_eq!(prstatus_regs(&d[..200]), Err(VmError::Truncated));
+    assert_eq!(
+        prstatus_regs(&d[..200], Machine::X86_64),
+        Err(VmError::Truncated)
+    );
+}
+
+/// AArch64's `NT_PRSTATUS`, laid out by hand as QEMU's
+/// `target/arm/arch_dump.c` writes it: `pr_pid` at 32, then `pr_reg`, a
+/// `user_pt_regs`, at 112: `regs[0..31]`, `sp`, `pc`, `pstate`.
+#[test]
+fn prstatus_regs_aarch64_user_pt_regs() {
+    let mut d = [0u8; 392];
+    d[32..36].copy_from_slice(&2u32.to_le_bytes());
+    for i in 0..31u64 {
+        let at = 112 + i as usize * 8;
+        d[at..at + 8].copy_from_slice(&(0x100 + i).to_le_bytes());
+    }
+    d[112 + 31 * 8..112 + 32 * 8].copy_from_slice(&0xFFFF_D000_0000_1F00u64.to_le_bytes());
+    d[112 + 32 * 8..112 + 33 * 8].copy_from_slice(&0xFFFF_FFFF_8000_1234u64.to_le_bytes());
+    d[112 + 33 * 8..112 + 34 * 8].copy_from_slice(&0x3C5u64.to_le_bytes());
+    let r = prstatus_regs(&d, Machine::Aarch64).unwrap();
+    assert_eq!(
+        r,
+        PrRegs {
+            pid: 2,
+            pc: 0xFFFF_FFFF_8000_1234,
+            sp: 0xFFFF_D000_0000_1F00,
+            fp: 0x100 + 29,
+            flags: 0x3C5
+        }
+    );
+    // The synthetic cores' builder writes the same slots.
+    let built = synth::prstatus_for(Machine::Aarch64, 2, r.pc, r.sp, r.fp);
+    assert_eq!(built.len(), 392);
+    let back = prstatus_regs(&built, Machine::Aarch64).unwrap();
+    assert_eq!((back.pid, back.pc, back.sp, back.fp), (2, r.pc, r.sp, r.fp));
+    // The x86-64 reading of the same bytes takes other slots.
+    assert_ne!(prstatus_regs(&d, Machine::X86_64).unwrap().pc, r.pc);
+    assert_eq!(
+        prstatus_regs(&d[..360], Machine::Aarch64),
+        Err(VmError::Truncated)
+    );
 }
 
 #[test]
@@ -373,6 +413,336 @@ fn virtual_core_roundtrip() {
     assert_eq!(
         write_virtual_core(&k, &notes, |_| Err(VmError::Write)),
         Err(VmError::Write)
+    );
+}
+
+// ---------------------------------------------------------------- aarch64
+
+type KA<'a, 'b> = Kernel<'a, SliceCore<'b>, Aarch64Ttbr1>;
+
+/// QEMU `virt`'s RAM base, and where its kernel-half regions sit: the
+/// physmap at the TTBR1 half's start, the KVA stacks, MMIO.
+const A64_RAM: u64 = 0x4000_0000;
+const A64_PHYSMAP: u64 = 0xFFFF_0000_0000_0000;
+const A64_STACKS: u64 = 0xFFFF_D000_0000_0000;
+const A64_MMIO: u64 = 0xFFFF_E000_0000_0000;
+
+/// A `virt` core of 64 MiB at `A64_RAM` whose TTBR1 table maps a 1 GiB
+/// physmap block over RAM, the kernel image at `KBASE` as one 2 MiB block,
+/// a 4 KiB KVA stack page, and two Device pages (one over RAM).
+fn a64_core() -> Synth {
+    let mut s = Synth::new_for(Machine::Aarch64, &[(A64_RAM, 64 << 20)]);
+    s.map(A64_PHYSMAP + A64_RAM, A64_RAM, 1 << 30, 0);
+    s.map(KBASE, A64_RAM + 0x20_0000, 0x20_0000, 0);
+    s.map(A64_STACKS + 0x1_0000, A64_RAM + 0x7000, 0x1000, 0);
+    s.map(
+        A64_MMIO,
+        0x0900_0000,
+        0x1000,
+        PageFlags::PCD | PageFlags::PWT,
+    );
+    s.map(
+        A64_MMIO + 0x1000,
+        A64_RAM + 0x8000,
+        0x1000,
+        PageFlags::PCD | PageFlags::PWT,
+    );
+    s
+}
+
+#[test]
+fn ttbr1_descriptors_are_arm_formats() {
+    let s = a64_core();
+    let root = s.root;
+    let mut s = s;
+    // KBASE's root slot is 511, a table descriptor (bits 1:0 = 0b11); its
+    // 2 MiB leaf a block (0b01) with AF set and Normal memory.
+    let l0 = u64::from_le_bytes(s.read_phys(root + 511 * 8, 8).try_into().unwrap());
+    assert_eq!(l0 & 3, 3);
+    let l1 = l0 & 0x0000_FFFF_FFFF_F000;
+    let l1e = u64::from_le_bytes(s.read_phys(l1 + 510 * 8, 8).try_into().unwrap());
+    assert_eq!(l1e & 3, 3);
+    let l2 = l1e & 0x0000_FFFF_FFFF_F000;
+    let leaf = u64::from_le_bytes(s.read_phys(l2, 8).try_into().unwrap());
+    assert_eq!(leaf & 3, 1);
+    assert_ne!(leaf & (1 << 10), 0);
+    assert_eq!(leaf & 0x0000_FFFF_FFFF_F000, A64_RAM + 0x20_0000);
+    // The decode the walk uses, level by level.
+    assert_eq!(Aarch64Ttbr1::desc(l0, 4), Desc::Table);
+    assert_eq!(Aarch64Ttbr1::desc(leaf, 2), Desc::Leaf);
+    // A block where none is allowed (the root; a page slot with bit 1
+    // clear) and an invalid entry map nothing.
+    assert_eq!(Aarch64Ttbr1::desc(leaf, 4), Desc::None);
+    assert_eq!(Aarch64Ttbr1::desc(leaf, 1), Desc::None);
+    assert_eq!(Aarch64Ttbr1::desc(leaf & !1, 2), Desc::None);
+    assert_eq!(Aarch64Ttbr1::desc(l0, 1), Desc::Leaf);
+    assert_eq!(Aarch64Ttbr1::index(KBASE, 4), 511);
+    assert_eq!(Aarch64Ttbr1::index(A64_PHYSMAP, 4), 0);
+}
+
+#[test]
+fn ttbr1_walk_4k_2m_1g() {
+    let mut s = a64_core();
+    s.write_phys(A64_RAM + 0x7010, b"four-kib");
+    s.write_phys(A64_RAM + 0x20_0100, b"two-mib!");
+    s.write_phys(A64_RAM + 0x12_3456, b"one-gib!");
+    let root = s.root;
+    let bytes = s.build();
+    let core = SliceCore::new(&bytes).unwrap();
+    assert_eq!(core.hdr.machine, Machine::Aarch64);
+    let k: KA = Kernel::new(&core, root, 4).unwrap();
+    assert_eq!(k.translate(A64_STACKS + 0x1_0010), Ok(A64_RAM + 0x7010));
+    assert_eq!(k.translate(KBASE + 0x100), Ok(A64_RAM + 0x20_0100));
+    assert_eq!(
+        k.translate(A64_PHYSMAP + A64_RAM + 0x12_3456),
+        Ok(A64_RAM + 0x12_3456)
+    );
+    let mut b = [0u8; 8];
+    for (va, want) in [
+        (A64_STACKS + 0x1_0010, b"four-kib"),
+        (KBASE + 0x100, b"two-mib!"),
+        (A64_PHYSMAP + A64_RAM + 0x12_3456, b"one-gib!"),
+    ] {
+        k.read(va, &mut b).unwrap();
+        assert_eq!(&b, want, "{va:#x}");
+    }
+    // TTBR1 translates only its half: a TTBR0 VA, or one x86_64 would call
+    // canonical but aarch64's 48-bit TTBR1 does not, is refused.
+    assert_eq!(
+        k.translate(0x0000_4000_0000_0000),
+        Err(VmError::NonCanonical)
+    );
+    assert_eq!(
+        k.translate(0xFFFE_FFFF_FFFF_F000),
+        Err(VmError::NonCanonical)
+    );
+    assert_eq!(k.translate(A64_STACKS + 0x2_0000), Err(VmError::NotMapped));
+    // The Device page over RAM still translates for a read...
+    assert_eq!(k.translate(A64_MMIO + 0x1000), Ok(A64_RAM + 0x8000));
+    // ...but neither Device page is a mapping of the virtual core. The
+    // physmap block is held only up to the core's 64 MiB; the runs come in
+    // root-slot order, the physmap's slot 0 first and KBASE's 511 last.
+    let mut runs = Vec::new();
+    k.kernel_mappings(|m| runs.push(m)).unwrap();
+    assert_eq!(
+        runs,
+        [
+            Mapping {
+                va: A64_PHYSMAP + A64_RAM,
+                pa: A64_RAM,
+                len: 64 << 20
+            },
+            Mapping {
+                va: A64_STACKS + 0x1_0000,
+                pa: A64_RAM + 0x7000,
+                len: 0x1000
+            },
+            Mapping {
+                va: KBASE,
+                pa: A64_RAM + 0x20_0000,
+                len: 0x20_0000
+            },
+        ]
+    );
+    assert_eq!(KA::new(&core, root, 3).err(), Some(VmError::Levels));
+}
+
+#[test]
+fn ttbr1_walk_drops_reserved_and_looping_tables() {
+    let mut s = Synth::new_for(Machine::Aarch64, &[(A64_RAM, RAM)]);
+    let root = s.root;
+    s.map(KBASE, A64_RAM + 0x20_0000, 0x1000, 0);
+    // Turn KBASE's 4 KiB page into a level-1 entry with bit 1 clear: a
+    // reserved encoding the MMU faults on, which the walk must not map.
+    let pa_leaf = {
+        let mut table = root;
+        for level in (2..=4u8).rev() {
+            let e = u64::from_le_bytes(
+                s.read_phys(table + Aarch64Ttbr1::index(KBASE, level) as u64 * 8, 8)
+                    .try_into()
+                    .unwrap(),
+            );
+            table = e & 0x0000_FFFF_FFFF_F000;
+        }
+        table + Aarch64Ttbr1::index(KBASE, 1) as u64 * 8
+    };
+    let e = u64::from_le_bytes(s.read_phys(pa_leaf, 8).try_into().unwrap());
+    s.write_phys(pa_leaf, &(e & !2).to_le_bytes());
+    // A root block (bit 1 clear at level 4) maps nothing either.
+    s.write_phys(root, &(A64_RAM | 1 | (1 << 10)).to_le_bytes());
+    let bytes = s.build();
+    let core = SliceCore::new(&bytes).unwrap();
+    let k: KA = Kernel::new(&core, root, 4).unwrap();
+    assert_eq!(k.translate(KBASE), Err(VmError::NotMapped));
+    assert_eq!(k.translate(A64_PHYSMAP), Err(VmError::NotMapped));
+    let mut runs = Vec::new();
+    k.kernel_mappings(|m| runs.push(m)).unwrap();
+    assert!(runs.is_empty(), "{runs:?}");
+    // Every root slot naming the root: the budget ends the walk.
+    let mut s = Synth::new_for(Machine::Aarch64, &[(A64_RAM, RAM)]);
+    let root = s.root;
+    for i in 0..512u64 {
+        s.write_phys(root + i * 8, &(root | 3).to_le_bytes());
+    }
+    let bytes = s.build();
+    let core = SliceCore::new(&bytes).unwrap();
+    let k: KA = Kernel::new(&core, root, 4).unwrap().with_budget(1 << 16);
+    assert_eq!(k.kernel_mappings(|_| {}), Err(VmError::WalkBudget));
+}
+
+/// A leaf's output address is its block's base: the bits below a block's
+/// size are RES0 in an aarch64 block descriptor and, at bit 12, x86_64's PAT
+/// bit of a 2 MiB leaf, never address bits.
+#[test]
+fn block_output_address_is_block_aligned() {
+    let low = 0x1_F000u64; // bits 12..=16, inside a 2 MiB block's offset
+    // aarch64: KBASE's 2 MiB block with RES0 bits set in its output address.
+    let mut s = a64_core();
+    s.write_phys(A64_RAM + 0x20_0040, b"blockbas");
+    let root = s.root;
+    let mut table = root;
+    for level in [4u8, 3] {
+        let e = u64::from_le_bytes(
+            s.read_phys(table + Aarch64Ttbr1::index(KBASE, level) as u64 * 8, 8)
+                .try_into()
+                .unwrap(),
+        );
+        table = e & 0x0000_FFFF_FFFF_F000;
+    }
+    let at = table + Aarch64Ttbr1::index(KBASE, 2) as u64 * 8;
+    let e = u64::from_le_bytes(s.read_phys(at, 8).try_into().unwrap());
+    s.write_phys(at, &(e | low).to_le_bytes());
+    let bytes = s.build();
+    let core = SliceCore::new(&bytes).unwrap();
+    let k: KA = Kernel::new(&core, root, 4).unwrap();
+    assert_eq!(k.translate(KBASE + 0x40), Ok(A64_RAM + 0x20_0040));
+    let mut b = [0u8; 8];
+    k.read(KBASE + 0x40, &mut b).unwrap();
+    assert_eq!(&b, b"blockbas");
+    let mut runs = Vec::new();
+    k.kernel_mappings(|m| runs.push(m)).unwrap();
+    assert!(runs.contains(&Mapping {
+        va: KBASE,
+        pa: A64_RAM + 0x20_0000,
+        len: 0x20_0000
+    }));
+    // x86_64: the 2 MiB leaf at KBASE with its PAT bit (12) set.
+    let mut s = Synth::new(&[(0, RAM)]);
+    s.map(KBASE, 0x20_0000, 0x20_0000, 1 << 12);
+    let root = s.root;
+    let bytes = s.build();
+    let core = SliceCore::new(&bytes).unwrap();
+    let k: K = Kernel::new(&core, root, 4).unwrap();
+    assert_eq!(k.translate(KBASE + 0x40), Ok(0x20_0040));
+}
+
+#[test]
+fn ttbr1_virtual_core_is_aarch64() {
+    let mut s = a64_core();
+    s.write_phys(A64_RAM + 0x20_0000, b"kernel text");
+    let root = s.root;
+    s.cpu(
+        1,
+        KBASE + 0x14,
+        A64_STACKS + 0x1_0F00,
+        A64_STACKS + 0x1_0F00,
+    );
+    let bytes = s.build();
+    let core = SliceCore::new(&bytes).unwrap();
+    let k: KA = Kernel::new(&core, root, 4).unwrap();
+    let mut notes = Vec::new();
+    core.note_bytes(|n| notes.push(n));
+    let mut out = Vec::new();
+    let st = write_virtual_core(&k, &notes, |b| {
+        out.extend_from_slice(b);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(st.segments, 3);
+    assert_eq!(le16(&out, 18), Ok(183));
+    let h = core_header(&out).unwrap();
+    assert_eq!(h.machine, Machine::Aarch64);
+    let ph: Vec<Phdr> = (0..h.phnum).map(|i| phdr(&out, &h, i).unwrap()).collect();
+    assert_eq!(ph[3].vaddr, KBASE);
+    assert_eq!(&out[ph[3].offset as usize..][..11], b"kernel text");
+    // Its registers note reads back in AArch64's layout.
+    let note_bytes = &out[ph[0].offset as usize..][..ph[0].filesz as usize];
+    let regs: Vec<PrRegs> = Notes::new(note_bytes)
+        .filter(|n| n.kind == NT_PRSTATUS)
+        .map(|n| prstatus_regs(n.desc, h.machine).unwrap())
+        .collect();
+    assert_eq!(regs.len(), 1);
+    assert_eq!(
+        (regs[0].pc, regs[0].fp),
+        (KBASE + 0x14, A64_STACKS + 0x1_0F00)
+    );
+}
+
+#[test]
+fn ttbr1_unwind_follows_frame_records() {
+    // A frame record chain in the physmap, below x86_64's kernel half but
+    // inside aarch64's: `x29` names `{caller's x29, x30}`.
+    let mut s = a64_core();
+    let base = A64_PHYSMAP + A64_RAM + 0x30_0000;
+    let rets = [KBASE + 0x48, KBASE + 0x88];
+    for (i, r) in rets.iter().enumerate() {
+        let fp = base + i as u64 * 0x40;
+        let next = if i + 1 == rets.len() { 0 } else { fp + 0x40 };
+        let pa = s.translate(fp).unwrap();
+        s.write_phys(pa, &next.to_le_bytes());
+        s.write_phys(pa + 8, &r.to_le_bytes());
+    }
+    let root = s.root;
+    let bytes = s.build();
+    let core = SliceCore::new(&bytes).unwrap();
+    let k: KA = Kernel::new(&core, root, 4).unwrap();
+    let in_text = |a: u64| (KBASE..KBASE + 0x100).contains(&a);
+    let mut out = [0u64; BT_MAX];
+    let n = k.unwind(KBASE + 0x14, base, in_text, &mut out);
+    assert_eq!(&out[..n], &[KBASE + 0x14, KBASE + 0x48, KBASE + 0x88]);
+    // A TTBR0 frame pointer ends the walk at the PC.
+    assert_eq!(k.unwind(KBASE + 0x14, 0x4000_0000, in_text, &mut out), 1);
+}
+
+#[test]
+fn thread_view_reads_aarch64_callee_saved() {
+    // `CpuContext` overlays x19 to x24 on its first six words and keeps
+    // x25 to x29 in `extra`; the frame pointer is x29, the last.
+    let mut s = basic();
+    let t = KBASE + 0x17_1000;
+    let pa = s.translate(t).unwrap();
+    let ctx = pa + offset_of!(Tcb, context) as u64;
+    for k in 0..5u64 {
+        s.write_phys(
+            ctx + CpuContext::EXTRA as u64 + k * 8,
+            &(0x2500 + k).to_le_bytes(),
+        );
+    }
+    s.write_phys(ctx + CpuContext::RBP as u64, &0x1111u64.to_le_bytes());
+    let root = s.root;
+    let bytes = s.build();
+    let core = SliceCore::new(&bytes).unwrap();
+    let k: K = Kernel::new(&core, root, 4).unwrap();
+    let v = k.thread(t).unwrap();
+    assert_eq!(v.extra, [0x2500, 0x2501, 0x2502, 0x2503, 0x2504]);
+    assert_eq!(CpuContext::X29, CpuContext::EXTRA + 4 * 8);
+    assert_eq!(v.frame_pointer(Machine::Aarch64), 0x2504);
+    assert_eq!(v.frame_pointer(Machine::X86_64), 0x1111);
+}
+
+#[test]
+fn machines_from_e_machine() {
+    assert_eq!(Machine::from_em(62), Some(Machine::X86_64));
+    assert_eq!(Machine::from_em(183), Some(Machine::Aarch64));
+    assert_eq!(Machine::from_em(3), None);
+    let elf = synth::kernel_elf_for(Machine::Aarch64, &ID, KBASE, &[0; 16], &[]);
+    assert_eq!(
+        KernelElf::parse(&elf).unwrap().hdr.machine,
+        Machine::Aarch64
+    );
+    assert_eq!(
+        VmError::WrongMachine.as_str(),
+        "not an x86-64 or AArch64 ELF"
     );
 }
 
@@ -703,7 +1073,7 @@ fn logger_bytes(l: &KernelLogger) -> Vec<u8> {
     b
 }
 
-fn log_texts<M: PhysMem>(k: &Kernel<'_, M, Arch>, at: u64) -> Vec<Vec<u8>> {
+fn log_texts<M: PhysMem>(k: &Kernel<'_, M, X86_64>, at: u64) -> Vec<Vec<u8>> {
     let h = k.log_header(at).unwrap();
     let mut got = Vec::new();
     k.log_tail(at, &h, |r| got.push(r.text().to_vec())).unwrap();

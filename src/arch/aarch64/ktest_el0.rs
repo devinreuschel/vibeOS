@@ -14,6 +14,7 @@ use crate::ktest::user::{self, DEFAULT, Image, TLS_MAGIC, elf_bytes, user_code};
 use crate::ktest::{Outcome, fid, second_cpu, sleep_until, spawn_thread_on};
 use crate::per_cpu_init;
 use crate::proc_init;
+use crate::syscall_init;
 use crate::thread_init;
 use crate::time_init;
 
@@ -819,7 +820,7 @@ pub(crate) fn current_migrate_if1() -> Outcome {
         let id = h.id();
         ids[i] = id;
         let pid = PID_MAX.saturating_add(1).saturating_add(i as u32);
-        thread_init::set_pid_cr3(id, pid, 0);
+        thread_init::set_pid_cr3(id, pid, 0, 0);
         // Release: pairs with the Acquire load of MIGRATE_TCB in `migrate_body`.
         MIGRATE_TCB[i].store(thread_init::tcb_ptr(id), Ordering::Release);
         // Release: pairs with the Acquire load of MIGRATE_PID in `migrate_body`.
@@ -843,7 +844,7 @@ pub(crate) fn current_migrate_if1() -> Outcome {
         )
     };
     for id in ids {
-        thread_init::set_pid_cr3(id, 0, 0);
+        thread_init::set_pid_cr3(id, 0, 0, 0);
     }
     // Release: pairs with the Acquire load of MIGRATE_EXIT in `migrate_body`.
     MIGRATE_EXIT.store(true, Ordering::Release);
@@ -1008,4 +1009,79 @@ pub(crate) fn test_el0_code_recycle() -> Outcome {
         }
     }
     Outcome::Ok
+}
+
+user_code!(
+    EL0_EXIT0,
+    "
+    mov x0, #0
+    mov x8, #93
+    svc #0
+    "
+);
+
+/// A saved SPSR naming EL1h kills the process with SIGSEGV before the
+/// `eret`, so EL0 never chooses its own exception level.
+pub(crate) fn test_el0_bad_pstate() -> Outcome {
+    // Armed before the spawn, as `test_el0_bad_elr` arms its hook.
+    syscall_init::testing::arm_bad_pstate();
+    // Relaxed: a count; pairs with nothing.
+    let kills = crate::proc_init::BAD_ELR_KILLS.load(core::sync::atomic::Ordering::Relaxed);
+    let pid = match user::spawn(&Image::Code(EL0_EXIT0, DEFAULT), &["el0_bad_pstate"]) {
+        Ok(p) => p,
+        Err(e) => {
+            syscall_init::testing::take_bad_pstate();
+            return crate::fail_fmt!("spawn: {}", e.as_str());
+        }
+    };
+    let st = user::wait(pid);
+    if syscall_init::testing::take_bad_pstate() {
+        return Outcome::Fail("bad pstate hook not taken");
+    }
+    // Relaxed: pairs with nothing; `user::wait` above ordered the exit.
+    let now = crate::proc_init::BAD_ELR_KILLS.load(core::sync::atomic::Ordering::Relaxed);
+    if now.wrapping_sub(kills) != 1 {
+        return Outcome::Fail("bad pstate not killed by return_ok");
+    }
+    if super::ktest::signaled(st, vibeos::proc::SIGSEGV) {
+        Outcome::Ok
+    } else {
+        crate::fail_fmt!("status {st:#x}")
+    }
+}
+
+/// A saved ELR of 2^48 kills the process with SIGSEGV; the kernel runs.
+pub(crate) fn test_el0_bad_elr() -> Outcome {
+    // Armed before the spawn. The child is pinned to this CPU and made
+    // ready inside `spawn`, so a tick can run it before an arm after the
+    // spawn would land. The hook is one-shot, taken by the next return to
+    // EL0 on any CPU, which here is the child's first.
+    syscall_init::testing::arm_bad_elr();
+    // Relaxed: a count; pairs with nothing.
+    let kills = crate::proc_init::BAD_ELR_KILLS.load(core::sync::atomic::Ordering::Relaxed);
+    let pid = match user::spawn(&Image::Code(EL0_EXIT0, DEFAULT), &["el0_bad_elr"]) {
+        Ok(p) => p,
+        Err(e) => {
+            syscall_init::testing::take_bad_elr();
+            return crate::fail_fmt!("spawn: {}", e.as_str());
+        }
+    };
+    let st = user::wait(pid);
+    // The child's return to EL0 took the hook before it exited. A hook still
+    // armed here never fired, and is taken so a later test does not get it.
+    if syscall_init::testing::take_bad_elr() {
+        return Outcome::Fail("bad elr hook not taken");
+    }
+    // The status is SIGSEGV whether `elr_ok` or the MMU stopped the return,
+    // so the kill is counted: only `kill_bad_return` moves the counter.
+    // Relaxed: pairs with nothing; `user::wait` above ordered the exit.
+    let now = crate::proc_init::BAD_ELR_KILLS.load(core::sync::atomic::Ordering::Relaxed);
+    if now.wrapping_sub(kills) != 1 {
+        return Outcome::Fail("bad elr not killed by return_ok");
+    }
+    if super::ktest::signaled(st, vibeos::proc::SIGSEGV) {
+        Outcome::Ok
+    } else {
+        crate::fail_fmt!("status {st:#x}")
+    }
 }

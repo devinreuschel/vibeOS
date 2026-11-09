@@ -62,6 +62,7 @@ pub unsafe fn init_bootstrap(rest: extern "C" fn() -> !) -> ! {
         syscall_count: vibeos::atomic::AtomicU64::new(0),
         pid: 0,
         no_reclaim: AtomicU32::new(0),
+        as_ctx: 0,
     });
     let Ok(mut tcb) = tcb else {
         crate::boot::halt_with("vibeOS: thread: no memory for the bootstrap TCB");

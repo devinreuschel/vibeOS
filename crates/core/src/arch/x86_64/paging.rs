@@ -5,7 +5,8 @@
 //! half is the upper 256 slots of the root. `PageFlags` keeps this format's
 //! bit values, so its encoding here is the identity on the flag bits.
 
-use crate::paging::{PageFlags, PhysAddr, VirtAddr};
+use crate::paging::{CoreFormat, Desc, PageFlags, PhysAddr, VirtAddr};
+use crate::proc::elf::EM_X86_64;
 
 /// Levels of the walk, the root being level 4.
 pub const LEVELS: u8 = 4;
@@ -70,6 +71,49 @@ pub const fn pte_flags(entry: u64) -> PageFlags {
 #[inline]
 pub const fn is_leaf(entry: u64, level: u8) -> bool {
     level == 1 || entry & PageFlags::HUGE != 0
+}
+
+/// The core tool's view of this format (ROADMAP §10.7): 4-level tables from
+/// CR3's PML4, the kernel half at slot 256 up. `crate::arch` re-exports it.
+pub struct X86_64;
+
+impl CoreFormat for X86_64 {
+    const E_MACHINE: u16 = EM_X86_64;
+    const LEVELS: u8 = LEVELS;
+    const ENTRIES: usize = PTES_PER_TABLE;
+    const KERNEL_ROOT_FIRST: usize = KERNEL_PML4_FIRST;
+    const KERNEL_VA_START: u64 = 0xFFFF_8000_0000_0000;
+    fn index(va: u64, level: u8) -> usize {
+        index(VirtAddr(va), level)
+    }
+    fn desc(entry: u64, level: u8) -> Desc {
+        if entry & PageFlags::PRESENT == 0 {
+            Desc::None
+        } else if is_leaf(entry, level) {
+            Desc::Leaf
+        } else {
+            Desc::Table
+        }
+    }
+    fn entry_phys(entry: u64) -> u64 {
+        pte_phys(entry).as_u64()
+    }
+    fn entry_flags(entry: u64) -> PageFlags {
+        pte_flags(entry)
+    }
+    fn va_ok(va: u64) -> bool {
+        crate::paging::is_canonical(va)
+    }
+    /// Present, writable and user, as the kernel's mapper links a table.
+    fn table_entry(pa: u64) -> u64 {
+        make_pte(
+            PhysAddr(pa),
+            PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER),
+        )
+    }
+    fn leaf_entry(_va: u64, pa: u64, flags: u64) -> u64 {
+        make_pte(PhysAddr(pa), PageFlags(flags))
+    }
 }
 
 #[cfg(test)]

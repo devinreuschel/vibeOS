@@ -8,8 +8,6 @@ use vibeos::arch::aarch64::sysreg;
 use vibeos::kalloc::TryBox;
 use vibeos::paging::{PageFlags, PhysAddr, VirtAddr};
 
-use crate::pmm_init;
-
 unsafe extern "C" {
     pub(super) fn vibeos_secondary_entry();
     fn vibeos_secondary_end();
@@ -35,13 +33,27 @@ global_asm!(
     "    cbnz x1, 2f",
     "    mov x19, #{feature}",
     "2:",
+    // ASID width (Linux's `verify_cpu_asid_bits`): with the boot CPU's
+    // `TCR_EL1.AS` set, a core whose `ID_AA64MMFR0_EL1.ASIDBits` is not
+    // 0b0010 (16 bits) refuses, unless the ISA floor already did.
+    "    cmp x19, #{arrived}",
+    "    b.ne 7f",
+    "    ldr x1, [x0, #{tcr}]",
+    "    tbz x1, #36, 7f",
+    "    mrs x1, ID_AA64MMFR0_EL1",
+    "    ubfx x1, x1, #4, #4",
+    "    cmp x1, #2",
+    "    b.eq 7f",
+    "    mov x19, #{asid}",
+    "7:",
     "    ldr x1, [x0, #{el2}]",
     "    cbz x1, 3f",
     "    ldr x1, [x0, #{hcr}]",
     "    msr hcr_el2, x1",
     "    isb",
     // E2H/TGE changes the regime. TLB contents from reset or retention
-    // are not architecturally clean (#260).
+    // are not architecturally clean (#260). Arm ARM DDI0487, "TLB maintenance requirements":
+    // herd7 does not model the TLB.
     "    tlbi vmalle1",
     "    dsb nsh",
     "    isb",
@@ -112,7 +124,7 @@ global_asm!(
     "    ldr x1, [x0, #{ttbr1}]",
     "    msr ttbr1_el1, x1",
     // SCTLR_EL2.M is clear above. Drop the old regime before the
-    // SCTLR_EL1 write that sets M.
+    // SCTLR_EL1 write that sets M. Arm ARM DDI0487, "TLB maintenance requirements".
     "    tlbi vmalle1",
     "    dsb nsh",
     "    isb",
@@ -130,14 +142,22 @@ global_asm!(
     "    ldr x1, [x0, #{ttbr0_empty}]",
     "    msr ttbr0_el1, x1",
     "    isb",
+    // Drop the identity TTBR0's entries: Arm ARM DDI0487, "TLB maintenance requirements".
     "    tlbi vmalle1",
     "    dsb nsh",
     "    isb",
-    "    str x19, [x5, #{status}]",
-    "    dsb ish",
-    "    cmp x19, #{feature}",
-    "    b.ne 4f",
+    // The status store is the stub's last access to the param page (rule
+    // 5): the conduit is loaded first, and `stlr` orders every load above
+    // before it for the boot CPU's Acquire in `wait_secondary_status`:
+    // tests/litmus/secondary_status.litmus.
     "    ldr x1, [x5, #{hvc}]",
+    "    add x6, x5, #{status}",
+    "    stlr x19, [x6]",
+    // Arm ARM DDI0487, "Memory barriers" (the DSB): the status store completes before
+    // the PSCI call below, which herd7 does not model.
+    "    dsb ish",
+    "    cmp x19, #{arrived}",
+    "    b.eq 4f",
     "    movz x0, #{cpu_off_lo}",
     "    movk x0, #{cpu_off_hi}, lsl #16",
     "    cbnz x1, 5f",
@@ -157,6 +177,7 @@ global_asm!(
     ".popsection",
     arrived = const psci::STATUS_ARRIVED,
     feature = const psci::STATUS_FEATURE,
+    asid = const psci::STATUS_ASID,
     cpu_off_lo = const (psci::CPU_OFF & 0xFFFF),
     cpu_off_hi = const ((psci::CPU_OFF >> 16) & 0xFFFF),
     el2 = const SecondaryParam::EL2,
@@ -227,15 +248,6 @@ pub fn va_to_pa(va: u64) -> Option<u64> {
     Some(va)
 }
 
-pub(crate) fn alloc_zeroed_page() -> Option<u64> {
-    let f = pmm_init::with_buddy(|b| b.alloc(0))?;
-    let pa = f.into_entry();
-    let va = crate::paging_init::hhdm_offset().wrapping_add(pa);
-    // SAFETY: buddy page, HHDM maps it (I14). established here.
-    unsafe { core::ptr::write_bytes(va as *mut u8, 0, 4096) };
-    Some(pa)
-}
-
 /// # Safety
 /// `root_pa` is a table page the HHDM maps (I14), and no other writer
 /// reaches the returned slot while the caller holds it.
@@ -264,7 +276,7 @@ pub unsafe fn map_va(
     let mut table = l0_pa;
     let mut level = 4u8;
     while level > 1 {
-        // SAFETY: `table` is `l0_pa` or a table `alloc_zeroed_page` gave us,
+        // SAFETY: `table` is `l0_pa` or a table `paging_init::alloc_zeroed` gave us,
         // both HHDM-mapped table pages per map_va's `# Safety`. established here.
         let Some(slot) = (unsafe { table_slot(table, va, level) }) else {
             return false;
@@ -272,7 +284,7 @@ pub unsafe fn map_va(
         // SAFETY: slot in a table we own. established here.
         let cur = unsafe { slot.read() };
         if cur & paging::DESC_VALID == 0 {
-            let Some(next) = alloc_zeroed_page() else {
+            let Some(next) = crate::paging_init::alloc_zeroed(0) else {
                 return false;
             };
             // an untracked table is never cleaned to PoC, so don't link it
@@ -322,17 +334,31 @@ pub unsafe fn map_identity(l0_pa: u64, pa: u64, tables: &mut [u64], n: &mut usiz
 /// tables, and up to three more for each CPU's param page (`map_identity`).
 pub(crate) const IDENTITY_TABLES: usize = 16 + 3 * vibeos::acpi::MAX_CPUS;
 
-/// Build a TTBR0 identity root covering `pas` into `tables` (no heap).
+/// Build a TTBR0 identity root covering `pas`, plus a zero root to switch
+/// to after it, into `tables` (no heap).
 ///
-/// Returns `(l0, empty, count)`. `empty` is a zero root. `tables[..count]`
-/// holds `l0`, `empty` and the tables under `l0`, which the caller cleans
-/// to PoC before a secondary loads them. None when `tables` is too small.
-/// Paging install calls this before the heap exists.
+/// Returns `(l0, empty, count)`. `tables[..count]` holds `l0`, `empty` and
+/// the tables under `l0`. None when `tables` is too small. Paging install
+/// calls this before the heap exists, when no empty user root exists yet.
 pub(crate) fn build_identity_into(pas: &[u64], tables: &mut [u64]) -> Option<(u64, u64, usize)> {
-    let l0 = alloc_zeroed_page()?;
-    let empty = alloc_zeroed_page()?;
+    let empty = crate::paging_init::alloc_zeroed(0)?;
+    let (l0, n) = identity_root_into(pas, tables, Some(empty))?;
+    Some((l0, empty, n))
+}
+
+/// Build a TTBR0 identity root covering `pas` into `tables`, tracking
+/// `extra` beside it. Returns `(l0, count)`: `tables[..count]` holds `l0`,
+/// `extra`, and the tables under `l0`, which the caller cleans to PoC
+/// before a secondary loads them.
+fn identity_root_into(pas: &[u64], tables: &mut [u64], extra: Option<u64>) -> Option<(u64, usize)> {
+    let l0 = crate::paging_init::alloc_zeroed(0)?;
     let mut n = 0usize;
-    if !paging::track_table(tables, &mut n, l0) || !paging::track_table(tables, &mut n, empty) {
+    if !paging::track_table(tables, &mut n, l0) {
+        return None;
+    }
+    if let Some(e) = extra
+        && !paging::track_table(tables, &mut n, e)
+    {
         return None;
     }
     for &pa in pas {
@@ -351,18 +377,21 @@ pub(crate) fn build_identity_into(pas: &[u64], tables: &mut [u64]) -> Option<(u6
         }
         i += 1;
     }
-    Some((l0, empty, n))
+    Some((l0, n))
 }
 
-/// Build a TTBR0 identity root covering `pas`, plus `empty` TTBR0.
-pub fn build_identity(pas: &[u64]) -> Option<(u64, u64, TryBox<[u64; IDENTITY_TABLES]>)> {
+/// Build a TTBR0 identity root covering `pas` for the secondary stub, which
+/// leaves it for `paging_init::empty_user_root`.
+pub fn build_identity(pas: &[u64]) -> Option<(u64, TryBox<[u64; IDENTITY_TABLES]>)> {
     let mut tables = TryBox::try_new([0u64; IDENTITY_TABLES]).ok()?;
-    let (l0, empty, _) = build_identity_into(pas, &mut *tables)?;
-    Some((l0, empty, tables))
+    let (l0, _) = identity_root_into(pas, &mut *tables, None)?;
+    Some((l0, tables))
 }
 
 /// `dc cvac` over `[va, va+len)`, one op per `CTR_EL0.DminLine` line, then
-/// `dsb sy`.
+/// `dsb sy`. Arm ARM DDI0487, "Ordering and completion of data and instruction
+/// cache instructions": the `dsb` completes the cleans before a non-coherent
+/// reader is told; herd7 does not model cache maintenance.
 pub fn clean_poc(va: u64, len: usize) {
     let line = sysreg::dcache_line_bytes(crate::arch::aarch64::cpu::read_ctr_el0()) as u64;
     let start = va & !(line - 1);
@@ -389,15 +418,9 @@ pub fn fill_computed(p: &mut SecondaryParam) {
     // The stub writes CNTHCTL_EL2 only after setting E2H, when bits 0 and 1
     // are EL0PCTEN and EL0VCTEN. capture_el2 stores this same value.
     p.cnthctl_el2 = sysreg::cntkctl_el1();
-    let asid16 = {
-        let mmfr0: u64;
-        // SAFETY: ID register. established here.
-        unsafe {
-            asm!("mrs {0}, ID_AA64MMFR0_EL1", out(reg) mmfr0, options(nomem, nostack, preserves_flags))
-        };
-        sysreg::asid16_from_mmfr0(mmfr0)
-    };
-    p.tcr = sysreg::tcr_el1(asid16);
+    // The boot CPU's TCR, `TCR_EL1.AS` included, which the ASID allocator's
+    // width matches (`arch::aarch64::asid::init_bsp`).
+    p.tcr = sysreg::tcr_el1(super::cpu::asid16());
     p.mair = sysreg::mair_el1();
 }
 
@@ -465,6 +488,57 @@ fn id_mmfr() -> (u64, u64) {
         asm!("mrs {0}, ID_AA64MMFR1_EL1", out(reg) mmfr1, options(nomem, nostack, preserves_flags));
     }
     (mmfr0, mmfr1)
+}
+
+/// `TTBR0_EL1` each AP held on arrival at `ap_entry_aarch64`, as the
+/// secondary stub left it: the empty user root, which the AP keeps until
+/// its first `asid::load_ttbr0`.
+#[cfg(feature = "kernel_tests")]
+static AP_ENTRY_TTBR0: [core::sync::atomic::AtomicU64; vibeos::acpi::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; vibeos::acpi::MAX_CPUS];
+/// APs whose stub entry address still translated on arrival.
+#[cfg(feature = "kernel_tests")]
+static AP_ENTRY_ID_LIVE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// APs that recorded [`AP_ENTRY_TTBR0`].
+#[cfg(feature = "kernel_tests")]
+static AP_ENTRY_SEEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Record what the stub left in TTBR0 and whether its identity address
+/// still translates (ROADMAP §11.4). IRQs masked.
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn note_ap_entry_ttbr0(cpu_id: u32) {
+    let ttbr0 = super::cpu::read_ttbr0();
+    let id_live = entry_pa().is_some_and(super::cpu::stage1_read_translates);
+    let (Some(slot), true) = (AP_ENTRY_TTBR0.get(cpu_id as usize), cpu_id < 64) else {
+        return;
+    };
+    // Relaxed: pairs with nothing; the Release `fetch_or` on `AP_ENTRY_SEEN` below publishes it.
+    slot.store(ttbr0, core::sync::atomic::Ordering::Relaxed);
+    if id_live {
+        // Relaxed: pairs with nothing; the Release `fetch_or` on `AP_ENTRY_SEEN` below publishes it.
+        AP_ENTRY_ID_LIVE.fetch_or(1u64 << cpu_id, core::sync::atomic::Ordering::Relaxed);
+    }
+    // Release: pairs with the Acquire load in `ap_entry_ttbr0`.
+    AP_ENTRY_SEEN.fetch_or(1u64 << cpu_id, core::sync::atomic::Ordering::Release);
+}
+
+/// `(TTBR0_EL1, stub entry translated)` as AP `cpu_id` arrived, or None
+/// when it recorded nothing.
+#[cfg(feature = "kernel_tests")]
+pub fn ap_entry_ttbr0(cpu_id: u32) -> Option<(u64, bool)> {
+    if cpu_id >= 64 {
+        return None;
+    }
+    // Acquire: pairs with the Release `fetch_or` in `note_ap_entry_ttbr0`.
+    if AP_ENTRY_SEEN.load(core::sync::atomic::Ordering::Acquire) & (1u64 << cpu_id) == 0 {
+        return None;
+    }
+    let slot = AP_ENTRY_TTBR0.get(cpu_id as usize)?;
+    // Relaxed: pairs with nothing; the Acquire load of `AP_ENTRY_SEEN` above orders it.
+    let ttbr0 = slot.load(core::sync::atomic::Ordering::Relaxed);
+    // Relaxed: pairs with nothing; the Acquire load of `AP_ENTRY_SEEN` above orders it.
+    let live = AP_ENTRY_ID_LIVE.load(core::sync::atomic::Ordering::Relaxed) & (1u64 << cpu_id) != 0;
+    Some((ttbr0, live))
 }
 
 /// `snapshot_sysregs` length. Slots 0..8 are the EL1 registers (their EL2

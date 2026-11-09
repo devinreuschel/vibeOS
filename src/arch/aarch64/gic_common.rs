@@ -5,8 +5,10 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::arch::Barriers;
 use vibeos::irq::gic;
 
+use crate::arch::aarch64::Arch;
 use crate::cell::BootCell;
 
 pub(super) const GICR_TYPER: u64 = 0x0008;
@@ -54,22 +56,27 @@ pub(super) fn gic() -> Option<&'static Gic> {
     CHIP.try_get()
 }
 
-/// Read a 32-bit GIC register.
+/// Read a 32-bit GIC register through the port's ordered `mmio_read`
+/// (DESIGN §4.7): it completes before any later load, so state the
+/// interrupt announced is read after it. Every GIC MMIO access goes
+/// through these four; none is relaxed.
 ///
 /// # Safety
 /// `va+off` is a mapped GIC register the caller owns.
 pub(super) unsafe fn mmio32(va: u64, off: u64) -> u32 {
     // SAFETY: this fn's `# Safety`; established by `crate::arch::aarch64::gic::init`.
-    unsafe { core::ptr::read_volatile((va.wrapping_add(off)) as *const u32) }
+    unsafe { Arch::mmio_read((va.wrapping_add(off)) as *const u32) }
 }
 
-/// Write a 32-bit GIC register.
+/// Write a 32-bit GIC register through the port's ordered `mmio_write`
+/// (DESIGN §4.7): it follows every earlier store to memory, as the GICv2
+/// `GICD_SGIR` write needs (DESIGN §7.6).
 ///
 /// # Safety
 /// As [`mmio32`].
 pub(super) unsafe fn mmio32w(va: u64, off: u64, v: u32) {
     // SAFETY: this fn's `# Safety`; established by `crate::arch::aarch64::gic::init`.
-    unsafe { core::ptr::write_volatile((va.wrapping_add(off)) as *mut u32, v) };
+    unsafe { Arch::mmio_write((va.wrapping_add(off)) as *mut u32, v) };
 }
 
 /// Read a 64-bit GIC register.
@@ -78,7 +85,7 @@ pub(super) unsafe fn mmio32w(va: u64, off: u64, v: u32) {
 /// As [`mmio32`].
 pub(super) unsafe fn mmio64(va: u64, off: u64) -> u64 {
     // SAFETY: this fn's `# Safety`; established by `crate::arch::aarch64::gic::init`.
-    unsafe { core::ptr::read_volatile((va.wrapping_add(off)) as *const u64) }
+    unsafe { Arch::mmio_read((va.wrapping_add(off)) as *const u64) }
 }
 
 /// Write a 64-bit GIC register.
@@ -87,7 +94,7 @@ pub(super) unsafe fn mmio64(va: u64, off: u64) -> u64 {
 /// As [`mmio32`].
 pub(super) unsafe fn mmio64w(va: u64, off: u64, v: u64) {
     // SAFETY: this fn's `# Safety`; established by `crate::arch::aarch64::gic::init`.
-    unsafe { core::ptr::write_volatile((va.wrapping_add(off)) as *mut u64, v) };
+    unsafe { Arch::mmio_write((va.wrapping_add(off)) as *mut u64, v) };
 }
 
 /// Record a table register that read back non-shareable.
@@ -110,17 +117,4 @@ pub(super) fn clean_table_if_needed(pa: u64, bytes: usize) {
         let va = crate::paging_init::hhdm_offset().wrapping_add(pa);
         crate::arch::aarch64::secondary::clean_poc(va, bytes);
     }
-}
-
-pub(super) fn alloc_pages(pages: usize) -> Option<u64> {
-    let order = pages.trailing_zeros() as u8;
-    if 1usize.checked_shl(u32::from(order))? != pages {
-        return None;
-    }
-    let f = crate::pmm_init::with_buddy(|b| b.alloc(order))?;
-    let pa = f.into_entry();
-    let va = crate::paging_init::hhdm_offset().wrapping_add(pa);
-    // SAFETY: buddy block, HHDM maps it (I14). established here.
-    unsafe { core::ptr::write_bytes(va as *mut u8, 0, pages.saturating_mul(4096)) };
-    Some(pa)
 }

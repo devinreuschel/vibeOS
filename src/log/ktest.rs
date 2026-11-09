@@ -675,7 +675,8 @@ pub(crate) fn test_backtrace_syscall_boundary() -> Outcome {
         return Outcome::Fail("a frame below USER_MAP_END");
     }
     let last = WALK_LAST.load(Ordering::Relaxed);
-    match crate::panic::symbol_name(last) {
+    // The last frame is a return address unless it is the only one.
+    match crate::panic::symbol_name(last, n > 1) {
         Some("vibeos_syscall_entry") => Outcome::Ok,
         other => {
             crate::fail_fmt!("last of {n} frames {last:#x} is {other:?}, want vibeos_syscall_entry")

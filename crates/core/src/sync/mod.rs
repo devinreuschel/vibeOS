@@ -228,6 +228,7 @@ impl SpinLock {
     }
 
     /// One CAS. `false` if held by someone else. Panics on recurse.
+    /// tests/litmus/spin_mutex.litmus
     pub fn try_acquire(&self, owner: usize) -> bool {
         assert!(owner != UNLOCKED, "spin: owner 0 is reserved");
         // Acquire: pairs with the Release store in `release`.
@@ -251,6 +252,7 @@ impl SpinLock {
     }
 
     /// Release. Panics if free or `owner` does not hold it.
+    /// tests/litmus/spin_mutex.litmus
     pub fn release(&self, owner: usize) {
         // Relaxed: the holder reads its own store; pairs with nothing.
         assert!(

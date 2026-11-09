@@ -1,8 +1,10 @@
-//! aarch64 TLB, I-cache, and DMA-barrier encodings (ROADMAP §11.2).
+//! aarch64 TLB, I-cache, DMA-barrier, and DMA cache-maintenance encodings
+//! (ROADMAP §11.2).
 //!
 //! The hardware ops live in the kernel, which runs these arrays in order
-//! (`tlbi_va`, `tlbi_all`, `bbm_break`, `bbm_make`). Host tests check that
-//! order without executing `tlbi` / `dmb`.
+//! (`tlbi_va`, `tlbi_all`, `bbm_break`, `bbm_make`, `dma_clean`,
+//! `dma_inval`). Host tests check that order without executing `tlbi`,
+//! `dmb`, or `dc`.
 
 /// Inner-shareable broadcast TLB maintenance after a PTE write
 /// (ROADMAP §11.2, DESIGN §7.9).
@@ -12,10 +14,9 @@ pub enum TlbOp {
     DsbIshst,
     /// Leaf change: `tlbi vale1is`.
     TlbiVale1is,
-    /// Table page freed: `tlbi vae1is`.
-    TlbiVae1is,
-    /// One ASID: `tlbi aside1is`.
-    TlbiAside1is,
+    /// Leaf change of a user VA whose space the caller does not name:
+    /// `tlbi vaale1is`, every ASID.
+    TlbiVaale1is,
     /// Local ASID-0 flush when ASIDs are off: `tlbi aside1`.
     TlbiAside1,
     /// Local generation flush: `tlbi vmalle1`.
@@ -31,14 +32,14 @@ pub enum TlbOp {
 }
 
 impl TlbOp {
-    /// Instruction this op emits (Arm ARM DDI0487). The kernel's `exec_tlb`
-    /// uses the same text.
+    /// Instruction this op emits. The kernel's `exec_tlb` uses the same
+    /// text. Arm ARM DDI0487, "TLB maintenance requirements": herd7 does not model
+    /// the TLB.
     pub const fn mnemonic(self) -> &'static str {
         match self {
             Self::DsbIshst => "dsb ishst",
             Self::TlbiVale1is => "tlbi vale1is",
-            Self::TlbiVae1is => "tlbi vae1is",
-            Self::TlbiAside1is => "tlbi aside1is",
+            Self::TlbiVaale1is => "tlbi vaale1is",
             Self::TlbiAside1 => "tlbi aside1",
             Self::TlbiVmalle1 => "tlbi vmalle1",
             Self::TlbiVmalle1is => "tlbi vmalle1is",
@@ -51,6 +52,8 @@ impl TlbOp {
 
 /// Leaf change: the kernel's `tlbi_va` runs this after the descriptor
 /// store. Permission-only and global→nG use the same maintenance.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub const LEAF_INVAL: [TlbOp; 4] = [
     TlbOp::DsbIshst,
     TlbOp::TlbiVale1is,
@@ -59,6 +62,8 @@ pub const LEAF_INVAL: [TlbOp; 4] = [
 ];
 
 /// Full EL1 invalidation: the kernel's `tlbi_all` runs this.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub const ALL_INVAL: [TlbOp; 4] = [
     TlbOp::DsbIshst,
     TlbOp::TlbiVmalle1is,
@@ -66,31 +71,20 @@ pub const ALL_INVAL: [TlbOp; 4] = [
     TlbOp::Isb,
 ];
 
-/// Table page freed: `vae1is` instead of `vale1is`.
-pub const TABLE_INVAL: [TlbOp; 4] = [
-    TlbOp::DsbIshst,
-    TlbOp::TlbiVae1is,
-    TlbOp::DsbIsh,
-    TlbOp::Isb,
-];
-
-/// One ASID (not a rollover). A rollover broadcasts nothing.
-pub const ASID_INVAL: [TlbOp; 4] = [
-    TlbOp::DsbIshst,
-    TlbOp::TlbiAside1is,
-    TlbOp::DsbIsh,
-    TlbOp::Isb,
-];
-
 /// Flush-pending CPU before it loads an ASID of the new generation.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub const ROLLOVER_LOCAL: [TlbOp; 3] = [TlbOp::TlbiVmalle1, TlbOp::DsbNsh, TlbOp::Isb];
 
-/// After a TTBR0 write, with the `isb` that follows it. Local only: every
-/// user root is ASID 0 until ASIDs are wired, and a CPU's TLB holds user
-/// entries only from roots it loaded, each flushed when it switched away.
+/// After a TTBR0 write of an ASID-0 root, with the `isb` that follows it:
+/// with ASIDs off every user root is ASID 0, and an ASID-0 test root's
+/// entries must not outlive it (the kernel's `arch::aarch64::asid`). Local
+/// only: a CPU's TLB holds ASID-0 user entries only from roots it loaded.
 /// The broadcast `vmalle1is` would also drop global kernel entries on every
 /// CPU. The leading `dsb ishst` orders the PTE stores made before the switch
 /// ahead of the local invalidate. The kernel's `tlbi_asid0_local` runs this.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub const TTBR0_SWITCH: [TlbOp; 4] = [
     TlbOp::DsbIshst,
     TlbOp::TlbiAside1,
@@ -99,13 +93,37 @@ pub const TTBR0_SWITCH: [TlbOp; 4] = [
 ];
 
 /// Break-before-make, after the invalid store and before the new one.
-/// The kernel's `bbm_break` runs this.
+/// The kernel's `bbm_break` runs this. Arm ARM DDI0487, "Using
+/// break-before-make when updating translation table entries": herd7 does
+/// not model the TLB.
 pub const BBM_AFTER_INVALID: [TlbOp; 3] = [TlbOp::DsbIshst, TlbOp::TlbiVale1is, TlbOp::DsbIsh];
+
+/// [`LEAF_INVAL`] for a user VA through the `PageTable` seam, which names no
+/// space: `vaale1is` drops the VA under every ASID, so it is right whichever
+/// space's ASID tagged the entries. A caller that knows the space runs
+/// `LEAF_INVAL` with its ASID instead. Arm ARM DDI0487, "TLB maintenance
+/// requirements": herd7 does not model the TLB.
+pub const LEAF_INVAL_ALL_ASIDS: [TlbOp; 4] = [
+    TlbOp::DsbIshst,
+    TlbOp::TlbiVaale1is,
+    TlbOp::DsbIsh,
+    TlbOp::Isb,
+];
+
+/// [`BBM_AFTER_INVALID`] for a user VA through the `PageTable` seam, every
+/// ASID, as [`LEAF_INVAL_ALL_ASIDS`]. Arm ARM DDI0487, "Using
+/// break-before-make when updating translation table entries": herd7 does
+/// not model the TLB.
+pub const BBM_AFTER_INVALID_ALL_ASIDS: [TlbOp; 3] =
+    [TlbOp::DsbIshst, TlbOp::TlbiVaale1is, TlbOp::DsbIsh];
 /// Break-before-make, after the new store. The kernel's `bbm_make` runs this.
+/// Arm ARM DDI0487, "Using break-before-make when updating translation
+/// table entries": herd7 does not model the TLB.
 pub const BBM_AFTER_MAKE: [TlbOp; 2] = [TlbOp::DsbIshst, TlbOp::Isb];
 /// A new table's zeroed words, before the descriptor that links it. The
-/// kernel's `publish_table` runs this (Arm ARM DDI0487: a table walk is not
-/// ordered after a plain store).
+/// kernel's `publish_table` runs this. Arm ARM DDI0487, "Ordering of memory
+/// accesses from translation table walks": a walk is not ordered after a
+/// plain store, and herd7 does not model the walk.
 pub const PUBLISH_TABLE: [TlbOp; 1] = [TlbOp::DsbIshst];
 
 /// `TLBI VA*E1` / `VA*E1IS` register operand (Arm ARM DDI0487).
@@ -117,10 +135,43 @@ pub const fn tlbi_va_operand(va: u64, asid: u16) -> u64 {
     ((va >> 12) & ((1u64 << 44) - 1)) | ((asid as u64) << 48)
 }
 
-/// `dmb oshst` / `dmb oshld` / `dmb osh` (Linux arm64 DMA barriers; F098).
-pub const DMA_WMB: &str = "dmb oshst";
-pub const DMA_RMB: &str = "dmb oshld";
-pub const DMA_MB: &str = "dmb osh";
+/// `dma_wmb`'s instruction, `dmb oshst` (Linux arm64 DMA barriers; F098).
+/// A macro, so the kernel's `asm!` template and [`DMA_WMB`] are one text.
+/// tests/litmus/virtio_avail.litmus
+#[macro_export]
+macro_rules! aarch64_dma_wmb_insn {
+    () => {
+        "dmb oshst"
+    };
+}
+
+/// `dma_rmb`'s instruction, `dmb oshld`, one text as `aarch64_dma_wmb_insn`.
+/// tests/litmus/virtio_avail.litmus
+#[macro_export]
+macro_rules! aarch64_dma_rmb_insn {
+    () => {
+        "dmb oshld"
+    };
+}
+
+/// `dma_mb`'s instruction, `dmb osh`, one text as `aarch64_dma_wmb_insn`.
+/// tests/litmus/dma_mb.litmus and tests/litmus/dma_mb_used.litmus
+#[macro_export]
+macro_rules! aarch64_dma_mb_insn {
+    () => {
+        "dmb osh"
+    };
+}
+
+/// The text the kernel's `Barriers::dma_wmb` emits on aarch64.
+/// tests/litmus/virtio_avail.litmus
+pub const DMA_WMB: &str = crate::aarch64_dma_wmb_insn!();
+/// The text the kernel's `Barriers::dma_rmb` emits on aarch64.
+/// tests/litmus/virtio_avail.litmus
+pub const DMA_RMB: &str = crate::aarch64_dma_rmb_insn!();
+/// The text the kernel's `Barriers::dma_mb` emits on aarch64.
+/// tests/litmus/dma_mb.litmus and tests/litmus/dma_mb_used.litmus
+pub const DMA_MB: &str = crate::aarch64_dma_mb_insn!();
 
 /// One step of the I-cache sync a user page needs once it becomes
 /// executable (ROADMAP §11.2).
@@ -131,6 +182,10 @@ pub enum IcacheOp {
     DsbIsh,
     /// `ic ivau, <va>`, one I-cache line.
     IcIvau,
+    /// `ic ialluis`: the whole I-cache, Inner Shareable. Stands for every
+    /// `IcIvau` when the I-cache is not PIPT, since `ic ivau` through the
+    /// physmap alias need not reach the lines the user VA indexes.
+    IcIalluis,
     Isb,
 }
 
@@ -172,19 +227,126 @@ pub struct CacheInfo {
     pub dline: u64,
     /// Smallest I-cache line, bytes (`IminLine`).
     pub iline: u64,
+    /// `L1Ip` is PIPT (0b11). A VIPT or VPIPT L1 I-cache may alias, so a
+    /// by-VA invalidate through another mapping can miss a line.
+    pub pipt: bool,
+    /// Cache writeback granule, bytes (`CWG`): the most a writeback of one
+    /// line can overwrite. [`MAX_CWG`] when the field reads 0.
+    pub cwg: u64,
 }
+
+pub use crate::limits::MAX_CWG;
 
 impl CacheInfo {
     /// Decode `CTR_EL0` (DDI0487): `IminLine` 3:0 and `DminLine` 19:16 are
-    /// log2 of the line in words, `IDC` is bit 28, `DIC` bit 29.
+    /// log2 of the line in words, `L1Ip` is 15:14, `CWG` 27:24 is log2 of
+    /// the granule in words (0: not given), `IDC` is bit 28, `DIC` bit 29.
     pub const fn from_ctr(ctr: u64) -> Self {
+        let cwg = (ctr >> 24) & 0xF;
         Self {
             idc: ctr & (1 << 28) != 0,
             dic: ctr & (1 << 29) != 0,
             dline: 4 << ((ctr >> 16) & 0xF),
             iline: 4 << (ctr & 0xF),
+            pipt: (ctr >> 14) & 0b11 == 0b11,
+            cwg: if cwg == 0 { MAX_CWG } else { 4 << cwg },
         }
     }
+
+    /// Whether boot accepts this granule: no larger than a page, so a
+    /// region sized in granules fits the page-sized blocks a `DmaBuffer`
+    /// is made of (DESIGN §4.7).
+    pub const fn granule_fits_page(&self, page: u64) -> bool {
+        self.cwg <= page
+    }
+}
+
+/// The `CTR_EL0` fields [`CacheInfo::from_ctr`] reads, each at the value
+/// that makes no claim: the largest line counts, PIPT, IDC and DIC set,
+/// and the smallest `CWG` that says anything (1).
+/// [`ctr_meet`] of it and any `ctr` is that `ctr`'s fields.
+pub const CTR_MEET_TOP: u64 = 0xF | (0b11 << 14) | (0xF << 16) | (1 << 24) | (1 << 28) | (1 << 29);
+
+/// Two CPUs' `CTR_EL0` as one that holds for both, the fields
+/// [`CacheInfo::from_ctr`] reads only: the smaller `IminLine` and
+/// `DminLine`, PIPT only when both are, `IDC` and `DIC` only when both
+/// set them, and the larger `CWG`, where 0 (not given, so the maximum)
+/// is the largest, as Linux sanitises `CTR_EL0` across CPUs.
+pub const fn ctr_meet(a: u64, b: u64) -> u64 {
+    const fn min(x: u64, y: u64) -> u64 {
+        if x < y { x } else { y }
+    }
+    let iline = min(a & 0xF, b & 0xF);
+    let dline = min((a >> 16) & 0xF, (b >> 16) & 0xF);
+    let l1ip = if (a >> 14) & 0b11 == 0b11 && (b >> 14) & 0b11 == 0b11 {
+        0b11
+    } else {
+        0b10
+    };
+    let (ca, cb) = ((a >> 24) & 0xF, (b >> 24) & 0xF);
+    let cwg = if ca == 0 || cb == 0 {
+        0
+    } else if ca > cb {
+        ca
+    } else {
+        cb
+    };
+    let bits = a & b & ((1 << 28) | (1 << 29));
+    iline | (l1ip << 14) | (dline << 16) | (cwg << 24) | bits
+}
+
+/// One step of DMA cache maintenance for a non-coherent device (DESIGN
+/// §4.7), as Linux's arm64 `dcache_clean_poc` and `dcache_inval_poc` run it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DmaOp {
+    /// `dc cvac, <va>`: clean one line to the Point of Coherency.
+    DcCvac,
+    /// `dc civac, <va>`: clean and invalidate one line, for a line the
+    /// range covers only in part, so bytes outside it are written back,
+    /// not discarded.
+    DcCivac,
+    /// `dc ivac, <va>`: invalidate one line the range covers whole.
+    DcIvac,
+    /// `dsb sy`: the maintenance completes before any later access.
+    DsbSy,
+}
+
+impl DmaOp {
+    /// Instruction this op emits. The kernel's `cpu::exec_dma` uses the same
+    /// text. Arm ARM DDI0487, "Ordering and completion of data and
+    /// instruction cache instructions": herd7 does not model the caches.
+    pub const fn mnemonic(self) -> &'static str {
+        match self {
+            Self::DcCvac => "dc cvac",
+            Self::DcCivac => "dc civac",
+            Self::DcIvac => "dc ivac",
+            Self::DsbSy => "dsb sy",
+        }
+    }
+}
+
+/// `sync_for_device` for a non-coherent device: `dc cvac` on every
+/// `info.dline` line `[start, start+len)` touches, then `dsb sy`, whatever
+/// the transfer's direction, so no dirty line is written back later over
+/// what the device writes. `run(op, va)` runs each step, `va` 0 for the
+/// barrier.
+pub fn dma_clean(info: CacheInfo, start: u64, len: u64, mut run: impl FnMut(DmaOp, u64)) {
+    lines(start, len, info.dline).for_each(|va| run(DmaOp::DcCvac, va));
+    run(DmaOp::DsbSy, 0);
+}
+
+/// `sync_for_cpu` for a non-coherent device: invalidate every line
+/// `[start, start+len)` touches, then `dsb sy`, before the CPU reads what
+/// the device wrote. A line the range covers whole gets `dc ivac`; one at
+/// either end that it covers in part gets `dc civac`, so the bytes beside
+/// the range survive.
+pub fn dma_inval(info: CacheInfo, start: u64, len: u64, mut run: impl FnMut(DmaOp, u64)) {
+    let end = start.saturating_add(len);
+    lines(start, len, info.dline).for_each(|va| {
+        let whole = va >= start && va.saturating_add(info.dline) <= end;
+        run(if whole { DmaOp::DcIvac } else { DmaOp::DcCivac }, va);
+    });
+    run(DmaOp::DsbSy, 0);
 }
 
 /// Every `line`-byte line (a power of two) that `[start, start+len)`
@@ -202,14 +364,17 @@ pub fn lines(start: u64, len: u64, line: u64) -> impl Iterator<Item = u64> {
 /// Run the sync over `[start, start+len)`: `run(op, va)` for each step, in
 /// order, `va` the line for `DcCvau` and `IcIvau` and 0 for a barrier. The
 /// kernel's `sync_icache` runs the instruction for each.
+/// Arm ARM DDI0487, "Synchronization and coherency issues between data and
+/// instruction accesses": herd7 does not model instruction fetch.
 pub fn sync_range(info: CacheInfo, start: u64, len: u64, mut run: impl FnMut(IcacheOp, u64)) {
     let mut ops = [IcacheOp::Isb; 5];
     let n = icache_sync(info.idc, info.dic, &mut ops);
     for &op in &ops[..n] {
         match op {
             IcacheOp::DcCvau => lines(start, len, info.dline).for_each(|va| run(op, va)),
+            IcacheOp::IcIvau if !info.pipt => run(IcacheOp::IcIalluis, 0),
             IcacheOp::IcIvau => lines(start, len, info.iline).for_each(|va| run(op, va)),
-            IcacheOp::DsbIsh | IcacheOp::Isb => run(op, 0),
+            IcacheOp::IcIalluis | IcacheOp::DsbIsh | IcacheOp::Isb => run(op, 0),
         }
     }
 }
@@ -255,14 +420,36 @@ mod tests {
         assert_eq!((user >> 44) & 0xF, 0, "TTL");
     }
 
+    /// A user VA through the `PageTable` seam names no space, so its leaf
+    /// and break-before-make invalidates drop the VA under every ASID, with
+    /// the same barriers as the one-ASID forms.
+    #[test]
+    fn seam_user_invalidates_cover_every_asid() {
+        for (all, one) in [
+            (LEAF_INVAL_ALL_ASIDS.as_slice(), LEAF_INVAL.as_slice()),
+            (
+                BBM_AFTER_INVALID_ALL_ASIDS.as_slice(),
+                BBM_AFTER_INVALID.as_slice(),
+            ),
+        ] {
+            assert_eq!(all.len(), one.len());
+            for (a, o) in all.iter().zip(one) {
+                if *o == TlbOp::TlbiVale1is {
+                    assert_eq!(*a, TlbOp::TlbiVaale1is);
+                } else {
+                    assert_eq!(a, o);
+                }
+            }
+        }
+        assert_eq!(TlbOp::TlbiVaale1is.mnemonic(), "tlbi vaale1is");
+    }
+
     #[test]
     fn leaf_sequence_is_broadcast() {
         assert_eq!(LEAF_INVAL[0], TlbOp::DsbIshst);
         assert_eq!(LEAF_INVAL[1], TlbOp::TlbiVale1is);
         assert_eq!(LEAF_INVAL[2], TlbOp::DsbIsh);
         assert_eq!(LEAF_INVAL[3], TlbOp::Isb);
-        assert_eq!(TABLE_INVAL[1], TlbOp::TlbiVae1is);
-        assert_eq!(ASID_INVAL[1], TlbOp::TlbiAside1is);
         assert_eq!(ROLLOVER_LOCAL[0], TlbOp::TlbiVmalle1);
         assert_ne!(ROLLOVER_LOCAL.as_slice(), LEAF_INVAL.as_slice());
     }
@@ -296,12 +483,16 @@ mod tests {
         );
         // ASID 0 is the operand's bits 63:48, with no VA.
         assert_eq!(tlbi_va_operand(0, 0), 0);
-        assert!(!TTBR0_SWITCH.contains(&TlbOp::TlbiAside1is));
         assert!(!TTBR0_SWITCH.contains(&TlbOp::TlbiVmalle1is));
     }
 
+    /// The kernel's `Barriers::dma_*` on aarch64 assemble the macros' text,
+    /// so this pins what the kernel emits, not a copy of it.
     #[test]
     fn dma_barriers_are_outer_shareable() {
+        assert_eq!(crate::aarch64_dma_wmb_insn!(), "dmb oshst");
+        assert_eq!(crate::aarch64_dma_rmb_insn!(), "dmb oshld");
+        assert_eq!(crate::aarch64_dma_mb_insn!(), "dmb osh");
         assert_eq!(DMA_WMB, "dmb oshst");
         assert_eq!(DMA_RMB, "dmb oshld");
         assert_eq!(DMA_MB, "dmb osh");
@@ -343,16 +534,24 @@ mod tests {
                 idc: true,
                 dic: false,
                 dline: 64,
-                iline: 64
+                iline: 64,
+                pipt: false,
+                cwg: MAX_CWG,
             }
         );
         let c = CacheInfo::from_ctr(0x0003_0002 | (1 << 29));
         assert_eq!((c.idc, c.dic, c.dline, c.iline), (false, true, 32, 16));
         // QEMU max reads 0x8444c004: DminLine 4, IminLine 4, no IDC/DIC.
         let c = CacheInfo::from_ctr(0x8444_C004);
-        assert_eq!((c.idc, c.dic, c.dline, c.iline), (false, false, 64, 64));
-        // Reset value: 4-byte lines, the conservative floor.
+        assert_eq!(
+            (c.idc, c.dic, c.dline, c.iline, c.pipt),
+            (false, false, 64, 64, true)
+        );
+        // L1Ip VIPT (0b10), as a Cortex-A53 reads.
+        assert!(!CacheInfo::from_ctr(0x8444_8004).pipt);
+        // Reset value: 4-byte lines and no PIPT claim, the conservative floor.
         assert_eq!(CacheInfo::from_ctr(0).dline, 4);
+        assert!(!CacheInfo::from_ctr(0).pipt);
     }
 
     #[test]
@@ -392,6 +591,8 @@ mod tests {
             dic: false,
             dline: 64,
             iline: 16,
+            pipt: true,
+            cwg: 64,
         };
         let r = recorded(info, 0x2000, 0x1000);
         let dc = r.iter().filter(|e| e.0 == IcacheOp::DcCvau).count();
@@ -426,6 +627,8 @@ mod tests {
             dic: false,
             dline: 64,
             iline: 64,
+            pipt: true,
+            cwg: 64,
         };
         let r = recorded(info, 0x2000, 0x1000);
         assert!(r.iter().all(|e| e.0 != IcacheOp::DcCvau));
@@ -445,5 +648,182 @@ mod tests {
                 (IcacheOp::Isb, 0)
             ]
         );
+    }
+
+    #[test]
+    fn ctr_meet_keeps_what_holds_for_both() {
+        let qemu = 0x8444_C004;
+        assert_eq!(
+            CacheInfo::from_ctr(ctr_meet(CTR_MEET_TOP, qemu)),
+            CacheInfo::from_ctr(qemu)
+        );
+        // Smaller lines and a VIPT I-cache on one CPU win.
+        let small_vipt = 0x0003_8002 | (1 << 28) | (1 << 29);
+        let both = CacheInfo::from_ctr(ctr_meet(qemu | (1 << 29), small_vipt));
+        assert_eq!(
+            (both.iline, both.dline, both.pipt, both.idc, both.dic),
+            (16, 32, false, false, true)
+        );
+        assert_eq!(ctr_meet(qemu, small_vipt), ctr_meet(small_vipt, qemu));
+    }
+
+    #[test]
+    fn sync_range_invalidates_all_on_an_aliasing_icache() {
+        let info = CacheInfo {
+            idc: false,
+            dic: false,
+            dline: 64,
+            iline: 64,
+            pipt: false,
+            cwg: 64,
+        };
+        let r = recorded(info, 0x2000, 0x1000);
+        assert!(r.iter().all(|e| e.0 != IcacheOp::IcIvau));
+        assert_eq!(r.iter().filter(|e| e.0 == IcacheOp::DcCvau).count(), 64);
+        let tail: std::vec::Vec<_> = r.iter().skip(64).copied().collect();
+        assert_eq!(
+            tail,
+            [
+                (IcacheOp::DsbIsh, 0),
+                (IcacheOp::IcIalluis, 0),
+                (IcacheOp::DsbIsh, 0),
+                (IcacheOp::Isb, 0)
+            ]
+        );
+    }
+
+    type DmaSeq = fn(CacheInfo, u64, u64, &mut dyn FnMut(DmaOp, u64));
+
+    fn dma_recorded(
+        f: DmaSeq,
+        info: CacheInfo,
+        start: u64,
+        len: u64,
+    ) -> std::vec::Vec<(DmaOp, u64)> {
+        let mut v = std::vec::Vec::new();
+        f(info, start, len, &mut |op, va| v.push((op, va)));
+        v
+    }
+
+    fn clean(info: CacheInfo, start: u64, len: u64, run: &mut dyn FnMut(DmaOp, u64)) {
+        dma_clean(info, start, len, run);
+    }
+
+    fn inval(info: CacheInfo, start: u64, len: u64, run: &mut dyn FnMut(DmaOp, u64)) {
+        dma_inval(info, start, len, run);
+    }
+
+    fn info64() -> CacheInfo {
+        CacheInfo::from_ctr(0x8444_C004)
+    }
+
+    #[test]
+    fn ctr_decodes_cwg_with_zero_as_the_maximum() {
+        // QEMU max reads 0x8444c004: CWG 4, a 64-byte granule.
+        assert_eq!(info64().cwg, 64);
+        assert_eq!(CacheInfo::from_ctr(0).cwg, MAX_CWG);
+        assert_eq!(CacheInfo::from_ctr(9 << 24).cwg, 2048);
+        assert_eq!(CacheInfo::from_ctr(1 << 24).cwg, 8);
+        assert!(CacheInfo::from_ctr(0).granule_fits_page(4096));
+        assert!(CacheInfo::from_ctr(9 << 24).granule_fits_page(4096));
+        // A reserved CWG above 9 claims more than a page; boot refuses it.
+        assert!(!CacheInfo::from_ctr(0xB << 24).granule_fits_page(4096));
+    }
+
+    #[test]
+    fn ctr_meet_takes_the_largest_cwg() {
+        let qemu = 0x8444_C004;
+        assert_eq!(CacheInfo::from_ctr(ctr_meet(CTR_MEET_TOP, qemu)).cwg, 64);
+        let big = (qemu & !(0xF << 24)) | (7 << 24);
+        assert_eq!(CacheInfo::from_ctr(ctr_meet(qemu, big)).cwg, 512);
+        assert_eq!(CacheInfo::from_ctr(ctr_meet(big, qemu)).cwg, 512);
+        // A CPU that gives no CWG makes the meet the maximum.
+        let none = qemu & !(0xF << 24);
+        assert_eq!(CacheInfo::from_ctr(ctr_meet(qemu, none)).cwg, MAX_CWG);
+        assert_eq!(
+            CacheInfo::from_ctr(ctr_meet(none, CTR_MEET_TOP)).cwg,
+            MAX_CWG
+        );
+    }
+
+    #[test]
+    fn dma_ops_are_the_poc_maintenance() {
+        assert_eq!(
+            [DmaOp::DcCvac, DmaOp::DcCivac, DmaOp::DcIvac, DmaOp::DsbSy].map(DmaOp::mnemonic),
+            ["dc cvac", "dc civac", "dc ivac", "dsb sy"]
+        );
+    }
+
+    #[test]
+    fn dma_clean_cleans_every_line_then_dsb_sy() {
+        for (start, len) in [
+            (0x4000u64, 0x1000u64),
+            (0x4010, 0x30),
+            (0x403F, 2),
+            (0x4000, 1),
+        ] {
+            let r = dma_recorded(clean, info64(), start, len);
+            let want: std::vec::Vec<u64> = lines(start, len, 64).collect();
+            let (last, body) = r.split_last().unwrap();
+            assert_eq!(*last, (DmaOp::DsbSy, 0), "{start:#x}+{len:#x}");
+            assert_eq!(body.len(), want.len());
+            for (&(op, va), &line) in body.iter().zip(&want) {
+                assert_eq!((op, va), (DmaOp::DcCvac, line));
+            }
+        }
+        // Every line of a page, once each, aligned.
+        let r = dma_recorded(clean, info64(), 0x8000, 0x1000);
+        assert_eq!(r.len(), 64 + 1);
+        assert_eq!(r[0], (DmaOp::DcCvac, 0x8000));
+        assert_eq!(r[63], (DmaOp::DcCvac, 0x8000 + 63 * 64));
+        // An empty range is only the barrier.
+        assert_eq!(
+            dma_recorded(clean, info64(), 0x8000, 0),
+            [(DmaOp::DsbSy, 0)]
+        );
+    }
+
+    #[test]
+    fn dma_inval_invalidates_every_line_and_keeps_partial_edges() {
+        // Whole lines: `dc ivac` on each, then `dsb sy`.
+        let r = dma_recorded(inval, info64(), 0x8000, 0x1000);
+        assert_eq!(r.len(), 65);
+        assert!(r[..64].iter().all(|e| e.0 == DmaOp::DcIvac));
+        assert_eq!(r[64], (DmaOp::DsbSy, 0));
+        // Partial first and last lines are cleaned and invalidated.
+        let r = dma_recorded(inval, info64(), 0x8010, 0x80);
+        assert_eq!(
+            r,
+            [
+                (DmaOp::DcCivac, 0x8000),
+                (DmaOp::DcIvac, 0x8040),
+                (DmaOp::DcCivac, 0x8080),
+                (DmaOp::DsbSy, 0)
+            ]
+        );
+        // One byte inside one line.
+        assert_eq!(
+            dma_recorded(inval, info64(), 0x8011, 1),
+            [(DmaOp::DcCivac, 0x8000), (DmaOp::DsbSy, 0)]
+        );
+        // Every touched line gets exactly one op, whatever the line size.
+        for line in [16u64, 32, 64, 128] {
+            let info = CacheInfo {
+                dline: line,
+                ..info64()
+            };
+            for (start, len) in [(0x8000u64, 0x1000u64), (0x8003, 0x101), (0x80FF, 1)] {
+                let r = dma_recorded(inval, info, start, len);
+                let want: std::vec::Vec<u64> = lines(start, len, line).collect();
+                assert_eq!(r.len(), want.len() + 1);
+                assert_eq!(
+                    r.iter()
+                        .map(|e| e.1)
+                        .take(want.len())
+                        .collect::<std::vec::Vec<_>>(),
+                    want
+                );
+            }
+        }
     }
 }

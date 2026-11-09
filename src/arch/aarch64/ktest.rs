@@ -54,11 +54,14 @@ pub(crate) fn test_kstack_overflow() -> Outcome {
     };
     let overflow = crate::arch::aarch64::cpu::overflow_sp();
     let lo = overflow.saturating_sub(DEFAULT_STACK_PAGES as u64 * PAGE_SIZE_4K);
-    if c.far == poison && c.handler_rsp >= lo && c.handler_rsp <= overflow {
+    let kind_ok = c.stack_overflow && vibeos::arch::aarch64::trap::is_el1_abort(c.esr);
+    if kind_ok && c.far == poison && c.handler_rsp >= lo && c.handler_rsp <= overflow {
         Outcome::Ok
     } else {
         crate::marker!(
-            "vibeOS: ktest:   far={:#x} want={:#x} rsp={:#x} lo={:#x} hi={:#x}",
+            "vibeOS: ktest:   overflow={} esr={:#x} far={:#x} want={:#x} rsp={:#x} lo={:#x} hi={:#x}",
+            c.stack_overflow,
+            c.esr,
             c.far,
             poison,
             c.handler_rsp,
@@ -917,15 +920,6 @@ user_code!(
     "
 );
 
-user_code!(
-    EL0_EXIT0,
-    "
-    mov x0, #0
-    mov x8, #93
-    svc #0
-    "
-);
-
 // mmap, store, munmap, store. The second store is SIGSEGV. Exit 3 means
 // that store still hit the page.
 user_code!(
@@ -973,7 +967,7 @@ fn exited0(st: u32) -> bool {
     vibeos::proc::wifexited(st) && vibeos::proc::wexitstatus(st) == 0
 }
 
-fn signaled(st: u32, sig: u32) -> bool {
+pub(super) fn signaled(st: u32, sig: u32) -> bool {
     vibeos::proc::wifsignaled(st) && vibeos::proc::wtermsig(st) == sig
 }
 
@@ -1059,7 +1053,7 @@ pub(crate) fn test_el0_uaccess() -> Outcome {
         return Outcome::Fail("map");
     }
     // SAFETY: `space.root` is a user TTBR0 `create` built; established here.
-    unsafe { crate::addr_space_init::load_cr3_u64(space.root().as_u64()) };
+    unsafe { crate::addr_space_init::load_cr3_u64(space.root().as_u64(), space.ctx_addr()) };
     let src = *b"pan-ok";
     let mut dst = [0u8; 6];
     let to = crate::arch::aarch64::uaccess::with_window(|| {
@@ -1103,43 +1097,6 @@ pub(crate) fn test_el0_munmap_touch() -> Outcome {
         }
         Ok(st) => crate::fail_fmt!("status {st:#x} want SIGSEGV"),
         Err(e) => e,
-    }
-}
-
-/// A saved ELR of 2^48 kills the process with SIGSEGV; the kernel runs.
-pub(crate) fn test_el0_bad_elr() -> Outcome {
-    // Armed before the spawn. The child is pinned to this CPU and made
-    // ready inside `spawn`, so a tick can run it before an arm after the
-    // spawn would land. The hook is one-shot, taken by the next return to
-    // EL0 on any CPU, which here is the child's first.
-    syscall_init::testing::arm_bad_elr();
-    let kills = crate::proc_init::BAD_ELR_KILLS.load(core::sync::atomic::Ordering::Relaxed);
-    let pid = match user::spawn(&Image::Code(EL0_EXIT0, DEFAULT), &["el0_bad_elr"]) {
-        Ok(p) => p,
-        Err(e) => {
-            syscall_init::testing::take_bad_elr();
-            return crate::fail_fmt!("spawn: {}", e.as_str());
-        }
-    };
-    let st = user::wait(pid);
-    // The child's return to EL0 took the hook before it exited. A hook still
-    // armed here never fired, and is taken so a later test does not get it.
-    if syscall_init::testing::take_bad_elr() {
-        return Outcome::Fail("bad elr hook not taken");
-    }
-    // The status is SIGSEGV whether `elr_ok` or the MMU stopped the return,
-    // so the kill is counted: only `kill_bad_elr` moves the counter.
-    if crate::proc_init::BAD_ELR_KILLS
-        .load(core::sync::atomic::Ordering::Relaxed)
-        .wrapping_sub(kills)
-        != 1
-    {
-        return Outcome::Fail("bad elr not killed by elr_ok");
-    }
-    if signaled(st, vibeos::proc::SIGSEGV) {
-        Outcome::Ok
-    } else {
-        crate::fail_fmt!("status {st:#x}")
     }
 }
 
@@ -1210,9 +1167,13 @@ pub(crate) fn test_fb_limine() -> Outcome {
 }
 
 /// Message-passing and load-buffering with Relaxed stores and no barrier
-/// (ROADMAP §11.7). Fails only when a shape completes no iteration.
+/// (ROADMAP §11.7). Each shape runs `WO_ITERS` iterations or `WO_BUDGET_NS`,
+/// whichever ends first, on a budget of its own. Fails only when a shape
+/// completes no iteration.
 const WO_ITERS: u64 = 10_000_000;
 const WO_BUDGET_NS: u64 = 5 * 60 * 1_000_000_000;
+/// Both shapes' budgets and a minute of margin for the handshakes.
+const WO_DEADLINE_MS: u32 = 660_000;
 const WO_KIND_MP: u64 = 0;
 const WO_KIND_LB: u64 = 1;
 
@@ -1272,7 +1233,25 @@ fn wo_wait(g: u64, start: u64) -> bool {
     true
 }
 
-fn wo_mp(start: u64) -> (u64, u64) {
+/// Wait until the worker has finished the last generation issued, bounded
+/// by the test's deadline; false when the deadline came first.
+fn wo_drain() -> bool {
+    // Relaxed: the coordinator, this thread, is `WO_GO`'s only writer.
+    let last = WO_GO.load(Ordering::Relaxed);
+    // Acquire: pairs with the worker's Release of `WO_DONE`.
+    while last != 0 && WO_DONE.load(Ordering::Acquire) != last {
+        if crate::ktest::deadline_within(5_000) == Some(true) {
+            return false;
+        }
+        thread_init::yield_now();
+    }
+    true
+}
+
+/// One shape's generations follow `base`, the last one issued before it, so
+/// no generation repeats across shapes.
+fn wo_mp(base: u64) -> (u64, u64) {
+    let start = time_init::now_ns();
     // Relaxed: pairs with nothing.
     WO_KIND.store(WO_KIND_MP, Ordering::Relaxed);
     let mut n = 0u64;
@@ -1281,7 +1260,7 @@ fn wo_mp(start: u64) -> (u64, u64) {
         // Relaxed: reset before the Release of `WO_GO`; pairs with nothing.
         WO_DATA.store(0, Ordering::Relaxed);
         WO_FLAG.store(0, Ordering::Relaxed);
-        let g = n.saturating_add(1);
+        let g = base.saturating_add(n).saturating_add(1);
         // Release: pairs with the worker's Acquire of `WO_GO`.
         WO_GO.store(g, Ordering::Release);
         // Relaxed: the shape under test; pairs with nothing.
@@ -1298,7 +1277,8 @@ fn wo_mp(start: u64) -> (u64, u64) {
     (n, w)
 }
 
-fn wo_lb(start: u64) -> (u64, u64) {
+fn wo_lb(base: u64) -> (u64, u64) {
+    let start = time_init::now_ns();
     // Relaxed: pairs with nothing.
     WO_KIND.store(WO_KIND_LB, Ordering::Relaxed);
     let mut n = 0u64;
@@ -1307,7 +1287,7 @@ fn wo_lb(start: u64) -> (u64, u64) {
         // Relaxed: reset before the Release of `WO_GO`; pairs with nothing.
         WO_X.store(0, Ordering::Relaxed);
         WO_Y.store(0, Ordering::Relaxed);
-        let g = n.saturating_add(1);
+        let g = base.saturating_add(n).saturating_add(1);
         // Release: pairs with the worker's Acquire of `WO_GO`.
         WO_GO.store(g, Ordering::Release);
         // Relaxed: the shape under test; pairs with nothing.
@@ -1316,7 +1296,9 @@ fn wo_lb(start: u64) -> (u64, u64) {
         if !wo_wait(g, start) {
             break;
         }
-        if y == 0 && WO_OBS_A.load(Ordering::Relaxed) == 0 {
+        // Load buffering's weak outcome: each load saw the other CPU's
+        // later store.
+        if y == 1 && WO_OBS_A.load(Ordering::Relaxed) == 1 {
             w = w.saturating_add(1);
         }
         n = n.saturating_add(1);
@@ -1333,12 +1315,27 @@ pub(crate) fn test_weak_order_probe() -> Outcome {
     WO_DONE.store(0, Ordering::Relaxed);
     WO_STOP.store(0, Ordering::Relaxed);
     let _worker = spawn_thread_on("wo_probe", wo_worker, 1);
-    let start = time_init::now_ns();
-    let (mp_n, mp_w) = wo_mp(start);
-    let (lb_n, lb_w) = wo_lb(start);
+    let (mp_n, mp_w) = wo_mp(0);
+    // A generation the worker was still running when message passing's
+    // budget ran out would store into the next shape's locations: let it
+    // finish before load buffering resets them.
+    let drained = wo_drain();
+    let (lb_n, lb_w) = if drained {
+        // Message passing issued at most generation `mp_n + 1`.
+        wo_lb(mp_n.saturating_add(1))
+    } else {
+        (0, 0)
+    };
+    // The same before the stop, so no generation outlives the counts. A
+    // drain the deadline cuts short is no failure: the box fails the test
+    // only on a shape with no iteration, which an undrained message passing
+    // gives load buffering.
+    let stopped = wo_drain();
     // Release: pairs with the worker's Acquire of `WO_STOP`.
     WO_STOP.store(1, Ordering::Release);
-    crate::ktest_info!("mp iters={mp_n} weak={mp_w} lb iters={lb_n} weak={lb_w}");
+    crate::ktest_info!(
+        "mp iters={mp_n} weak={mp_w} lb iters={lb_n} weak={lb_w} drained={drained} stopped={stopped}"
+    );
     if mp_n == 0 || lb_n == 0 {
         return crate::fail_fmt!("mp {mp_n} lb {lb_n}");
     }
@@ -1348,21 +1345,34 @@ pub(crate) fn test_weak_order_probe() -> Outcome {
 pub(crate) const TESTS: &[Test] = &[
     test("kstack_overflow", test_kstack_overflow),
     test(
+        "stacks_16k",
+        crate::arch::aarch64::ktest_stacks::test_stacks_16k,
+    ),
+    test(
         "tpidrro_zero",
         crate::arch::aarch64::ktest_el0::test_tpidrro_zero,
     ),
     test("el1_x16_survives_irq", test_el1_x16_survives_irq),
     test("gic_present", test_gic_present),
+    test(
+        "gic_priorities",
+        crate::arch::aarch64::ktest_gic::test_gic_priorities,
+    ),
     test("now_ns_cntvct", test_now_ns_cntvct),
     test("its_doorbell", test_its_doorbell),
     test("idle_wfi", test_idle_wfi),
     test("sysreg_compare", test_sysreg_compare),
     test("oslsr_clear", test_oslsr_clear),
     test(
-        "asid_4bit",
-        crate::arch::aarch64::ktest_asid::test_asid_4bit,
+        "ap_ttbr0_empty",
+        crate::arch::aarch64::ktest_asid::test_ap_ttbr0_empty,
+    ),
+    test(
+        "asid_procs_4bit",
+        crate::arch::aarch64::ktest_asid::test_asid_procs_4bit,
     )
-    .deadline(60_000),
+    .deadline(180_000)
+    .opt_in(),
     test("tlb_shootdown_remote", test_tlb_shootdown_remote),
     test("per_cpu_identity", test_per_cpu_identity),
     test("percpu_ticks_advance", test_percpu_ticks_advance),
@@ -1414,7 +1424,14 @@ pub(crate) const TESTS: &[Test] = &[
     )
     .deadline(30_000),
     test("el0_ring3_signals", test_el0_ring3_signals),
-    test("el0_bad_elr", test_el0_bad_elr),
+    test(
+        "el0_bad_elr",
+        crate::arch::aarch64::ktest_el0::test_el0_bad_elr,
+    ),
+    test(
+        "el0_bad_pstate",
+        crate::arch::aarch64::ktest_el0::test_el0_bad_pstate,
+    ),
     test("el0_munmap_touch", test_el0_munmap_touch),
     test(
         "el0_tls_survive",
@@ -1459,7 +1476,7 @@ pub(crate) const TESTS: &[Test] = &[
         crate::arch::aarch64::ktest_el0::test_el0_code_recycle,
     ),
     test("weak_order_probe", test_weak_order_probe)
-        .deadline(330_000)
+        .deadline(WO_DEADLINE_MS)
         .opt_in(),
     test("ac_clear_user_popf", skip_ac_clear_user_popf),
     test("ist_gs_sign", skip_ist_gs_sign),

@@ -15,48 +15,9 @@ use vibeos::thread::{Fxsave, Tcb, ThreadId};
 use crate::arch::current::{Arch, InterruptGuard};
 use crate::per_cpu_init;
 
-pub const EXIT_SYSCALL: u64 = 0x100;
+pub(crate) use super::exit_work_init::{EXIT_SYSCALL, exit_work, set_exit_work_hooks};
 
 static HANDLER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
-static EXIT_PENDING: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
-static EXIT_WORK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
-
-pub fn set_exit_work_hooks(pending: fn() -> bool, work: fn(&mut UserFrame)) {
-    // Release: pairs with the Acquire loads in `exit_work`.
-    EXIT_WORK.store(work as *mut (), Ordering::Release);
-    // Release: pairs with the Acquire load in `exit_work`.
-    EXIT_PENDING.store(pending as *mut (), Ordering::Release);
-}
-
-/// Exit work on a return to EL0 (DESIGN §5.10 rule 11): entered with
-/// DAIF all set; while work is pending, unmask, act, mask, and check
-/// again.
-pub fn exit_work(kind: u64, frame: &mut UserFrame) {
-    // Acquire: pairs with the Release stores in `set_exit_work_hooks`.
-    let pending = EXIT_PENDING.load(Ordering::Acquire);
-    // Acquire: pairs with the Release store in `set_exit_work_hooks`.
-    let work = EXIT_WORK.load(Ordering::Acquire);
-    if !pending.is_null() && !work.is_null() {
-        // SAFETY: invariant: non-null hooks hold a `fn() -> bool` and a
-        // `fn(&mut UserFrame)`; established by
-        // `syscall_init::set_exit_work_hooks`, their only stores.
-        let (pending, work) = unsafe {
-            (
-                core::mem::transmute::<*mut (), fn() -> bool>(pending),
-                core::mem::transmute::<*mut (), fn(&mut UserFrame)>(work),
-            )
-        };
-        loop {
-            if !pending() {
-                break;
-            }
-            crate::arch::aarch64::cpu::daif_clear_all();
-            work(frame);
-            crate::arch::aarch64::cpu::daif_set_all();
-        }
-    }
-    let _ = kind;
-}
 
 /// # Safety
 /// Unused: secondaries load the full VBAR in `vectors::load`.
@@ -78,22 +39,19 @@ pub unsafe fn init_bsp() {
             .store(empty, core::sync::atomic::Ordering::Release);
     });
     if empty != 0 {
+        // A raw write, not `asid::load_ttbr0`: the allocator that load
+        // needs is built just below, from TTBR0 on the empty root, and
+        // `asid::init_bsp` ends with the local flush of whatever the TTBR1
+        // takeover left tagged. An AP needs no such write: its entry stub
+        // loads the empty root and flushes (`arch::aarch64::secondary`).
         // SAFETY: `empty` is the permanent ASID-0 TTBR0 root
         // `paging_init::install` published; established there.
         unsafe { crate::arch::aarch64::cpu::write_ttbr0(empty) };
     }
     crate::log_init::apply_boot_level();
-}
-
-/// # Safety
-/// Secondaries: VBAR is live; this writes the empty TTBR0 root.
-pub unsafe fn init_ap(_tables: *const crate::arch::gdt::CpuTables, _rsp0: u64) {
-    let empty = crate::paging_init::empty_user_root();
-    if empty != 0 {
-        // SAFETY: `empty` is the permanent ASID-0 TTBR0 root
-        // `paging_init::install` published; established there.
-        unsafe { crate::arch::aarch64::cpu::write_ttbr0(empty) };
-    }
+    // SAFETY: invariant I22: the boot CPU, once, before `smp: done` and
+    // before any user root loads (this fn's `# Safety`); established here.
+    unsafe { crate::arch::aarch64::asid::init_bsp() };
 }
 
 /// Save V0–V31, FPCR, and FPSR into `tcb.fpu` (ROADMAP §11.6, F069).
@@ -253,8 +211,9 @@ pub fn exec_fp() {
 #[expect(dead_code, reason = "aarch64 has no TSS RSP0")]
 pub unsafe fn set_rsp0_for(_cpu: &mut PerCpu, _tcb: &Tcb) {}
 
-/// Load `tcb`'s TTBR0 if it differs. A kernel thread (`as_cr3` 0) gets
-/// the empty user root.
+/// Load `tcb`'s TTBR0 if it differs, with its space's ASID
+/// (`arch::aarch64::asid::load_ttbr0`), so the switch flushes nothing. A
+/// kernel thread (`as_cr3` 0) gets the empty user root, ASID 0.
 ///
 /// # Safety
 /// `cpu` is this CPU's `PerCpu`, held with IRQs masked as `on_switch`
@@ -269,11 +228,13 @@ pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
         return true;
     }
+    let ctx = if tcb.as_cr3 == 0 { 0 } else { tcb.as_ctx };
     // SAFETY: invariant I44: `want` is the empty user root or a TCB's
-    // TTBR0, which stays allocated while that TCB names it; established
-    // by `addr_space_init::SpaceCore`'s drop and `paging_init::install`.
-    unsafe { crate::arch::aarch64::cpu::write_ttbr0(want) };
-    crate::arch::aarch64::cpu::tlbi_asid0_local();
+    // TTBR0, which stays allocated while that TCB names it, and `ctx` is
+    // 0 or the context of that root's space, set and cleared with it
+    // (`thread_init::set_pid_cr3`); established by
+    // `addr_space_init::SpaceCore`'s drop and `paging_init::install`.
+    unsafe { crate::arch::aarch64::asid::load_ttbr0(cpu.cpu_id, want, ctx) };
     // Release: pairs with the Acquire load in `addr_space_init::root_holder`.
     cpu.remote.as_cr3.store(want, Ordering::Release);
     false
@@ -401,9 +362,7 @@ fn bump_counter() {
 /// The `svc` body's Rust half: the process layer's `syscall`.
 pub fn enter(frame: &mut UserFrame) {
     bump_counter();
-    let nr = frame.x[8] as u32 as u64;
-    frame.orig_x0 = frame.x[0];
-    frame.syscallno = nr;
+    let nr = frame.svc_entry();
     vibeos::trace!(SyscallEnter, nr, frame.x[0]);
     // Acquire: pairs with the Release store in `set_syscall_handler`.
     let h = HANDLER.load(Ordering::Acquire);
@@ -422,6 +381,12 @@ pub fn enter(frame: &mut UserFrame) {
 /// Whether `pc` may be written to `ELR_EL1` for a return to EL0.
 pub fn elr_ok(pc: u64) -> bool {
     pc < USER_MAP_END && pc & USER_TAG_MASK == 0
+}
+
+/// Whether `frame` may be loaded into `ELR_EL1` and `SPSR_EL1` for a
+/// return to EL0: [`elr_ok`] and `trap::el0_pstate_ok`.
+pub fn return_ok(frame: &UserFrame) -> bool {
+    elr_ok(frame.pc) && vibeos::arch::aarch64::trap::el0_pstate_ok(frame.pstate)
 }
 
 #[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
@@ -614,6 +579,7 @@ pub(crate) mod testing {
     }
 
     static BAD_ELR: AtomicBool = AtomicBool::new(false);
+    static BAD_PSTATE: AtomicBool = AtomicBool::new(false);
 
     /// The next return to EL0 writes `ELR_EL1` = 2^48 (ROADMAP §11.6).
     pub(crate) fn arm_bad_elr() {
@@ -624,6 +590,17 @@ pub(crate) mod testing {
     pub(crate) fn take_bad_elr() -> bool {
         // AcqRel: pairs with the Release store in `arm_bad_elr`.
         BAD_ELR.swap(false, Ordering::AcqRel)
+    }
+
+    /// The next return to EL0 writes `SPSR_EL1.M` = EL1h.
+    pub(crate) fn arm_bad_pstate() {
+        // Release: pairs with the AcqRel swap in `take_bad_pstate`.
+        BAD_PSTATE.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn take_bad_pstate() -> bool {
+        // AcqRel: pairs with the Release store in `arm_bad_pstate`.
+        BAD_PSTATE.swap(false, Ordering::AcqRel)
     }
 
     fn vibeos_el0_eret_addr() -> u64 {

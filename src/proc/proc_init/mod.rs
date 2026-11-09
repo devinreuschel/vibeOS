@@ -512,10 +512,11 @@ fn start_loaded(
         }
     };
     let root = loaded.space.root().as_u64();
+    let ctx = loaded.space.ctx_addr();
     let frame = UserFrame::new_user(loaded.entry, loaded.rsp);
     let fs = loaded.fs;
     let space = loaded.space;
-    let h = match thread_init::spawn_user(name, user_thread_entry, pid, root, &frame) {
+    let h = match thread_init::spawn_user(name, user_thread_entry, pid, root, ctx, &frame) {
         Ok(h) => h,
         Err(e) => {
             with_sched_table(|s, t| release_pid(s, t, pid));
@@ -902,7 +903,7 @@ pub fn try_user_fault(f: &TrapFrame) {
 #[cfg(all(target_arch = "aarch64", feature = "kernel_tests"))]
 pub(crate) use exit::BAD_ELR_KILLS;
 #[cfg(target_arch = "aarch64")]
-pub use exit::{kill_bad_elr, try_user_trap};
+pub use exit::{kill_bad_return, try_user_trap};
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
 #[cfg(feature = "kernel_tests")]

@@ -311,6 +311,41 @@ fn page_size_mismatch_rejected() {
     assert_eq!(err, MapError::PageSizeMismatch);
 }
 
+#[test]
+fn invalidate_refuses_a_block_over_a_table() {
+    let mut pool = Pool::new(64);
+    let mut m = fresh_mapper(&mut pool);
+    let va = VirtAddr(0xFFFF_8000_0040_0000);
+    // A 4K leaf makes the 2M slot a table.
+    // SAFETY: `Mapper::map_page`'s contract; the host never touches the leaf's frame, and
+    // the tables are the pool's (`fresh_mapper`), established here.
+    unsafe {
+        m.map_page(
+            va,
+            PhysAddr(0x0080_0000),
+            physmap_flags(),
+            PageSize::Size4K,
+            MapMode::Fresh,
+            &mut pool,
+        )
+        .unwrap();
+    }
+    // SAFETY: as above, established here.
+    let err = unsafe {
+        m.map_page(
+            va,
+            PhysAddr(0x0080_0000),
+            physmap_flags(),
+            PageSize::Size2M,
+            MapMode::Invalidate,
+            &mut pool,
+        )
+        .unwrap_err()
+    };
+    assert_eq!(err, MapError::PageSizeMismatch);
+    assert_eq!(m.translate(va).unwrap().0, PhysAddr(0x0080_0000));
+}
+
 fn map_ok(
     m: &mut Mapper<Arch>,
     pool: &mut Pool,

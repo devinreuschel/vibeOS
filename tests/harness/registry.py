@@ -37,6 +37,7 @@ WHEN_TERMS = (
     "panic_nest_test",
     "panic_stop_test",
     "hang_test",
+    "kstack_overflow_test",
 )
 REPEATS = ("per_ap",)
 KEYS = frozenset(
@@ -239,6 +240,7 @@ class BootConfig:
     panic_nest_test: bool = False
     panic_stop_test: bool = False
     hang_test: bool = False
+    kstack_overflow_test: bool = False
     arch: str = "x86_64"
     el: str = ""
     arm_timer: str = ""
@@ -254,6 +256,7 @@ def _term(term: str, cfg: BootConfig) -> bool:
         "panic_nest_test": cfg.panic_nest_test,
         "panic_stop_test": cfg.panic_stop_test,
         "hang_test": cfg.hang_test,
+        "kstack_overflow_test": cfg.kstack_overflow_test,
     }[term.removeprefix("!")]
     return not value if term.startswith("!") else value
 

@@ -6,7 +6,8 @@
 //! and calls it. `/chosen` is ignored. `memory@` is not RAM.
 //!
 //! Limits. `reg` is read with the parent's cell counts, keeping the low 64
-//! bits, and no `ranges` translation is applied. Each `interrupt-map` row is
+//! bits, and no `ranges` translation is applied; a PCI host's own `ranges`
+//! is read only for its memory windows. Each `interrupt-map` row is
 //! read as two parent address cells and three parent interrupt cells, without
 //! resolving the parent; a map whose length is not a whole number of rows is
 //! left empty and counted (`refused_interrupt_maps`). Rows past the host's
@@ -712,11 +713,12 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
     if compatible_has(props, b"pci-host-ecam-generic")
         && let Some(r) = reg
     {
-        let (first, last) = prop_named(props, b"bus-range")
-            .and_then(|v| Some((be_u32(v, 0)?, be_u32(v, 4)?)))
-            .map(|(a, b)| (a as u8, b as u8))
-            .unwrap_or((0, 0xff));
-        let segment = u32_prop(props, b"linux,pci-domain").unwrap_or(0) as u16;
+        // A bus or domain number that does not fit the host's field, or a
+        // reversed range, drops the host rather than scanning another one.
+        let Some((first, last, segment)) = ecam_numbers(props) else {
+            d.dropped_pci_hosts = d.dropped_pci_hosts.saturating_add(1);
+            return;
+        };
         let mut host = PciHost {
             segment,
             first_bus: first,
@@ -728,10 +730,84 @@ fn fill_node(d: &mut MachineDesc, path: &[u8], props: &[Prop<'_>], inh: Inherit)
             ..PciHost::default()
         };
         fill_msi_map(&mut host, props, &mut d.dropped_msi_rows);
+        fill_windows(&mut host, props, inh.addr_cells, &mut d.dropped_pci_windows);
         if fill_interrupt_map(&mut host, props, &mut d.dropped_interrupt_rows) {
             d.refused_interrupt_maps = d.refused_interrupt_maps.saturating_add(1);
         }
         push_pci(d, host);
+    }
+}
+
+/// An ECAM host's `bus-range` (default 0 to 255) and `linux,pci-domain`
+/// (default 0), or `None` when either does not fit or the range is
+/// reversed.
+fn ecam_numbers(props: &[Prop<'_>]) -> Option<(u8, u8, u16)> {
+    let (first, last) = match prop_named(props, b"bus-range") {
+        None => (0, 0xff),
+        Some(v) => {
+            let first = u8::try_from(be_u32(v, 0)?).ok()?;
+            let last = u8::try_from(be_u32(v, 4)?).ok()?;
+            (first, last)
+        }
+    };
+    if first > last {
+        return None;
+    }
+    let segment = match u32_prop(props, b"linux,pci-domain") {
+        None => 0,
+        Some(v) => u16::try_from(v).ok()?,
+    };
+    Some((first, last, segment))
+}
+
+/// The memory-space rows of a PCI host's `ranges` (IEEE 1275 PCI bus
+/// binding: three child address cells whose first holds the space code in
+/// bits 24-25, `parent_cells` CPU address cells, then the node's
+/// `#size-cells`). I/O space and a row that wraps or is empty are skipped;
+/// memory rows past [`MAX_PCI_WINDOWS`] are added to `dropped`. A partial
+/// trailing row is ignored.
+fn fill_windows(host: &mut PciHost, props: &[Prop<'_>], parent_cells: u32, dropped: &mut u32) {
+    let Some(v) = prop_named(props, b"ranges") else {
+        return;
+    };
+    let child = u32_prop(props, b"#address-cells").unwrap_or(3) as usize;
+    let size = u32_prop(props, b"#size-cells").unwrap_or(2);
+    let Some(stride) = child
+        .checked_add(parent_cells as usize)
+        .and_then(|n| n.checked_add(size as usize))
+        .filter(|&n| n > 0 && child > 0)
+    else {
+        return;
+    };
+    let mut i = 0usize;
+    while let Some(hi) = cell(v, i) {
+        let Some(parent_at) = i.checked_add(child) else {
+            break;
+        };
+        let Some(size_at) = parent_at.checked_add(parent_cells as usize) else {
+            break;
+        };
+        let (Some(start), Some(len)) = (
+            addr_cells(v, parent_at, parent_cells),
+            addr_cells(v, size_at, size),
+        ) else {
+            break;
+        };
+        // Space code 0b10 is 32-bit memory, 0b11 64-bit memory.
+        let r = PhysRange { start, size: len };
+        if (hi >> 24) & 0b10 != 0 && len != 0 && r.end().is_some() {
+            match host.windows.get_mut(host.window_len) {
+                Some(slot) => {
+                    *slot = r;
+                    host.window_len = host.window_len.saturating_add(1);
+                }
+                None => *dropped = dropped.saturating_add(1),
+            }
+        }
+        i = match i.checked_add(stride) {
+            Some(n) => n,
+            None => break,
+        };
     }
 }
 

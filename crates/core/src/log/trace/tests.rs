@@ -298,6 +298,7 @@ fn order_rule_matrix() {
                     invariant,
                     warp_measured,
                     max_skew,
+                    uniform: false,
                 };
                 let global = invariant && warp_measured && max_skew == 0;
                 assert_eq!(c.order() == Order::Global, global, "{c:?}");
@@ -318,10 +319,39 @@ fn order_rule_matrix() {
         invariant: true,
         warp_measured: false,
         max_skew: 0,
+        uniform: false,
     };
     t.publish_clock(&c);
     assert_eq!(t.clock(), Some(c));
     assert_eq!(c.order(), Order::PerCpu("tsc warp test did not run"));
+}
+
+/// aarch64's clock (ROADMAP §11.7): `CNTVCT_EL0` at the recorded
+/// `CNTFRQ_EL0`, uniform across CPUs, orders globally with no warp test,
+/// round-trips through the header, and converts at that frequency.
+#[test]
+fn uniform_counter_orders_globally() {
+    let c = ClockInfo {
+        freq_hz: 62_500_000,
+        invariant: false,
+        warp_measured: false,
+        max_skew: 0,
+        uniform: true,
+    };
+    assert_eq!(c.order(), Order::Global);
+    let f = c.flags();
+    assert_eq!(f & COUNTER_UNIFORM, COUNTER_UNIFORM);
+    assert_eq!(f & WARP_MEASURED, 0);
+    assert_eq!(ClockInfo::from_header(c.freq_hz, 0, f), Some(c));
+    let t: Trace<1, 1> = Trace::new();
+    t.publish_clock(&c);
+    assert_eq!(t.clock(), Some(c));
+    // QEMU `virt`'s 62.5 MHz: 16 ns a tick, one second of ticks is 1 s.
+    assert_eq!(cycles_to_ns(1, c.freq_hz), Some(16));
+    assert_eq!(cycles_to_ns(62_500_000, c.freq_hz), Some(1_000_000_000));
+    // A header without the flag is a TSC's, whose order needs CPUID's bit.
+    let tsc = ClockInfo::from_header(c.freq_hz, 0, f & !COUNTER_UNIFORM).unwrap();
+    assert_eq!(tsc.order(), Order::PerCpu("tsc not invariant"));
 }
 
 /// A JSON value, from the test-only reader below.
@@ -507,6 +537,7 @@ const GLOBAL: ClockInfo = ClockInfo {
     invariant: true,
     warp_measured: true,
     max_skew: 0,
+    uniform: false,
 };
 
 #[test]
@@ -547,6 +578,12 @@ fn export_chrome_required_fields() {
             freq_hz: 0,
             ..GLOBAL
         },
+        ClockInfo {
+            freq_hz: 62_500_000,
+            warp_measured: false,
+            uniform: true,
+            ..GLOBAL
+        },
     ] {
         let j = export(&[(0, &c0), (1, &c1)], &clock);
         let evs = j.get("traceEvents").unwrap().arr();
@@ -570,7 +607,11 @@ fn export_chrome_required_fields() {
         assert_eq!(tracepoints.count(), 3);
         assert_eq!(j.get("displayTimeUnit").unwrap().str(), "ns");
         let other = j.get("otherData").unwrap();
-        let clk = if clock.freq_hz == 0 { "cycles" } else { "tsc" };
+        let clk = match (clock.freq_hz, clock.uniform) {
+            (0, _) => "cycles",
+            (_, true) => "cntvct",
+            (_, false) => "tsc",
+        };
         assert_eq!(other.get("clock").unwrap().str(), clk);
         assert_eq!(
             other.get("freq_hz").unwrap().str(),
@@ -630,6 +671,31 @@ fn export_global_merges_by_timestamp() {
     // Counted from the smallest timestamp, 50 cycles, at 2 GHz.
     let ts: Vec<f64> = evs.iter().map(|e| e.get("ts").unwrap().num()).collect();
     assert_eq!(ts, [0.0, 0.025, 0.075, 0.175, 0.225, 0.325]);
+    // The same records from aarch64's `CNTVCT_EL0` at 62.5 MHz merge the
+    // same way, 16 ns a tick, with no warp test behind the order.
+    let a64 = ClockInfo {
+        freq_hz: 62_500_000,
+        warp_measured: false,
+        uniform: true,
+        ..GLOBAL
+    };
+    let ja = export(&[(0, &c0), (2, &c2), (3, &c3)], &a64);
+    let other = ja.get("otherData").unwrap();
+    assert_eq!(other.get("order").unwrap().str(), "global");
+    assert_eq!(other.get("clock").unwrap().str(), "cntvct");
+    assert_eq!(
+        other.get("reason").unwrap().str(),
+        "a counter uniform across cpus"
+    );
+    let ts: Vec<f64> = ja
+        .get("traceEvents")
+        .unwrap()
+        .arr()
+        .iter()
+        .filter(|e| e.get("ph").unwrap().str() == "i")
+        .map(|e| e.get("ts").unwrap().num())
+        .collect();
+    assert_eq!(ts, [0.0, 0.8, 2.4, 5.6, 7.2, 10.4]);
     assert!(evs.iter().all(|e| e.get("pid").unwrap().num() == 0.0));
     // One name event per CPU track.
     let threads = j

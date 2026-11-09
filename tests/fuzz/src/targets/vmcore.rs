@@ -1,14 +1,16 @@
 //! `vmcore`: the core tool's readers (`vibeos::log::vmcore`), on the input
 //! as a whole kernel ELF and as a whole physical core: headers, notes,
 //! `NT_PRSTATUS`, VMCOREINFO, the page walk and the virtual-core writer
-//! over a `SliceCore`, the unwinder, the kernel-table decoders and the
+//! over a `SliceCore` in the format its `e_machine` picks (x86_64's PML4 or
+//! aarch64's TTBR1 table), the unwinder, the kernel-table decoders and the
 //! signature.
 
-use vibeos::arch::stub::Arch;
 use vibeos::log::trace::{RECORDS_PER_CPU, RecordData};
 use vibeos::log::vmcore::sig::{normalize_message, pick_cpu, write_signature};
-use vibeos::log::vmcore::walk::{self, Kernel};
-use vibeos::log::vmcore::{BT_MAX, KernelElf, NT_PRSTATUS, SliceCore, Vmcoreinfo, prstatus_regs};
+use vibeos::log::vmcore::walk::{self, Aarch64Ttbr1, CoreFormat, Kernel, X86_64};
+use vibeos::log::vmcore::{
+    BT_MAX, KernelElf, Machine, NT_PRSTATUS, Roots, SliceCore, Vmcoreinfo, prstatus_regs,
+};
 
 /// Walk budget: small, so a looping table ends the input quickly.
 const BUDGET: u64 = 1 << 14;
@@ -32,7 +34,7 @@ pub fn parse(data: &[u8]) {
     let _ = core.ram();
     for n in core.notes().take(256) {
         if n.kind == NT_PRSTATUS {
-            let _ = prstatus_regs(n.desc);
+            let _ = prstatus_regs(n.desc, core.hdr.machine);
         }
     }
     let Ok(vi) = Vmcoreinfo::find(core.notes()) else {
@@ -42,7 +44,14 @@ pub fn parse(data: &[u8]) {
     let Ok(r) = vi.roots() else {
         return;
     };
-    let Ok(k) = Kernel::<_, Arch>::new(&core, r.pgt_root, r.pgt_levels) else {
+    match core.hdr.machine {
+        Machine::X86_64 => walk_all::<X86_64>(&core, &r),
+        Machine::Aarch64 => walk_all::<Aarch64Ttbr1>(&core, &r),
+    }
+}
+
+fn walk_all<A: CoreFormat>(core: &SliceCore<'_>, r: &Roots) {
+    let Ok(k) = Kernel::<_, A>::new(core, r.pgt_root, r.pgt_levels) else {
         return;
     };
     let k = k.with_budget(BUDGET);

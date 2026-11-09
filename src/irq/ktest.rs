@@ -392,6 +392,14 @@ pub(crate) fn test_msix_cpu() -> Outcome {
     if pci_init::cfg_read16(dev.addr, CFG_COMMAND) != before {
         return fail("msix wrote command");
     }
+    // The ITS moves the LPI with `MOVI` (GICv2m retargets the SPI), so the
+    // device keeps writing the same message (ROADMAP §11.3). x86's LAPIC
+    // MSI chip rewrites the destination in the entry instead. Both reads
+    // stay outside the window between the two interrupts.
+    #[cfg(target_arch = "aarch64")]
+    let Some(entry_before) = irq_init::msix_entry_dwords(vec) else {
+        return fail("no live msix entry");
+    };
     // The test is the driver: an MSI-X message is a bus-master write
     // (DESIGN §4.7), and INTx goes off while MSI-X is armed.
     pci_init::update_command(dev.addr, CMD_MASTER | CMD_INTX_DISABLE, 0);
@@ -422,6 +430,8 @@ pub(crate) fn test_msix_cpu() -> Outcome {
         .map(|c| c.load(Ordering::SeqCst))
         .unwrap_or(0);
     let alloc = IRQ_ALLOC.load(Ordering::SeqCst);
+    #[cfg(target_arch = "aarch64")]
+    let entry_after = irq_init::msix_entry_dwords(vec);
     mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
     irq_init::disable_msix(&dev);
     let _ = irq_init::free_vector(vec);
@@ -441,6 +451,10 @@ pub(crate) fn test_msix_cpu() -> Outcome {
     }
     if alloc != 1 {
         return Outcome::Fail("alloc in irq");
+    }
+    #[cfg(target_arch = "aarch64")]
+    if entry_after != Some(entry_before) {
+        return Outcome::Fail("msix entry changed by set_affinity");
     }
     Outcome::Ok
 }

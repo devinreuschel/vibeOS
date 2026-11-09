@@ -27,8 +27,9 @@ Phase 10 (consolidation) is closed: every tier `make test` runs passes under TCG
 retry, and the scheduled runs (the nightly KVM leg, the models and Miri, the weekly stress and fuzz
 jobs, macOS) pass on the commit that closes it. TCG proves the per-push tiers; the timing a real CPU
 gives, the TSC-deadline timer and SIMD exceptions are proved by the KVM leg. Phase 11 (portability:
-the aarch64 port) has S1–S9 in and S10 wiring the arm64 CI, litmus, and docs. Phase 12 (demand paging
-/ COW) is not started. See [The arc](docs/ROADMAP.md#the-arc).
+the aarch64 port) is in review: aarch64 boots the same kernel to `shell ready` and runs `/bin/tests` at
+EL0 under TCG, and its open [ROADMAP](docs/ROADMAP.md#phase-11-portability) boxes are what is left.
+Phase 12 (demand paging / COW) is not started. See [The arc](docs/ROADMAP.md#the-arc).
 Do not run code you do not trust on vibeOS, and keep no secrets on it: Phase 10's tests are not a
 proof that no process can crash the kernel, and until Phase 18 nothing stops one from reading other
 processes' memory ([DESIGN §2.10](docs/INVARIANTS.md#210-trust-boundaries)).

@@ -122,9 +122,16 @@ pub const MAX_CORE_PHDRS: u16 = 256;
 /// Bytes in one device-tree `reg` window the kernel will map (`machine::fdt`):
 /// the largest real one is a PCI ECAM at 256 MiB.
 pub const MAX_DT_REG_BYTES: u64 = 1 << 30;
+/// Memory windows of one device-tree PCI host's `ranges` the kernel keeps
+/// (`machine::PciHost::windows`); QEMU `virt` names two, a 32-bit and a
+/// 64-bit one.
+pub const MAX_PCI_WINDOWS: usize = 4;
 /// Descriptors in one virtqueue the in-flight bitmap covers
 /// (`virtio::SplitLayout`); the spec allows 32768, the drivers ask for 64.
 pub const MAX_VIRTQ_SIZE: u16 = 256;
+/// The architectural maximum cache writeback granule, 512 words (Arm ARM
+/// DDI0487, `CTR_EL0.CWG`), which a `CWG` of 0 means (DESIGN §4.7).
+pub const MAX_CWG: u64 = 2048;
 /// Kernel shell commands (`shell::Registry`).
 pub const MAX_COMMANDS: usize = 48;
 /// Tokens in one kernel shell line (`shell`).

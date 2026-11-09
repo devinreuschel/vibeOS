@@ -240,6 +240,7 @@ class TestDebugTarget(unittest.TestCase):
         self.assertEqual(
             text.splitlines(),
             [
+                "set architecture i386:x86-64",
                 f"file {os.path.abspath('k.elf')}",
                 f"add-symbol-file {os.path.abspath('user/a')} -o 0",
                 f"add-symbol-file {os.path.abspath('user/b')} -o 0",
@@ -250,11 +251,14 @@ class TestDebugTarget(unittest.TestCase):
     def test_write_gdb_symbols_for_a_core(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "symbols.gdb")
-            run_interactive.write_gdb_symbols(path, "k.elf", [], core="build/debug/core.virt")
+            run_interactive.write_gdb_symbols(
+                path, "k.elf", [], core="build/debug/core.virt", arch="aarch64"
+            )
             text = Path(path).read_text(encoding="utf-8")
         self.assertEqual(
             text.splitlines(),
             [
+                "set architecture aarch64",
                 f"file {os.path.abspath('k.elf')}",
                 f"core-file {os.path.abspath('build/debug/core.virt')}",
                 "set $vibeos_core = 1",
@@ -293,6 +297,36 @@ class TestDebugTarget(unittest.TestCase):
         for u in users:
             self.assertIn("/x86_64-unknown-linux-musl/", u)
 
+    def test_make_n_debug_aarch64(self) -> None:
+        # ROADMAP §11.7: the aarch64 kernel and user ELFs, under build/aarch64/.
+        env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+        out = subprocess.run(
+            ["make", "-n", "ARCH=aarch64", "-o", "build/aarch64/vibeos.iso",
+             "-o", "build/aarch64/kernels/vibeos-default.elf",
+             "-o", str(ROOT / "build/aarch64/user/.stamp"), "debug"],
+            cwd=ROOT, env=env, capture_output=True, text=True, check=True,
+        ).stdout.replace("\\\n", " ")
+        line = next(ln for ln in out.splitlines() if "run_interactive.py debug" in ln)
+        args = line.split()
+        self.assertEqual(
+            args[args.index("--kernel-elf") + 1], "build/aarch64/kernels/vibeos-default.elf"
+        )
+        users = [args[i + 1] for i, a in enumerate(args) if a == "--user-elf"]
+        self.assertEqual(len(users), 4)
+        for u in users:
+            self.assertIn("/aarch64-unknown-linux-musl/", u)
+
+    def test_debug_names_the_arch_gdb(self) -> None:
+        self.assertEqual(run_interactive.GDB_ARCH["aarch64"], "aarch64")
+        self.assertIn("aarch64-elf-gdb", run_interactive.GDB_COMMAND["aarch64"])
+        self.assertIn("x86_64-elf-gdb", run_interactive.GDB_COMMAND["x86_64"])
+        with overlay_env({"VIBEOS_ARCH": "aarch64"}):
+            self.assertEqual(run_interactive.current_arch(), "aarch64")
+        with self.assertRaisesRegex(HarnessError, "riscv64"):
+            run_interactive.gdb_arch("riscv64")
+        with tempfile.TemporaryDirectory() as d, self.assertRaises(HarnessError):
+            run_interactive.write_gdb_symbols(os.path.join(d, "s.gdb"), "k.elf", [], arch="mips")
+
     def test_gdb_script(self) -> None:
         lines = [
             ln.strip()
@@ -306,7 +340,8 @@ class TestDebugTarget(unittest.TestCase):
             ["if $vibeos_core == 0", f"target remote localhost:{run_interactive.GDB_PORT}", "end"],
         )
         self.assertLess(lines.index(f"source {run_interactive.GDB_SYMBOLS}"), len(lines) - 3)
-        self.assertIn("set architecture i386:x86-64", lines)
+        # symbols.gdb sets the architecture, which differs by ARCH.
+        self.assertFalse(any(ln.startswith("set architecture") for ln in lines), lines)
 
 
 STUB_PYTHON = """#!/bin/sh

@@ -418,14 +418,17 @@ impl<A: PageTable> Mapper<A> {
         if present {
             match mode {
                 MapMode::Fresh => return Err(MapError::AlreadyMapped),
-                MapMode::Remap => {
+                // Neither replaces a table with a block, nor a block with a
+                // leaf of another size: that would orphan the table, and
+                // break-before-make's last-level TLBI would leave walk-cache
+                // entries through it.
+                MapMode::Remap | MapMode::Invalidate => {
                     let existing_huge = A::entry_flags(existing).contains(PageFlags::HUGE);
                     let want_huge = !matches!(size, PageSize::Size4K);
                     if existing_huge != want_huge {
                         return Err(MapError::PageSizeMismatch);
                     }
                 }
-                MapMode::Invalidate => {}
             }
         }
 
@@ -1099,3 +1102,49 @@ unsafe impl FrameAlloc for crate::pmm::testing::Pool {
 #[cfg(test)]
 #[path = "paging_tests.rs"]
 mod tests;
+
+// ------------------------------------------------- core formats (§10.7)
+
+/// What a table entry at some level does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Desc {
+    /// Not a translation: invalid, or a type the level does not allow.
+    None,
+    /// Points at the next level's table.
+    Table,
+    /// Maps a page or a block of the level's size.
+    Leaf,
+}
+
+/// A kernel page-table format the core tool walks: the pure half of a
+/// port's paging (`arch::<port>::paging`) for the root VMCOREINFO's
+/// `NUMBER(vibeos_pgt_root)` names, and the machine its cores are for.
+pub trait CoreFormat {
+    /// The `e_machine` of the kernel ELF and of the core
+    /// (`proc::elf::EM_*`).
+    const E_MACHINE: u16;
+    /// Levels of the walk; the root is level `LEVELS`.
+    const LEVELS: u8;
+    /// Entries in one table.
+    const ENTRIES: usize;
+    /// Root slots `KERNEL_ROOT_FIRST..ENTRIES` map the kernel half.
+    const KERNEL_ROOT_FIRST: usize;
+    /// The VA root slot `KERNEL_ROOT_FIRST` maps first: the kernel half's
+    /// start, and the lowest VA a frame pointer may name.
+    const KERNEL_VA_START: u64;
+    /// The index `va` selects in a table at `level`.
+    fn index(va: u64, level: u8) -> usize;
+    /// What `entry`, read at `level`, does.
+    fn desc(entry: u64, level: u8) -> Desc;
+    /// The physical address `entry` points at.
+    fn entry_phys(entry: u64) -> u64;
+    /// The portable flags of `entry` (`PageFlags`' x86_64 values).
+    fn entry_flags(entry: u64) -> PageFlags;
+    /// Whether the root translates `va`.
+    fn va_ok(va: u64) -> bool;
+    /// A table descriptor for the table at `pa`: what the kernel's mapper
+    /// writes, for the synthetic cores (`synth`).
+    fn table_entry(pa: u64) -> u64;
+    /// A leaf that maps `pa` at `va` with `flags` (`PageFlags` bits).
+    fn leaf_entry(va: u64, pa: u64, flags: u64) -> u64;
+}

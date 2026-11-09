@@ -132,6 +132,51 @@ canonical RIP. A saved RIP that is non-canonical anyway reaches neither
 `sysretq` nor `iretq`: after its `cli` the exit tests it and kills the
 process with `SIGSEGV` on the kernel GS, before any `swapgs`.
 
+### 1.1 aarch64
+
+`svc #0` from EL0 takes the lower-EL synchronous vector of the port's one
+vector table (DESIGN §11.5), whose `TrapKind::Syscall` arm clears DAIF,
+calls `syscall_init::enter` (`src/proc/syscall_init_aarch64.rs`), and sets
+all of DAIF again before the exit. `scripts/gen_syscalls.py` writes the
+table below from one convention, from which it also generates the aarch64
+table's `NrRule` and the `NR_REG`, `ARG_REGS`, and `RET_REG` constants that
+the kernel's `trap::Abi` and `UserFrame::svc_entry` read the frame through
+(`crates/core/src/proc/syscall_table.rs`).
+
+<!-- gen_syscalls: begin aarch64-registers -->
+
+| Role | Register | Notes |
+|------|----------|--------|
+| trap | `svc #0` | from EL0 |
+| number | `x8` | the low 32 bits, read as unsigned, as Linux's arm64 `invoke_syscall` reads them (`NrRule::Low32`); asm-generic numbers |
+| arg 0 | `x0` | saved as `orig_x0` for a restart |
+| arg 1 | `x1` | |
+| arg 2 | `x2` | |
+| arg 3 | `x3` | |
+| arg 4 | `x4` | |
+| arg 5 | `x5` | |
+| return | `x0` | the result or `-errno`, as on x86_64 (§2) |
+
+<!-- gen_syscalls: end aarch64-registers -->
+
+The numbers are the asm-generic table
+(`include/uapi/asm-generic/unistd.h`) that Linux uses on arm64 and that
+musl's aarch64 port and static Linux binaries call: the §3 table's aarch64
+column, where `open`, `dup2`, and `fork` have no number and the
+vibeOS-specific `psinfo` is 500, as on x86_64. The
+entry reads the number as Linux's arm64 `invoke_syscall` does, the low 32
+bits of `x8` read as unsigned (`UserFrame::svc_entry`), so the high half of
+`x8` is ignored and no number is negative; a number that names no call
+returns `-ENOSYS`, as on x86_64. The entry saves `x0` in the frame's
+`orig_x0` and the number in `syscallno`, the two words after Linux's
+`user_pt_regs` (`vibeos::arch::aarch64::trap::UserFrame`). Each argument
+reaches its handler converted to its C type as on x86_64 (§1), in Linux's
+arm64 register order, which differs only for raw `clone`: `tls` in `x3`
+and `child_tid` in `x4` (§3). The result is stored in `x0`, and an error is
+`-errno` there, with the values and the -4095 to -1 range of x86_64 (§2).
+A restartable syscall resumes by reloading `x0` from `orig_x0` and moving
+the PC back 4 bytes, the length of `svc` (`SyscallAbi::restart`).
+
 ---
 
 ## 2. Return and errno

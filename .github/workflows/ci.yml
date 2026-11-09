@@ -258,6 +258,8 @@ jobs:
           cargo clippy --bin vibeos --features kernel_tests -- -D warnings
           cargo clippy --bin vibeos --features vibefs_crash -- -D warnings
           cargo clippy --bin vibeos --features panic_test -- -D warnings
+          cargo clippy --bin vibeos --features early_fault_test -- -D warnings
+          cargo clippy --bin vibeos --features kstack_overflow_test -- -D warnings
           cargo clippy --bin vibeos --features gp_test -- -D warnings
           cargo clippy --bin vibeos --features panic_nest_test -- -D warnings
           cargo clippy --bin vibeos --features panic_stop_test -- -D warnings
@@ -282,6 +284,8 @@ jobs:
           make ARCH=aarch64 check-hooks
           cargo clippy --bin vibeos --target aarch64-unknown-none-softfloat --features kernel_tests -- -D warnings
           cargo clippy --bin vibeos --target aarch64-unknown-none-softfloat --features kernel_shell -- -D warnings
+          cargo clippy --bin vibeos --target aarch64-unknown-none-softfloat --features early_fault_test -- -D warnings
+          cargo clippy --bin vibeos --target aarch64-unknown-none-softfloat --features kstack_overflow_test -- -D warnings
 
       # ROADMAP §11.4: `switch_context_roundtrip` runs this port's switch
       # assembly on the arm64 runner's own host triple, so the leg runs it.
@@ -347,13 +351,13 @@ jobs:
             runner: ubuntu-26.04
             apt: qemu-system-x86 ovmf-generic
             tier: e2e-1
-            targets: test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-qmp
+            targets: test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-kstack-overflow test-qmp
             jobs: 2
           - arch: x86_64
             runner: ubuntu-26.04
             apt: qemu-system-x86 ovmf-generic
             tier: e2e-2
-            targets: test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-panic-stop test-e2e-power
+            targets: test-e2e-gp test-e2e-early-fault test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-panic-stop test-e2e-power
             jobs: 2
           - arch: x86_64
             runner: ubuntu-26.04
@@ -481,11 +485,35 @@ jobs:
             tier: forensics
             targets: test-forensics
             jobs: 2
+          - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
+            tier: kernel-hhdm
+            targets: test-kernel-hhdm
+            jobs: 2
           - arch: aarch64
             runner: ubuntu-26.04-arm
             apt: qemu-system-arm qemu-efi-aarch64
             tier: e2e-1
-            targets: test-e2e
+            targets: test-e2e test-e2e-isa-floor test-e2e-early-fault
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: e2e-2
+            targets: test-e2e-panic test-e2e-panic-stop test-e2e-panic-stop-gic2 test-e2e-kstack-overflow
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: forensics
+            targets: test-forensics
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-hhdm
+            targets: test-kernel-hhdm
             jobs: 2
           - arch: aarch64
             runner: ubuntu-26.04-arm

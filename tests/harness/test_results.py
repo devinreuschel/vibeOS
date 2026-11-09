@@ -11,6 +11,7 @@ from unittest import mock
 from tests.harness import frame, results, run_e2e, run_ktest
 from tests.harness.harness import (
     ISA_DEBUG_PASS,
+    HarnessError,
     QemuConfig,
     RunResult,
     overlay_env,
@@ -269,6 +270,56 @@ class TestResults(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 results.run_main(raising)
             self.assertTrue((Path(d) / "x86_64-test-kernel.json").is_file())
+
+    def test_weak_order_counts_recorded_even_on_fail(self) -> None:
+        """ROADMAP §11.7: `weak_order_probe`'s info line becomes a
+        `weak_order` row, kept when the boot fails, and reaches the summary."""
+        info = ("vibeOS: ktest: info weak_order_probe: mp iters=10000000 weak=7 "
+                "lb iters={} weak=0 drained=true stopped=true")
+
+        def boot(lb: int, verdict: str) -> RunResult:
+            return RunResult(
+                lines=[
+                    K("vibeOS: block: vda 8192 sectors"),
+                    K("vibeOS: block: vdap1 128 sectors"),
+                    K("vibeOS: block: vdap2 7647 sectors"),
+                    K("vibeOS: time: lapic_timer ok (periodic)"),
+                    K("vibeOS: ktest: begin 1"),
+                    K("vibeOS: ktest: run weak_order_probe 660000"),
+                    K(info.format(lb)),
+                    # A user program's copy is not recorded.
+                    info.format(5),
+                    K(f"vibeOS: ktest: {verdict}"),
+                    K("vibeOS: stack: report 0 sizes 0 lost"),
+                    K("vibeOS: ktest: end"),
+                ],
+                exit_code=ISA_DEBUG_PASS,
+            )
+
+        cfg = QemuConfig(iso="x.iso", smp=4, extra=("-accel", "tcg"))
+        with tempfile.TemporaryDirectory() as d, overlay_env({}, clear=True):
+            r = results.Results("test-smp-stress", "aarch64", out_dir=Path(d))
+            with mock.patch.object(
+                run_ktest, "run_qemu_until_exit",
+                side_effect=(boot(9000, "ok weak_order_probe"),
+                             boot(0, "FAIL weak_order_probe: mp 10000000 lb 0")),
+            ):
+                run_ktest._ktest_boot(cfg, timeout=1.0, persist_reboot=False)
+                with self.assertRaises(HarnessError):
+                    run_ktest._ktest_boot(cfg, timeout=1.0, persist_reboot=False)
+            data = _load(r.write())
+            text = results.summary(d)
+        self.assertEqual(data["weak_order"], [
+            {"mp_iters": 10_000_000, "mp_weak": 7, "lb_iters": 9000, "lb_weak": 0},
+            {"mp_iters": 10_000_000, "mp_weak": 7, "lb_iters": 0, "lb_weak": 0},
+        ])
+        self.assertIn("| `test-smp-stress` | 10000000 | 7 | 9000 | 0 |", text)
+        self.assertIn("| `test-smp-stress` | 10000000 | 7 | 0 | 0 |", text)
+
+    def test_summary_without_weak_order_has_no_table(self) -> None:
+        with tempfile.TemporaryDirectory() as d, overlay_env({}, clear=True):
+            results.Results("test-kernel", out_dir=Path(d)).write()
+            self.assertNotIn("Weak-order", results.summary(d))
 
     def test_summary_table_lists_retries(self) -> None:
         with tempfile.TemporaryDirectory() as d, overlay_env({}, clear=True):

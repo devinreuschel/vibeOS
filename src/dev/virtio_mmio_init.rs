@@ -18,6 +18,7 @@ use vibeos::virtio::{
     MMIO_OFF_STATUS, MMIO_OFF_VERSION, VENDOR_ID, modern_pci_id,
 };
 
+use crate::arch::current::Arch;
 use crate::dev_init;
 use crate::machine_init;
 use crate::pci_init;
@@ -104,8 +105,13 @@ pub(crate) fn config_va(base: u64) -> u64 {
     base.wrapping_add(u64::from(MMIO_OFF_CONFIG))
 }
 
+/// InterruptStatus, through `virtio::read_isr`: ordered before the
+/// used-ring reads that follow it (DESIGN §4.7).
 pub(crate) fn isr_bits(base: u64) -> u32 {
-    r32(base, MMIO_OFF_ISR)
+    // SAFETY: invariant I54: `base` is a virtio-mmio window `map_mmio`
+    // mapped uncached for this bound device, and InterruptStatus a register
+    // inside it; established by `pci_init::map_mmio`.
+    u32::from_le(unsafe { virtio::read_isr::<Arch, u32>(isr_va(base) as *const u32) })
 }
 
 pub(crate) fn ack_isr(base: u64) {
@@ -152,7 +158,10 @@ pub fn publish() {
     while i < n {
         let m = desc.virtio_mmio[i];
         i = i.saturating_add(1);
-        if m.size == 0 {
+        // The register block runs to `MMIO_OFF_CONFIG`, where the device
+        // config starts; a smaller window would put the queue registers
+        // on whatever follows it.
+        if m.size <= u64::from(MMIO_OFF_CONFIG) {
             continue;
         }
         let Some(vid) = peek(m.base, m.size) else {
@@ -171,6 +180,7 @@ pub fn publish() {
         d.class = CLASS_MMIO;
         d.intid = m.irq;
         d.intid_edge = m.irq_edge;
+        d.dma_coherent = m.dma_coherent;
         d.resources[0] = Resource {
             kind: ResourceKind::Memory,
             bar: 0,

@@ -28,6 +28,7 @@ pub const MAX_VIRTIO_MMIO: usize = 32;
 pub const MAX_MSI_MAP: usize = 8;
 /// `interrupt-map` rows on one host (QEMU `virt`: 16).
 pub const MAX_INTERRUPT_MAP: usize = 16;
+pub use crate::limits::MAX_PCI_WINDOWS;
 
 /// How secondaries start (device-tree `/psci` or `enable-method`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +61,15 @@ impl PhysRange {
 
     pub fn range(self) -> Option<Range<u64>> {
         Some(self.start..self.end()?)
+    }
+
+    /// `[phys, phys + len)` is non-empty and lies whole inside this window;
+    /// `false` when either end overflows.
+    pub fn contains(self, phys: u64, len: u64) -> bool {
+        match (self.end(), phys.checked_add(len)) {
+            (Some(end), Some(last)) => len != 0 && phys >= self.start && last <= end,
+            _ => false,
+        }
     }
 }
 
@@ -151,6 +161,16 @@ pub struct PciHost {
     pub msi_map_len: usize,
     pub interrupt_map: [InterruptMapEntry; MAX_INTERRUPT_MAP],
     pub interrupt_map_len: usize,
+    /// The CPU-physical memory windows of the host's `ranges` (32- and
+    /// 64-bit memory space; I/O space is not kept).
+    pub windows: [PhysRange; MAX_PCI_WINDOWS],
+    pub window_len: usize,
+}
+
+impl PciHost {
+    pub fn windows(&self) -> &[PhysRange] {
+        self.windows.get(..self.window_len).unwrap_or(&[])
+    }
 }
 
 /// A simple MMIO device (PL031, fw-cfg, virtio-mmio).
@@ -223,6 +243,8 @@ pub struct MachineDesc {
     pub dropped_virtio_mmio: u32,
     /// `msi-map` rows past [`MAX_MSI_MAP`] in an accepted host map.
     pub dropped_msi_rows: u32,
+    /// Memory-space `ranges` rows past [`MAX_PCI_WINDOWS`] on one host.
+    pub dropped_pci_windows: u32,
     /// MADT interrupt source overrides past [`acpi::MAX_ISOS`], which the
     /// MADT parse drops.
     pub dropped_isos: u32,
@@ -272,6 +294,7 @@ impl Default for MachineDesc {
             dropped_consoles: 0,
             dropped_virtio_mmio: 0,
             dropped_msi_rows: 0,
+            dropped_pci_windows: 0,
             dropped_isos: 0,
         }
     }
@@ -408,6 +431,15 @@ impl MachineDesc {
 
     pub fn pci_hosts(&self) -> &[PciHost] {
         self.pci_hosts.get(..self.pci_host_count).unwrap_or(&[])
+    }
+
+    /// `[phys, phys + len)` lies whole inside one memory window a PCI
+    /// host's `ranges` names.
+    pub fn in_pci_window(&self, phys: u64, len: u64) -> bool {
+        self.pci_hosts()
+            .iter()
+            .flat_map(PciHost::windows)
+            .any(|w| w.contains(phys, len))
     }
 
     pub fn console_uart(&self) -> Option<u64> {

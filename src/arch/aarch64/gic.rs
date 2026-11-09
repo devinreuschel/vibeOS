@@ -2,13 +2,15 @@
 
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::arch::Barriers;
 use vibeos::irq::{IrqChip, IrqError, IrqSpecifier, gic};
 use vibeos::log::Level;
 use vibeos::machine::PhysRange;
 use vibeos::paging::PhysAddr;
 
+use super::Arch;
 use super::gic_common::{
-    CHIP, GICR_TYPER, Gic, Kind, LPI_BASE, LPI_SLOTS, SPI_SLOTS, XBASER_SHARE_IS, alloc_pages,
+    CHIP, GICR_TYPER, Gic, Kind, LPI_BASE, LPI_SLOTS, SPI_SLOTS, XBASER_SHARE_IS,
     clean_table_if_needed, gic, mmio32, mmio32w, mmio64, mmio64w, note_shareability,
 };
 use super::gic_its::{LPI_EVENT, discard_lpi, init_its, its_live, map_collection, movi_lpi};
@@ -69,7 +71,7 @@ const GICR_SYNCR: u64 = 0x00C0;
 /// GICR_PROPBASER / GICR_PENDBASER InnerCache (bits [9:7]): Normal Inner
 /// write-back, read- and write-allocate, `0b111` (IHI 0069).
 const GICR_XBASER_INNER_WB: u64 = (0b11 << 8) | (0b01 << 7);
-/// LPI property and pending tables are 16 pages each (`alloc_pages(16)`).
+/// LPI property and pending tables are 16 pages each (`paging_init::alloc_zeroed(4)`).
 const LPI_TABLE_BYTES: usize = 16 * 4096;
 
 static CHIP_OBJ: GicChip = GicChip;
@@ -86,6 +88,28 @@ struct GicChip;
 
 pub fn chip() -> Option<&'static dyn IrqChip> {
     CHIP_DYN.try_get().copied()
+}
+
+/// The priority byte the GIC holds for `intid`: this CPU's redistributor
+/// for an SGI or PPI on GICv3, the distributor otherwise (IHI 0069,
+/// IHI 0048). `None` before `init` or for an LPI or special INTID.
+#[cfg(feature = "kernel_tests")]
+pub fn priority_readback(intid: u32) -> Option<u8> {
+    let g = gic()?;
+    if !(gic::is_sgi(intid) || gic::is_ppi(intid) || gic::is_spi(intid)) {
+        return None;
+    }
+    let (base, off) = if g.kind == Kind::V3 && intid < 32 {
+        (this_redist(g)?, GICR_IPRIORITYR)
+    } else {
+        (g.dist, GICD_IPRIORITYR)
+    };
+    let word = u64::from(intid & !3);
+    // SAFETY: `base` is the mapped GICD, or this CPU's mapped GICR frame,
+    // and `off + word` is inside its IPRIORITYR array for a valid
+    // INTID; established by `arch::aarch64::gic::init`.
+    let v = unsafe { mmio32(base, off.wrapping_add(word)) };
+    u8::try_from((v >> ((intid & 3) * 8)) & 0xFF).ok()
 }
 
 fn map_mmio(r: PhysRange) -> Option<u64> {
@@ -176,6 +200,9 @@ pub unsafe fn init() {
     }
 }
 
+/// GICv2 distributor and CPU interface. Arm ARM DDI0487, "Memory barriers", the DSB:
+/// the `dsb sy` completes the Device writes above before what follows;
+/// herd7 does not model Device memory.
 fn init_v2(g: &Gic) {
     // SAFETY: `g.dist` / `g.cpu_or_redist` are the mapped GICD/GICC. established here.
     unsafe {
@@ -419,7 +446,10 @@ unsafe fn program_sgi_ppi(rd: u64) {
 /// Program redistributor LPI tables; never clear EnableLPIs. Shared
 /// property table, per-CPU pending table. `false` when a table could not be
 /// allocated. A redistributor without physical LPIs has no tables to program,
-/// so that is `true` and nothing is written.
+/// so that is `true` and nothing is written. Arm ARM DDI0487, "Memory barriers",
+/// the DSB: the `dsb sy` completes the property
+/// table's stores before the redistributor, a non-coherent reader herd7
+/// does not model, is pointed at it.
 ///
 /// # Safety
 /// `g` is the live GIC; `rd` is this CPU's redistributor.
@@ -433,7 +463,7 @@ unsafe fn enable_lpi(g: &Gic, rd: u64) -> bool {
     let prop = if existing != 0 {
         existing
     } else {
-        let Some(prop) = alloc_pages(16) else {
+        let Some(prop) = crate::paging_init::alloc_zeroed(4) else {
             crate::klog!(Level::Error, "vibeOS: gic: lpi prop table");
             return false;
         };
@@ -463,7 +493,7 @@ unsafe fn enable_lpi(g: &Gic, rd: u64) -> bool {
         }
     };
     // GICR_PENDBASER is 64 KiB-aligned (IHI 0069); 16 pages gives that.
-    let Some(pend) = alloc_pages(16) else {
+    let Some(pend) = crate::paging_init::alloc_zeroed(4) else {
         crate::klog!(Level::Error, "vibeOS: gic: lpi pend table");
         return false;
     };
@@ -592,10 +622,13 @@ fn eoi(g: &Gic, eoir: u32) {
             unsafe { mmio32w(g.cpu_or_redist, GICC_EOIR, eoir) };
         }
         Kind::V3 => {
-            // SAFETY: ICC_EOIR1_EL1. established here.
+            // SAFETY: ICC_EOIR1_EL1. established here. The `isb` makes the
+            // priority drop take effect before the handler body can unmask
+            // IRQs, as Linux's `gic_eoi_irq` does.
             unsafe {
                 core::arch::asm!(
                     "msr ICC_EOIR1_EL1, {0}",
+                    "isb",
                     in(reg) u64::from(eoir),
                     options(nostack, preserves_flags)
                 );
@@ -635,6 +668,11 @@ pub fn cpu_ok(hw_id: u64) -> Result<(), gic::SgiError> {
     Ok(())
 }
 
+/// Write `ICC_SGI1R_EL1`. Arm ARM DDI0487, "Synchronization requirements for
+/// AArch64 System registers" and "Memory barriers" (the DSB): a
+/// `dmb` does not order a System register write, so `dsb ishst` completes
+/// the stores the SGI publishes before the write, and `isb` makes the write
+/// take effect (DESIGN §7.6). herd7 does not model System registers.
 fn write_sgi1r(val: u64) {
     // SAFETY: DESIGN §7.6: dsb ishst; ICC_SGI1R; isb. established here.
     unsafe {
@@ -648,11 +686,27 @@ fn write_sgi1r(val: u64) {
     }
 }
 
+/// GICv2's SGI: one store to `GICD_SGIR` through the ordered
+/// `Barriers::mmio_write`, whose `dmb oshst` makes the stores the SGI
+/// publishes visible before the distributor sees it (DESIGN §4.7, §7.6).
+fn write_sgir(dist: u64, sgir: u32) {
+    let reg = dist.wrapping_add(GICD_SGIR) as *mut u32;
+    // SAFETY: `GICD_SGIR` is a write-only register of the distributor that
+    // `gic::init` mapped at `dist`, which stays mapped while the kernel
+    // runs, and a write only raises an SGI; established by
+    // `crate::arch::aarch64::gic::init`.
+    unsafe { Arch::mmio_write(reg, sgir) };
+}
+
+/// SGI to the calling CPU.
 pub fn send_sgi(intid: u32) {
-    send_sgi_to(0, intid);
+    send_sgi_to(crate::arch::aarch64::percpu::cpu_id_hint(), intid);
 }
 
 /// SGI to logical CPU `cpu` (its `PerCpuRemote.apic_id` is the MPIDR).
+/// On GICv2 the `GICD_SGIR` write is Device memory: Arm ARM DDI0487, "Memory barriers"
+/// (the DSB) orders the stores the SGI publishes before it, which herd7
+/// does not model. GICv3 goes through `write_sgi1r`.
 pub fn send_sgi_to(cpu: u32, intid: u32) {
     let Some(g) = gic() else {
         return;
@@ -675,38 +729,31 @@ pub fn send_sgi_to(cpu: u32, intid: u32) {
         },
         Kind::V2 => {
             let bit = (hw & 7) as u32;
-            let sgir = (intid & 0xF) | (1 << (16 + bit));
-            // SAFETY: ordered mmio_write (DESIGN §4.7). established here.
-            unsafe {
-                core::arch::asm!("dsb oshst", options(nostack, preserves_flags));
-                mmio32w(g.dist, GICD_SGIR, sgir);
-            }
+            write_sgir(g.dist, (intid & 0xF) | (1 << (16 + bit)));
         }
     }
 }
 
 /// SGI to every other CPU (ICC_SGI1R IRM, or GICD_SGIR filter 01).
+/// On GICv2 the `GICD_SGIR` write is Device memory: Arm ARM DDI0487, "Memory barriers"
+/// (the DSB) orders the stores the SGI publishes before it, which herd7
+/// does not model. GICv3 goes through `write_sgi1r`.
 pub fn send_sgi_others(intid: u32) {
     let Some(g) = gic() else {
         return;
     };
     match g.kind {
         Kind::V3 => write_sgi1r((u64::from(intid & 0xF) << 24) | (1u64 << 40)),
-        Kind::V2 => {
-            let sgir = (intid & 0xF) | (1 << 24);
-            // SAFETY: ordered mmio_write (DESIGN §4.7). established here.
-            unsafe {
-                core::arch::asm!("dsb oshst", options(nostack, preserves_flags));
-                mmio32w(g.dist, GICD_SGIR, sgir);
-            }
-        }
+        Kind::V2 => write_sgir(g.dist, (intid & 0xF) | (1 << 24)),
     }
 }
 
 /// Per-CPU redistributor / CPU interface on a secondary. `false` when this
 /// CPU has no redistributor frame or its LPI tables could not be allocated;
 /// the caller must park it before it reports ready, so the boot CPU sees a
-/// timed-out AP.
+/// timed-out AP. On GICv2, Arm ARM DDI0487, "Memory barriers", the DSB: the `dsb sy`
+/// completes the Device writes above before what follows; herd7 does not
+/// model Device memory.
 ///
 /// # Safety
 /// This CPU's GIC interface is unused; IRQs masked.
@@ -792,6 +839,10 @@ pub fn set_spi_edge(intid: u32, edge: bool) {
         return;
     }
     enable_intid(g, intid, false);
+    // The ICFGR write needs the disable to have landed (GICD_CTLR.RWP,
+    // which reads 0 on GICv2).
+    // SAFETY: GICD_CTLR of the mapped distributor. established here.
+    unsafe { wait_rwp(g.dist, GICD_CTLR, GICD_CTLR_RWP, "gicd icenabler") };
     let off = GICD_ICFGR + u64::from(intid / 16) * 4;
     let shift = (intid % 16) * 2;
     let bits = if edge { GICD_ICFGR_EDGE } else { 0 };

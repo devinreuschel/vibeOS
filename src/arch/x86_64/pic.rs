@@ -16,7 +16,9 @@ use crate::x86;
 /// Skips port I/O when FADT says there is no legacy 8259.
 ///
 /// # Safety
-/// IRQs should already be off. Call before `lidt`. ACPI walk already ran.
+/// IRQs should already be off. Call before `idt::init`: the early IDT
+/// reports only exceptions, and IF=0 keeps every 8259 vector out of it.
+/// ACPI walk already ran.
 pub unsafe fn remap_and_mask() {
     let legacy = crate::acpi_init::info()
         .and_then(|i| i.fadt)

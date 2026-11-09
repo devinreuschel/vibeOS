@@ -23,12 +23,11 @@ use vibeos::desc::InterruptFrame;
 use vibeos::fmt_util::{self, StackBuf};
 use vibeos::irq::stop::{CrashRegs, StopHow};
 use vibeos::log::DUMP_LAST;
-use vibeos::log::backtrace::{self, StackRange, WalkEnd};
+use vibeos::log::backtrace::{self, KNOWN_STACKS, StackRange, WalkEnd};
 use vibeos::log::line::LINE_CAP;
 use vibeos::log::vmcore::PANIC_LINE_CAP;
 use vibeos::log::vmcore::sig::PanicLine;
 use vibeos::marker;
-use vibeos::symtab;
 
 use crate::per_cpu_init;
 use crate::serial::raw;
@@ -84,50 +83,47 @@ pub fn note_boot_stack(rsp: u64) {
     BOOT_STACK_HI.store(hi, Ordering::Relaxed);
 }
 
-/// The stacks a backtrace may follow `rbp` into (DESIGN §2.5 step 4): the
+/// The stacks a backtrace may follow the frame pointer into (DESIGN §2.5
+/// step 4), as `vibeos::log::backtrace::known_stacks` orders them: the
 /// current thread's KVA stack, the recorded boot stack, and this CPU's
-/// four IST stacks and fallback RSP0 stack. Fills `out` from the front
-/// and returns how many it filled. IF=0 callers only (DESIGN §2.9 rule 5).
-pub(crate) fn known_stacks(out: &mut [StackRange; 8]) -> usize {
-    let mut n = 0usize;
-    let mut push = |r: StackRange| {
-        if r.lo < r.hi
-            && let Some(slot) = out.get_mut(n)
-        {
-            *slot = r;
-            n += 1;
-        }
-    };
+/// own (`arch::gdt::this_cpu_stacks`: x86_64's four IST stacks and
+/// fallback RSP0 stack, aarch64's overflow stack). Fills `out` from the
+/// front and returns how many it filled. IF=0 callers only (DESIGN §2.9
+/// rule 5).
+pub(crate) fn known_stacks(out: &mut [StackRange; KNOWN_STACKS]) -> usize {
     let cur = crate::arch::current_tcb();
-    if !cur.is_null() {
+    let thread = if cur.is_null() {
+        None
+    } else {
         // SAFETY: invariant I9: a non-null `current` names a `Tcb` that
         // stays in `SCHED` while it runs, and its `stack` is set before it
         // first ran and dropped only after its CPU switched off it; this
         // is that CPU, so the stack is live; established by
         // `thread_init::switch_now`.
         let t = unsafe { &*cur };
-        if let Some(st) = t.stack.as_ref() {
-            push(StackRange::new(st.base().as_u64(), st.top().as_u64()));
-        }
-    }
+        t.stack
+            .as_ref()
+            .map(|st| StackRange::new(st.base().as_u64(), st.top().as_u64()))
+    };
     // Relaxed: the stop before the dump orders the BSP's stores; pairs with nothing.
-    push(StackRange::new(
+    let boot = StackRange::new(
         BOOT_STACK_LO.load(Ordering::Relaxed),
         BOOT_STACK_HI.load(Ordering::Relaxed),
-    ));
-    if let Some(cpu) = per_cpu_init::try_current() {
-        for (top, pages) in crate::arch::gdt::this_cpu_stacks(cpu) {
-            push(StackRange::below(top, pages));
+    );
+    match per_cpu_init::try_current() {
+        Some(cpu) => {
+            let own = crate::arch::gdt::this_cpu_stacks(cpu);
+            backtrace::known_stacks(thread, boot, &own, out)
         }
+        None => backtrace::known_stacks(thread, boot, &[], out),
     }
-    n
 }
 
 /// Walk the frame-pointer chain from `rip` and `rbp` through the known
 /// stacks only (`vibeos::log::backtrace::walk`), handing each frame's
 /// address to `out`. IF=0 callers only.
 pub(crate) fn walk_known(rip: u64, rbp: u64, out: impl FnMut(u64)) -> (usize, WalkEnd) {
-    let mut stacks = [StackRange::EMPTY; 8];
+    let mut stacks = [StackRange::EMPTY; KNOWN_STACKS];
     let n = known_stacks(&mut stacks);
     let known = stacks.get(..n).unwrap_or(&[]);
     let read = |a: u64| {
@@ -142,15 +138,14 @@ pub(crate) fn walk_known(rip: u64, rbp: u64, out: impl FnMut(u64)) -> (usize, Wa
     backtrace::walk(rip, rbp, known, in_image, read, out)
 }
 
-/// The kernel symbol that holds `addr`, as the dump prints it: `None` for
-/// an address the table places more than 64 KiB past its symbol.
+/// The kernel symbol a backtrace frame at `addr` is in, as the dump prints
+/// it (`vibeos::symtab::frame_name`; `ret` for a return address).
 #[cfg_attr(
     not(feature = "kernel_tests"),
     expect(dead_code, reason = "the in-guest backtrace test is its only caller")
 )]
-pub(crate) fn symbol_name(addr: u64) -> Option<&'static str> {
-    let e = crate::log::ksyms::lookup(addr)?;
-    (symtab::offset(&e, addr) < 0x1_0000).then_some(e.name)
+pub(crate) fn symbol_name(addr: u64, ret: bool) -> Option<&'static str> {
+    crate::log::ksyms::frame_name(addr, ret).map(|(name, _)| name)
 }
 
 /// Claim the dump, then stop the others, then re-init serial (DESIGN §2.5
@@ -282,21 +277,19 @@ fn hex_trim(w: &mut StackBuf<'_>, n: u64) {
     w.push_bytes(&s[i..]);
 }
 
-fn print_frame_addr(addr: u64) {
+/// One backtrace line: `addr`, then the function it is in and the
+/// offset, by `vibeos::symtab::frame_name`'s rule (`ret` for a return
+/// address, every frame but the first).
+fn print_frame_addr(addr: u64, ret: bool) {
     line(|w| {
         w.push_bytes(b"  0x");
         hex(w, addr);
-        if let Some(e) = crate::log::ksyms::lookup(addr) {
-            let off = symtab::offset(&e, addr);
-            // Sparse tables (panic-test) would otherwise pin a RIP to the
-            // previous function with a huge offset.
-            if off < 0x1_0000 {
-                w.push_bytes(b" ");
-                w.push_bytes(e.name.as_bytes());
-                if off != 0 {
-                    w.push_bytes(b"+0x");
-                    hex_trim(w, off);
-                }
+        if let Some((name, off)) = crate::log::ksyms::frame_name(addr, ret) {
+            w.push_bytes(b" ");
+            w.push_bytes(name.as_bytes());
+            if off != 0 {
+                w.push_bytes(b"+0x");
+                hex_trim(w, off);
             }
         }
     });
@@ -304,7 +297,49 @@ fn print_frame_addr(addr: u64) {
 
 fn dump_backtrace(rip: u64, rbp: u64) {
     raw::write_owner(b"vibeOS: backtrace:");
-    walk_known(rip, rbp, print_frame_addr);
+    let mut first = true;
+    walk_known(rip, rbp, |a| {
+        print_frame_addr(a, !first);
+        first = false;
+    });
+}
+
+/// An exception taken before the full exception setup (ROADMAP §11.1,
+/// F136): one CPU, no threads and no stop IPIs yet, so no dump. One line on
+/// raw serial, `vibeOS: panic: early`, the row both ports share: `vec` is
+/// the x86_64 vector or the aarch64 exception class, `err` the error code
+/// or `ESR`, `pc` the faulting PC, `addr` CR2 or `FAR`, `sp` the
+/// interrupted stack pointer. Then [`finish`]'s halted line, pvpanic where
+/// boot has probed it, and the halt.
+///
+/// On aarch64 before `cpu::check_isa_floor` has passed, the CPU may lack
+/// FEAT_LSE, and `claim_dump` and `write_owner` are LSE instructions there,
+/// so the same two lines go out through `raw::put_boot_line`, which runs no
+/// atomic read-modify-write, and the CPU halts: no other CPU runs yet.
+pub fn early_exception(vec: u64, err: u64, pc: u64, addr: u64, sp: u64) -> ! {
+    crate::arch::current::irq_disable();
+    let mut buf = [0u8; LINE_CAP];
+    let mut w = StackBuf::new(&mut buf);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "`StackBuf` truncates and never fails, so only a formatter's own error lands here, leaving a shorter line and nothing to act on (DESIGN §2.5)"
+    )]
+    let _ = write!(
+        w,
+        "vibeOS: panic: early vec={vec:#x} err={err:#x} pc={pc:#x} addr={addr:#x} sp={sp:#x}"
+    );
+    w.mark_cut();
+    #[cfg(target_arch = "aarch64")]
+    if !crate::arch::aarch64::cpu::isa_ok() {
+        raw::put_boot_line(w.as_bytes());
+        raw::put_boot_line(b"vibeOS: panic: halted");
+        crate::arch::current::halt();
+    }
+    if raw::claim_dump() {
+        raw::write_owner(w.as_bytes());
+        finish();
+    }
+    crate::arch::current::halt();
 }
 
 /// The dump's end, then DESIGN §2.5 step 7: pvpanic's panicked event,
@@ -457,10 +492,10 @@ pub fn exception_halt(
     finish();
 }
 
-#[cfg(target_arch = "aarch64")]
-/// An exception dump for a context with no x86 hardware frame (aarch64's
-/// `TrapFrame`): `args` is the first line after `vibeOS: `, and `regs` the
-/// interrupted registers. Shares [`exception_halt`]'s dump and halt.
+/// An exception dump whose first line is `args` after `vibeOS: `, with
+/// `regs` the interrupted registers: aarch64's `TrapFrame` exceptions, and
+/// on both architectures the kernel stack overflow line (ROADMAP §11.3).
+/// Shares [`exception_halt`]'s dump and halt.
 pub fn exception_halt_args(regs: CrashRegs, args: fmt::Arguments<'_>) -> ! {
     begin_dump(regs);
     first_line(regs, |w| {

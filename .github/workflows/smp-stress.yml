@@ -27,6 +27,8 @@ jobs:
       VIBEOS_QEMU_VERSION: "10.2.1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: install host tools
         run: |
@@ -92,7 +94,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: results-x86_64-stress
+          name: results-x86_64-high-cpu-smp-stress
           path: build/results/
           if-no-files-found: ignore
           retention-days: 90
@@ -101,7 +103,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: runner-stress
+          name: runner-high-cpu-smp-stress
           path: build/runner.json
           if-no-files-found: ignore
           retention-days: 90
@@ -119,6 +121,8 @@ jobs:
       VIBEOS_QEMU_ACCEL: tcg
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: install host tools
         run: |
@@ -176,7 +180,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: results-aarch64-stress
+          name: results-aarch64-high-cpu-smp-stress-aarch64
           path: build/results/
           if-no-files-found: ignore
           retention-days: 90
@@ -185,7 +189,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: runner-stress-aarch64
+          name: runner-high-cpu-smp-stress-aarch64
           path: build/runner.json
           if-no-files-found: ignore
           retention-days: 90
@@ -207,6 +211,8 @@ jobs:
       VIBEOS_QEMU_VERSION: "10.2.1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: install host tools
         run: |
@@ -303,6 +309,8 @@ jobs:
       VIBEOS_QEMU_VERSION: "10.2.1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: install host tools
         run: |
@@ -398,6 +406,8 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: install host tools
         run: |
@@ -446,7 +456,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: results-x86_64-nightly-canary
+          name: results-x86_64-latest-nightly-canary
           path: build/results/
           if-no-files-found: ignore
           retention-days: 90
@@ -455,7 +465,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: runner-nightly-canary
+          name: runner-latest-nightly-canary
           path: build/runner.json
           if-no-files-found: ignore
           retention-days: 90
@@ -476,6 +486,8 @@ jobs:
     # refuses any cargo-fuzz but the version it pins.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: install rust nightly
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master

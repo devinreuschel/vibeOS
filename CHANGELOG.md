@@ -12,6 +12,15 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Added
 
+- aarch64: `make ARCH=aarch64 run` boots QEMU `virt` (TCG, or HVF on Apple Silicon) to the shell
+  with x86_64's markers ([ROADMAP §11.1](docs/ROADMAP.md#111-boot)).
+- aarch64 user mode: `/sbin/init`, `/bin/sh`, and `/bin/tests` run at EL0 on arm64 syscall
+  numbers ([ROADMAP §11.6](docs/ROADMAP.md#116-user-mode)).
+- aarch64 SMP: cores start through PSCI `CPU_ON`; TLB shootdown is broadcast TLBI
+  ([ROADMAP §11.4](docs/ROADMAP.md#114-smp-and-per-cpu)).
+- aarch64 devices: PL011, virtio-mmio and virtio-pci block, virtio input, PL031, `RNDR`, pvpanic
+  ([ROADMAP §11.5](docs/ROADMAP.md#115-devices)).
+- `VIBEOS_MACHINE` and `VIBEOS_FW_AARCH64` pick the aarch64 `-machine` and UEFI firmware.
 - aarch64 per-push CI on arm64 TCG, `make litmus`, and dual README quickstarts
   ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
 - aarch64 boot CPU: GICv2/v3, generic timer, full vector table, idle `wfi`
@@ -22,6 +31,22 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   ranges stay out of the buddy ([ROADMAP §11.5](docs/ROADMAP.md#115-devices)).
 - `make check` fails a Relaxed, Acquire, Release or AcqRel ordering with no
   comment naming what it pairs with ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
+- aarch64 ASIDs (box open until its HVF record): a context switch keeps the TLB; boot logs
+  `vibeOS: asid: <n>-bit` or `vibeOS: asid: off` ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
+- aarch64 non-coherent DMA (box open until its HVF record): clean and invalidate around each
+  transfer, device MMIO through ordered accessors ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
+- An aarch64 CPU whose cache writeback granule exceeds a page, or the granule frozen at `smp: done`,
+  prints `vibeOS: cpu: cwg above ...` and parks ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
+- A fault before the full IDT (x86_64) or vector table (aarch64) prints one
+  `vibeOS: panic: early vec=...` line and halts ([ROADMAP §11.1](docs/ROADMAP.md#111-boot)).
+- `make test-forensics ARCH=aarch64` reads aarch64 vmcores, and `make debug ARCH=aarch64`
+  attaches gdb ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
+- An aarch64 CPU without FEAT_LSE and FEAT_PAN halts at boot with
+  `vibeOS: cpu: isa floor (lse+pan) missing` ([ROADMAP §11.1](docs/ROADMAP.md#111-boot)).
+- An aarch64 panic stops the other CPUs under GICv2 as under GICv3
+  (`make test-e2e-panic-stop-gic2`) ([ROADMAP §11.3](docs/ROADMAP.md#113-interrupts-and-time)).
+- The harness fails each boot on its own architecture's failure lines, so an aarch64 `#DABT` or
+  `#UNDEF` fails the boot ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
 
 ### Changed
 

@@ -19,9 +19,11 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 VARIANTS = (
     "default",
     "panic",
+    "early-fault",
     "gp",
     "panic-nest",
     "panic-stop",
+    "kstack-overflow",
     "ktest",
     "vibefs-crash",
     "hang",
@@ -128,7 +130,9 @@ class NamedOutputsTest(unittest.TestCase):
         self.assertEqual(db.variables["KERNEL_ELF"], "build/kernels/vibeos-default.elf")
 
     def test_aarch64_elides_x86_only_variants(self) -> None:
-        # ROADMAP §11.7: aarch64 prebuilt is default + ktest; gp_test is x86.
+        # ROADMAP §11.7: aarch64 builds default, panic, panic-stop (§11.3), the
+        # §11.1 early-fault ISO, the §11.3 kstack-overflow ISO, ktest and the
+        # forensics tier's hang; gp_test and the nest dump are x86.
         proc = subprocess.run(
             ["make", "-pRrq", "-f", "Makefile", "ARCH=aarch64", ":"],
             cwd=ROOT,
@@ -143,7 +147,11 @@ class NamedOutputsTest(unittest.TestCase):
             [
                 "build/aarch64/kernels/vibeos-default.elf",
                 "build/aarch64/kernels/vibeos-panic.elf",
+                "build/aarch64/kernels/vibeos-early-fault.elf",
+                "build/aarch64/kernels/vibeos-panic-stop.elf",
+                "build/aarch64/kernels/vibeos-kstack-overflow.elf",
                 "build/aarch64/kernels/vibeos-ktest.elf",
+                "build/aarch64/kernels/vibeos-hang.elf",
             ],
         )
         self.assertNotIn("build/aarch64/kernels/vibeos-gp.elf", elfs)

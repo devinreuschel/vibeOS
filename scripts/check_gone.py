@@ -95,6 +95,7 @@ GONE: list[tuple[str, str]] = [
     ("stash_evict", "the block layer keeps only the orders DESIGN §10.2 names"),
     ("writeback_all", "the block layer keeps only the orders DESIGN §10.2 names"),
     ("set_hhdm_offset", "a `Buddy::new` argument replaces"),
+    ("HHDM_BASE", "the physmap base is the HHDM offset Limine reports"),
     ("from_phys", "`DmaBuffer` and `GuardedStack` are move-only"),
     ("DEFERRED", "every switch tail empties the"),
     ("MAX_DEFERRED", "every switch tail empties the"),

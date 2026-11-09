@@ -6,7 +6,8 @@
 //! output address, Contiguous[52], PXN[53], UXN[54]. `PageFlags` keeps
 //! x86_64's bit values; this module maps them.
 
-use crate::paging::{PageFlags, PhysAddr, VirtAddr};
+use crate::paging::{CoreFormat, Desc, PageFlags, PhysAddr, VirtAddr};
+use crate::proc::elf::EM_AARCH64;
 
 /// Levels of the walk; the root is level 4 (ARM L0).
 pub const LEVELS: u8 = 4;
@@ -184,6 +185,48 @@ pub const fn pte_flags(entry: u64) -> PageFlags {
 #[inline]
 pub const fn is_leaf(entry: u64, level: u8) -> bool {
     entry & DESC_VALID != 0 && (level == 1 || entry & DESC_PAGE == 0)
+}
+
+/// The core tool's view of this format for the kernel root (ROADMAP
+/// §11.7): TTBR1_EL1's tables, 48-bit VA (`T1SZ` 16), every root slot in
+/// the kernel half from [`KERNEL_VA_START`]. A block is allowed at levels 3
+/// and 2 (1 GiB and 2 MiB); a level-1 entry maps a page only with bit 1
+/// set, and a root entry is a table only (Arm ARM, "Translation table
+/// descriptor formats").
+pub struct Aarch64Ttbr1;
+
+impl CoreFormat for Aarch64Ttbr1 {
+    const E_MACHINE: u16 = EM_AARCH64;
+    const LEVELS: u8 = LEVELS;
+    const ENTRIES: usize = PTES_PER_TABLE;
+    const KERNEL_ROOT_FIRST: usize = 0;
+    const KERNEL_VA_START: u64 = KERNEL_VA_START;
+    fn index(va: u64, level: u8) -> usize {
+        index(VirtAddr(va), level)
+    }
+    fn desc(entry: u64, level: u8) -> Desc {
+        let bit1 = entry & DESC_TABLE != 0;
+        match (entry & DESC_VALID != 0, level, bit1) {
+            (true, 1, true) | (true, 2 | 3, false) => Desc::Leaf,
+            (true, 2..=4, true) => Desc::Table,
+            _ => Desc::None,
+        }
+    }
+    fn entry_phys(entry: u64) -> u64 {
+        pte_phys(entry).as_u64()
+    }
+    fn entry_flags(entry: u64) -> PageFlags {
+        pte_flags(entry)
+    }
+    fn va_ok(va: u64) -> bool {
+        va >= KERNEL_VA_START
+    }
+    fn table_entry(pa: u64) -> u64 {
+        make_table(PhysAddr(pa))
+    }
+    fn leaf_entry(va: u64, pa: u64, flags: u64) -> u64 {
+        make_pte(VirtAddr(va), PhysAddr(pa), PageFlags(flags))
+    }
 }
 
 /// Record table page `pa` in the next free slot of `tables`, which the

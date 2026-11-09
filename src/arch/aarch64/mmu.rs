@@ -26,6 +26,7 @@ global_asm!(
     "msr tcr_el1, x3",
     "msr ttbr1_el1, x0",
     "isb",
+    // Arm ARM DDI0487, "TLB maintenance requirements": herd7 does not model the TLB.
     "tlbi vmalle1",
     "dsb nsh",
     "isb",
@@ -169,13 +170,15 @@ fn trampoline() -> Option<(u64, [u64; 4], usize)> {
     }
 }
 
-/// Install `new_root` as TTBR1 through a reserved empty root.
+/// Install `new_root` as TTBR1 through a reserved empty root. Arm ARM
+/// DDI0487, "TLB maintenance requirements" and "Synchronization requirements
+/// for AArch64 System registers": herd7 does not model the TLB.
 ///
 /// # Safety
 /// `new_root` maps this CPU's code, stack, and everything the return
 /// touches. Boot CPU, IRQs off, still on Limine's tables.
 unsafe fn takeover_ttbr1(new_root: u64) {
-    let reserved = match super::secondary::alloc_zeroed_page() {
+    let reserved = match crate::paging_init::alloc_zeroed(0) {
         Some(pa) => pa,
         None => crate::boot::halt_with("vibeOS: paging: no reserved TTBR1"),
     };
@@ -193,6 +196,9 @@ unsafe fn takeover_ttbr1(new_root: u64) {
         crate::boot::halt_with("vibeOS: paging: ttbr0 tcr");
     }
     let (mair, tcr) = cpu::mair_tcr();
+    // Raw TTBR0 writes, not `asid::load_ttbr0`: they come before the ASID
+    // allocator and before any user root, load ASID-0 tables that hold no
+    // user mapping, and each is followed by `tlbi vmalle1` here.
     // SAFETY: `id` maps `tramp` executable at its PA, `reserved` and
     // `empty` are zeroed tables, and `new_root` maps the return and the
     // stack. established here.

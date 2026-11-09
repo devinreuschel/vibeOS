@@ -16,7 +16,7 @@
 # A row:
 #   name      the `Handlers` method and the user stub
 #   x86_64    the number; the key is omitted where Linux has none
-#   aarch64   likewise (`open`, `dup2`, `fork` and `psinfo` have none)
+#   aarch64   likewise (`open`, `dup2` and `fork` have none)
 #   args      in x86_64 (canonical) register order, at most 6
 #   aarch64_order  the argument names in aarch64 register order, where
 #             Linux's order differs (raw `clone` swaps `tls` and `ctid`)

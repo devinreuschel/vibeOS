@@ -306,13 +306,27 @@ pub fn read_rbp() -> u64 {
     val
 }
 
-/// Approximate RIP of the caller-ish (`lea` of the next insn).
-#[inline]
+/// The RIP of the next instruction, in the function this is inlined into
+/// (`lea` of it).
+#[inline(always)]
 pub fn read_rip() -> u64 {
     let val: u64;
     // SAFETY: `lea r, [rip]` only computes an address into a register; established here.
     unsafe { asm!("lea {}, [rip]", out(reg) val, options(nomem, nostack, preserves_flags)) };
     val
+}
+
+/// Raise the undefined-instruction exception (`ud2`): the early-fault
+/// test build's trip (ROADMAP §11.1), `early_fault_test` only (AGENTS.md
+/// rule 9).
+#[cfg(feature = "early_fault_test")]
+pub fn undefined_instruction() {
+    // SAFETY: invariant: the instruction only raises the undefined-instruction
+    // exception, whose early handler reports it and never returns, and it
+    // touches no memory; established by `arch::x86_64::idt::init_early`, which `_start` runs first.
+    unsafe {
+        core::arch::asm!("ud2", options(nomem, nostack));
+    }
 }
 
 /// `cli; hlt` loop. Never returns.

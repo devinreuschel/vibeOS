@@ -1,7 +1,7 @@
 //! Host tests for the device-tree reader in `fdt.rs` (ROADMAP §11.5).
 
 use super::*;
-use crate::machine::{IrqController, MAX_INTERRUPT_MAP, MAX_MSI_MAP};
+use crate::machine::{IrqController, MAX_INTERRUPT_MAP, MAX_MSI_MAP, MAX_PCI_WINDOWS};
 use crate::pmm::clip_usable;
 
 const VIRT_82: &[u8] = include_bytes!("testdata/virt-8.2.dtb");
@@ -455,6 +455,58 @@ fn psci_without_a_known_method_enables_nothing() {
     }
 }
 
+/// `method = "smc"` names the SMC conduit, as at EL2 and under EL3
+/// firmware; `"hvc"` names HVC.
+#[test]
+fn psci_method_names_the_conduit() {
+    use crate::arch::aarch64::psci::{Conduit, conduit};
+    for (method, hvc, want) in [
+        (&b"smc\0"[..], false, Conduit::Smc),
+        (&b"hvc\0"[..], true, Conduit::Hvc),
+    ] {
+        let mut t = root_2_2();
+        t.begin("psci");
+        t.prop("compatible", b"arm,psci-1.0\0");
+        t.prop("method", method);
+        t.end();
+        t.end();
+        let d = parse(&t.finish()).unwrap();
+        assert_eq!(d.enable, EnableMethod::Psci { hvc });
+        assert_eq!(d.psci, Some(EnableMethod::Psci { hvc }));
+        assert_eq!(conduit(d.psci), Some(want));
+    }
+}
+
+/// A timer node's `clock-frequency` reaches `TimerDesc`, for firmware that
+/// programs `CNTFRQ_EL0` wrongly; QEMU's `virt` gives none.
+#[test]
+fn timer_clock_frequency_is_parsed() {
+    let mut t = root_2_2();
+    t.begin("timer");
+    t.prop("compatible", b"arm,armv8-timer\0");
+    t.prop("interrupts", &be(&[1, 13, 4, 1, 14, 4, 1, 11, 4, 1, 10, 4]));
+    t.prop("clock-frequency", &be(&[19_200_000]));
+    t.end();
+    t.end();
+    match parse(&t.finish()).unwrap().arm_timer() {
+        Some(TimerDesc::ArmGeneric {
+            nirq,
+            clock_frequency,
+            ..
+        }) => {
+            assert_eq!(nirq, 4);
+            assert_eq!(clock_frequency, Some(19_200_000));
+        }
+        other => panic!("timer {other:?}"),
+    }
+    match parse(VIRT_CUR).unwrap().arm_timer() {
+        Some(TimerDesc::ArmGeneric {
+            clock_frequency, ..
+        }) => assert_eq!(clock_frequency, None),
+        other => panic!("timer {other:?}"),
+    }
+}
+
 #[test]
 fn reserved_memory_at_address_has_reserved_children() {
     // A child of `reserved-memory@…` is a reservation, as one of `reserved-memory`.
@@ -701,4 +753,105 @@ fn checked_in_trees_drop_and_refuse_nothing() {
     }
     // QEMU virt's PCI map is 16 rows of ten cells, as the fixture holds.
     assert_eq!(parse(VIRT_82).unwrap().pci_hosts()[0].interrupt_map_len, 16);
+}
+
+fn ecam_host(extra: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut t = root_2_2();
+    t.begin("pcie@10000000");
+    t.prop("compatible", b"pci-host-ecam-generic\0");
+    t.prop("reg", &be(&[0, 0x1000_0000, 0, 0x1000_0000]));
+    for (name, value) in extra {
+        t.prop(name, value);
+    }
+    t.end();
+    t.end();
+    t.finish()
+}
+
+#[test]
+fn ecam_numbers_that_do_not_fit_drop_the_host() {
+    let d = parse(&ecam_host(&[])).unwrap();
+    let h = &d.pci_hosts()[0];
+    assert_eq!((h.first_bus, h.last_bus, h.segment), (0, 0xff, 0));
+    let d = parse(&ecam_host(&[
+        ("bus-range", be(&[0x10, 0x1f])),
+        ("linux,pci-domain", be(&[0xffff])),
+    ]))
+    .unwrap();
+    let h = &d.pci_hosts()[0];
+    assert_eq!((h.first_bus, h.last_bus, h.segment), (0x10, 0x1f, 0xffff));
+    for extra in [
+        vec![("bus-range", be(&[0, 0x100]))],
+        vec![("bus-range", be(&[0x100, 0x1ff]))],
+        vec![("bus-range", be(&[0x20, 0x10]))],
+        vec![("bus-range", be(&[0]))],
+        vec![("linux,pci-domain", be(&[0x1_0000]))],
+    ] {
+        let d = parse(&ecam_host(&extra)).unwrap();
+        assert!(d.pci_hosts().is_empty(), "{extra:?}");
+        assert_eq!(d.dropped_pci_hosts, 1, "{extra:?}");
+    }
+}
+
+#[test]
+fn virt_pci_host_keeps_its_memory_windows() {
+    // QEMU `virt`: an I/O window, the 32-bit memory window below RAM, and
+    // the 64-bit one at 512 GiB. I/O space is not kept.
+    let d = parse(VIRT_CUR).unwrap();
+    let w = d.pci_hosts()[0].windows();
+    assert_eq!(
+        w,
+        &[
+            PhysRange {
+                start: 0x1000_0000,
+                size: 0x2eff_0000
+            },
+            PhysRange {
+                start: 0x80_0000_0000,
+                size: 0x80_0000_0000
+            },
+        ]
+    );
+    assert!(d.in_pci_window(0x1000_0000, 0x30_0000));
+    assert!(!d.in_pci_window(0x4000_0000, 0x30_0000));
+    // A range that runs out of the window's end is not inside it.
+    assert!(!d.in_pci_window(0x3eff_0000 - 0x1000, 0x2000));
+}
+
+fn host_with_ranges(rows: &[[u32; 7]]) -> Vec<u8> {
+    let mut t = root_2_2();
+    t.begin("pcie@10000000");
+    t.prop("compatible", b"pci-host-ecam-generic\0");
+    t.prop("reg", &be(&[0, 0x1000_0000, 0, 0x1000_0000]));
+    t.prop("#address-cells", &be(&[3]));
+    t.prop("#size-cells", &be(&[2]));
+    t.prop("ranges", &be(&rows.concat()));
+    t.end();
+    t.end();
+    t.finish()
+}
+
+#[test]
+fn pci_windows_past_the_cap_are_counted() {
+    let mem = |i: u32| {
+        [
+            0x0200_0000,
+            0,
+            0,
+            0,
+            0x1000_0000 + i * 0x10_0000,
+            0,
+            0x10_0000,
+        ]
+    };
+    let io = [0x0100_0000, 0, 0, 0, 0x3eff_0000, 0, 0x1_0000];
+    let mut rows = vec![io];
+    rows.extend((0..MAX_PCI_WINDOWS as u32 + 1).map(mem));
+    let d = parse(&host_with_ranges(&rows)).unwrap();
+    let h = &d.pci_hosts()[0];
+    assert_eq!((h.window_len, d.dropped_pci_windows), (MAX_PCI_WINDOWS, 1));
+    assert_eq!(h.windows()[0].start, 0x1000_0000);
+    // An empty memory row is no window.
+    let d = parse(&host_with_ranges(&[[0x0300_0000, 0, 0, 0, 0x1000, 0, 0]])).unwrap();
+    assert_eq!(d.pci_hosts()[0].window_len, 0);
 }

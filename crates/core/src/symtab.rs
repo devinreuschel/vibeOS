@@ -33,6 +33,26 @@ pub fn offset(entry: &Entry, addr: u64) -> u64 {
     addr.saturating_sub(entry.addr)
 }
 
+/// How far past its symbol a frame may lie and still be named: a sparse
+/// table (the panic-test kernel's) would otherwise pin an address to an
+/// earlier function with a huge offset.
+pub const FRAME_REACH: u64 = 0x1_0000;
+
+/// The function a backtrace frame at `addr` is in, and `addr`'s offset
+/// into it, as the dump, the in-guest tests and the core tool name it
+/// (DESIGN §2.5 step 4). `ret` marks a return address, every frame but the
+/// first: it is named from `addr - 1`, inside its call, since a call to a
+/// function that never returns is often its caller's last instruction and
+/// the address after it is the next symbol's (an aarch64 `bl` to
+/// `panic_fmt`). The first frame is a PC and is named from `addr` itself.
+/// `None` past [`FRAME_REACH`].
+pub fn frame_name(table: &[Entry], addr: u64, ret: bool) -> Option<(&'static str, u64)> {
+    let at = if ret { addr.saturating_sub(1) } else { addr };
+    let e = lookup(table, at)?;
+    let off = offset(e, addr);
+    (off < FRAME_REACH).then_some((e.name, off))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,5 +123,23 @@ mod tests {
         assert!(lookup(&t, 0x7FFF).is_none());
         assert_eq!(lookup(&t, 0x8000).unwrap().name, "only");
         assert_eq!(lookup(&t, 0x9000).unwrap().name, "only");
+    }
+
+    #[test]
+    fn frame_name_names_a_return_address_from_its_call() {
+        // A call that is `start`'s last instruction returns to `mid`'s
+        // first byte: as a return address it is `start`'s, as a PC `mid`'s.
+        assert_eq!(frame_name(T, 0x1100, true), Some(("start", 0x100)));
+        assert_eq!(frame_name(T, 0x1100, false), Some(("mid", 0)));
+        assert_eq!(frame_name(T, 0x1104, true), Some(("mid", 4)));
+        assert_eq!(frame_name(T, 0x1000, true), None);
+        assert_eq!(frame_name(T, 0xFFF, false), None);
+    }
+
+    #[test]
+    fn frame_name_reach() {
+        let far = T[T.len() - 1].addr + FRAME_REACH;
+        assert_eq!(frame_name(T, far, false), None);
+        assert!(frame_name(T, far - 1, false).is_some());
     }
 }

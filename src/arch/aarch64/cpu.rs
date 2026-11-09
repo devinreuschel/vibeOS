@@ -17,7 +17,12 @@ use crate::cell::BootCell;
 const DAIF_I: u64 = 1 << 7;
 
 static EL2_VHE: BootCell<bool> = BootCell::new();
-static CACHE: BootCell<tlb::CacheInfo> = BootCell::new();
+/// Every noted CPU's `CTR_EL0` as one ([`tlb::ctr_meet`]).
+static CTR: AtomicU64 = AtomicU64::new(tlb::CTR_MEET_TOP);
+/// A CPU has met its `CTR_EL0` into [`CTR`].
+static CTR_NOTED: AtomicBool = AtomicBool::new(false);
+/// The DMA granule, frozen at `smp: done` ([`freeze_dma_granule`]).
+static DMA_GRANULE: BootCell<u64> = BootCell::new();
 static ISA_OK: AtomicBool = AtomicBool::new(false);
 static OVERFLOW_SP: AtomicU64 = AtomicU64::new(0);
 
@@ -84,28 +89,180 @@ pub fn note_exception_level() {
     }
 }
 
-/// Read `CTR_EL0` for [`sync_icache`]. The BSP's value stands for every
-/// CPU, as on a part whose cores share line sizes.
-pub fn note_cache() {
+/// Why [`note_cache`] refused this CPU: its cache writeback granule breaks
+/// what DMA layouts assume (DESIGN §4.7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CwgRefusal {
+    /// Larger than a page, since a non-coherent device's sub-page region
+    /// is sized in granules inside page-sized blocks.
+    AbovePage,
+    /// Larger than the granule [`freeze_dma_granule`] froze, which drivers
+    /// sized their regions in.
+    AboveFrozen,
+}
+
+impl CwgRefusal {
+    /// The registered failure line the boot CPU prints through
+    /// `serial::raw`; an AP's `marker!` names the same text as a literal,
+    /// which `scripts/check_markers.py` reads.
+    pub const fn line(self) -> &'static str {
+        match self {
+            Self::AbovePage => "vibeOS: cpu: cwg above a page",
+            Self::AboveFrozen => "vibeOS: cpu: cwg above the frozen dma granule",
+        }
+    }
+}
+
+/// Set in [`CTR`] by [`freeze_dma_granule`], in a bit `CTR_EL0` keeps RES0
+/// and [`tlb::ctr_meet`] does not carry, so the freeze and a late CPU's
+/// meet fall in one modification order: a CPU either meets in before the
+/// freeze, and the frozen granule counts it, or sees the bit and is held
+/// to the frozen granule.
+const CTR_FROZEN: u64 = 1 << 63;
+
+/// Meet this CPU's `CTR_EL0` into what [`sync_icache`] uses. Each CPU
+/// runs it before it can run user code, so a core with smaller lines or an
+/// aliasing I-cache is covered on a part whose cores differ.
+///
+/// A refused CPU's `CTR_EL0` never joins the meet; the caller prints
+/// [`CwgRefusal::line`] and parks it. The boot CPU prints through
+/// `serial::raw`, which needs no log path; an AP calls this once its
+/// per-CPU state is installed and prints through `marker!`, whose lines
+/// stay whole across CPUs, and never marks itself ready, so bring-up
+/// treats it as lost (F032).
+pub fn note_cache() -> Result<(), CwgRefusal> {
     let ctr: u64;
     // SAFETY: `CTR_EL0` is readable at EL1; established here.
     unsafe { asm!("mrs {0}, CTR_EL0", out(reg) ctr, options(nomem, nostack, preserves_flags)) };
-    // SAFETY: I22, one write on the BSP before SMP; established here.
-    unsafe { CACHE.set(tlb::CacheInfo::from_ctr(ctr)) };
+    let cwg = tlb::CacheInfo::from_ctr(ctr).cwg;
+    if cwg > vibeos::pmm::PAGE_SIZE {
+        return Err(CwgRefusal::AbovePage);
+    }
+    // Acquire: pairs with the AcqRel exchange below on another CPU and the
+    // AcqRel `fetch_or` in `freeze_dma_granule`.
+    let mut cur = CTR.load(Ordering::Acquire);
+    loop {
+        let frozen = cur & CTR_FROZEN;
+        if frozen != 0 && cwg > tlb::CacheInfo::from_ctr(cur).cwg {
+            return Err(CwgRefusal::AboveFrozen);
+        }
+        // AcqRel: pairs with the Acquire load in `sync_icache`, with
+        // another CPU's exchange here, and with the AcqRel `fetch_or` in
+        // `freeze_dma_granule`: a freeze between this CPU's load and its
+        // exchange fails the exchange, and the loop sees the bit.
+        match CTR.compare_exchange_weak(
+            cur,
+            tlb::ctr_meet(cur, ctr) | frozen,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(seen) => cur = seen,
+        }
+    }
+    // Release: pairs with the Acquire load in `sync_icache`.
+    CTR_NOTED.store(true, Ordering::Release);
+    Ok(())
+}
+
+/// Fix the DMA granule at the meet of every CPU online now, at `smp: done`,
+/// so a CPU that arrives later (a stalled AP, F032) cannot raise it under
+/// regions already sized in it: [`note_cache`] refuses such a CPU instead.
+pub fn freeze_dma_granule() {
+    // AcqRel: pairs with the AcqRel exchange in `note_cache` on another
+    // CPU; the meet it returns is the one the bit holds later CPUs to.
+    let meet = CTR.fetch_or(CTR_FROZEN, Ordering::AcqRel);
+    // SAFETY: invariant I22: one write, on the BSP in `smp_init::init`
+    // right before `smp: done`; established by `smp_init::init`.
+    unsafe { DMA_GRANULE.set(tlb::CacheInfo::from_ctr(meet).cwg) };
+}
+
+/// What every noted CPU's `CTR_EL0` says: [`CTR`] once a CPU has met into
+/// it, and `CTR_EL0` 0 (the smallest lines, the largest granule) before.
+fn cache_info() -> tlb::CacheInfo {
+    // Acquire: pairs with the Release store of `CTR_NOTED` in `note_cache`.
+    if CTR_NOTED.load(Ordering::Acquire) {
+        // Acquire: pairs with the AcqRel update of `CTR` in `note_cache`.
+        tlb::CacheInfo::from_ctr(CTR.load(Ordering::Acquire))
+    } else {
+        tlb::CacheInfo::from_ctr(0)
+    }
+}
+
+/// The cache writeback granule DMA regions are sized in: the frozen value
+/// from [`freeze_dma_granule`] once `smp: done` has passed, and before it
+/// the largest `CTR_EL0.CWG` of every noted CPU (`tlb::ctr_meet`), or
+/// `tlb::MAX_CWG` before [`note_cache`].
+pub fn dma_granule() -> usize {
+    DMA_GRANULE.try_get().copied().unwrap_or(cache_info().cwg) as usize
+}
+
+/// Run one DMA maintenance step (`tlb::DmaOp`) at `va`. Arm ARM DDI0487,
+/// "Ordering and completion of data and instruction cache instructions":
+/// herd7 does not model the caches.
+///
+/// # Safety
+/// `va` is a line of mapped memory the caller owns for DMA, and for
+/// `DcIvac` no CPU store to that line is pending.
+unsafe fn exec_dma(op: tlb::DmaOp, va: u64) {
+    // SAFETY: EL1 data-cache maintenance by VA on a line of the caller's
+    // mapped DMA range, this fn's `# Safety`; established by
+    // `arch::aarch64::cpu::dma_clean` and `dma_inval`.
+    unsafe {
+        match op {
+            tlb::DmaOp::DcCvac => {
+                asm!("dc cvac, {0}", in(reg) va, options(nostack, preserves_flags))
+            }
+            tlb::DmaOp::DcCivac => {
+                asm!("dc civac, {0}", in(reg) va, options(nostack, preserves_flags))
+            }
+            tlb::DmaOp::DcIvac => {
+                asm!("dc ivac, {0}", in(reg) va, options(nostack, preserves_flags))
+            }
+            tlb::DmaOp::DsbSy => asm!("dsb sy", options(nostack, preserves_flags)),
+        }
+    }
+}
+
+/// Clean `[start, start+len)` to the Point of Coherency for a non-coherent
+/// device: `tlb::dma_clean` over every noted CPU's smallest D-cache line.
+///
+/// # Safety
+/// `[start, start+len)` is mapped memory the caller owns for DMA.
+pub unsafe fn dma_clean(start: u64, len: u64) {
+    tlb::dma_clean(cache_info(), start, len, |op, va| {
+        // SAFETY: `va` is a line of the range this fn's contract names;
+        // established by `arch::aarch64::cpu::dma_clean`.
+        unsafe { exec_dma(op, va) }
+    });
+}
+
+/// Invalidate `[start, start+len)` for the CPU after a non-coherent
+/// device wrote it: `tlb::dma_inval`, which cleans a line the range
+/// covers only in part.
+///
+/// # Safety
+/// `[start, start+len)` is mapped memory the caller owns for DMA, and no
+/// CPU store to it is pending that the invalidate would discard.
+pub unsafe fn dma_inval(start: u64, len: u64) {
+    tlb::dma_inval(cache_info(), start, len, |op, va| {
+        // SAFETY: `va` is a line of the range this fn's contract names; a
+        // whole line inside it holds no pending CPU store; established by
+        // `arch::aarch64::cpu::dma_inval`.
+        unsafe { exec_dma(op, va) }
+    });
 }
 
 /// Make `[start, start+len)`, written through the data side, fetchable by
 /// every CPU. Runs `tlb::sync_range` over `CTR_EL0`'s line sizes; before
 /// [`note_cache`] it assumes the smallest lines and no IDC or DIC.
+/// Arm ARM DDI0487, "Synchronization and coherency issues between data and
+/// instruction accesses": herd7 does not model instruction fetch.
 ///
 /// # Safety
 /// `[start, start+len)` is mapped, readable memory.
 pub unsafe fn sync_icache(start: u64, len: u64) {
-    let info = CACHE
-        .try_get()
-        .copied()
-        .unwrap_or(tlb::CacheInfo::from_ctr(0));
-    tlb::sync_range(info, start, len, |op, va| {
+    tlb::sync_range(cache_info(), start, len, |op, va| {
         // SAFETY: EL1 cache maintenance by VA; `va` is a line of the mapped
         // range `sync_icache`'s contract names, established by
         // `arch::aarch64::cpu::sync_icache`.
@@ -117,6 +274,7 @@ pub unsafe fn sync_icache(start: u64, len: u64) {
                 tlb::IcacheOp::IcIvau => {
                     asm!("ic ivau, {0}", in(reg) va, options(nostack, preserves_flags))
                 }
+                tlb::IcacheOp::IcIalluis => asm!("ic ialluis", options(nostack, preserves_flags)),
                 tlb::IcacheOp::DsbIsh => asm!("dsb ish", options(nostack, preserves_flags)),
                 tlb::IcacheOp::Isb => asm!("isb", options(nostack, preserves_flags)),
             }
@@ -161,7 +319,8 @@ pub fn log_isa_floor() {
     );
 }
 
-#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+/// Whether the boot CPU passed [`check_isa_floor`]: until then
+/// `panic::early_exception` prints with no atomic read-modify-write.
 pub fn isa_ok() -> bool {
     // Acquire: pairs with the Release store in `check_isa_floor`.
     ISA_OK.load(Ordering::Acquire)
@@ -183,17 +342,20 @@ pub fn read_ttbr1() -> u64 {
     v
 }
 
-/// Computed `MAIR_EL1` and `TCR_EL1`. The TTBR1 takeover writes them.
-pub fn mair_tcr() -> (u64, u64) {
+/// Whether `ID_AA64MMFR0_EL1.ASIDBits` reports 16-bit ASIDs: what
+/// `TCR_EL1.AS` is set from, and the allocator's width (`vibeos::asid::width`).
+pub fn asid16() -> bool {
     let mmfr0: u64;
     // SAFETY: ID register; established here.
     unsafe {
         asm!("mrs {0}, ID_AA64MMFR0_EL1", out(reg) mmfr0, options(nomem, nostack, preserves_flags));
     }
-    (
-        sysreg::mair_el1(),
-        sysreg::tcr_el1(sysreg::asid16_from_mmfr0(mmfr0)),
-    )
+    sysreg::asid16_from_mmfr0(mmfr0)
+}
+
+/// Computed `MAIR_EL1` and `TCR_EL1`. The TTBR1 takeover writes them.
+pub fn mair_tcr() -> (u64, u64) {
+    (sysreg::mair_el1(), sysreg::tcr_el1(asid16()))
 }
 
 pub fn read_tcr() -> u64 {
@@ -206,6 +368,8 @@ pub fn read_tcr() -> u64 {
 }
 
 /// Run one op from a `tlb` sequence. The instruction text is `TlbOp::mnemonic`.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 fn exec_tlb(op: tlb::TlbOp, va_operand: u64) {
     // SAFETY: EL1 (VHE host) barrier and TLBI. The register operand is
     // `va_operand` (`tlb::tlbi_va_operand` for a VA form). established here.
@@ -215,11 +379,8 @@ fn exec_tlb(op: tlb::TlbOp, va_operand: u64) {
             tlb::TlbOp::TlbiVale1is => {
                 asm!("tlbi vale1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
             }
-            tlb::TlbOp::TlbiVae1is => {
-                asm!("tlbi vae1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
-            }
-            tlb::TlbOp::TlbiAside1is => {
-                asm!("tlbi aside1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
+            tlb::TlbOp::TlbiVaale1is => {
+                asm!("tlbi vaale1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
             }
             tlb::TlbOp::TlbiAside1 => {
                 asm!("tlbi aside1, {0}", in(reg) va_operand, options(nostack, preserves_flags));
@@ -240,36 +401,101 @@ fn run_tlb(ops: &[tlb::TlbOp], va_operand: u64) {
 }
 
 /// Broadcast TLB invalidate. Runs `tlb::ALL_INVAL`.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub fn tlbi_all() {
     run_tlb(&tlb::ALL_INVAL, 0);
 }
 
 /// Local ASID-0 invalidate after a TTBR0 write, which `write_ttbr0` ends
 /// with an `isb`. Runs `tlb::TTBR0_SWITCH`.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub fn tlbi_asid0_local() {
     run_tlb(&tlb::TTBR0_SWITCH, 0);
 }
 
-/// Leaf TLB invalidate. Runs `tlb::LEAF_INVAL`. ASID 0: TTBR0 does not
-/// carry one yet (ROADMAP §11.2).
+/// Local flush of every stage-1 EL1 entry, before a CPU that a rollover
+/// marked flush-pending loads an ASID of the new generation. Runs
+/// `tlb::ROLLOVER_LOCAL`; broadcasts nothing (ROADMAP §11.2). Arm ARM
+/// DDI0487, "Ordering and completion of TLB maintenance instructions": the
+/// `dsb nsh` completes the local `tlbi` before the `isb` and the TTBR0 write.
+pub fn tlbi_local_all() {
+    run_tlb(&tlb::ROLLOVER_LOCAL, 0);
+}
+
+fn is_kernel_va(va: u64) -> bool {
+    vibeos::arch::aarch64::paging::is_kernel_va(vibeos::paging::VirtAddr(va))
+}
+
+/// Leaf TLB invalidate through the `PageTable` seam, which names no space.
+/// A kernel VA's entries are global, which every ASID matches, so it runs
+/// `tlb::LEAF_INVAL` with ASID 0; a user VA's could carry any space's ASID,
+/// so it runs `tlb::LEAF_INVAL_ALL_ASIDS`. A caller that knows the space
+/// uses [`tlbi_user_va`]. A user VA's invalidate asserts DESIGN §7.9's
+/// calling contract (`sync_init::assert_tlb_contract`), as every user
+/// invalidate here does.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
+#[track_caller]
 pub fn tlbi_va(va: u64) {
-    run_tlb(&tlb::LEAF_INVAL, tlb::tlbi_va_operand(va, 0));
+    if is_kernel_va(va) {
+        run_tlb(&tlb::LEAF_INVAL, tlb::tlbi_va_operand(va, 0));
+    } else {
+        crate::sync_init::assert_tlb_contract();
+        run_tlb(&tlb::LEAF_INVAL_ALL_ASIDS, tlb::tlbi_va_operand(va, 0));
+    }
+}
+
+/// Leaf TLB invalidate of user VA `va` in the space whose ASID is `asid`,
+/// on every CPU (Linux arm64's `flush_tlb_page` with `ASID(mm)`), after
+/// asserting DESIGN §7.9's calling contract. Runs `tlb::LEAF_INVAL`. Arm
+/// ARM DDI0487, "TLB maintenance requirements" and "Ordering and completion
+/// of TLB maintenance instructions": herd7 does not model the TLB.
+#[track_caller]
+pub fn tlbi_user_va(va: u64, asid: u16) {
+    crate::sync_init::assert_tlb_contract();
+    run_tlb(&tlb::LEAF_INVAL, tlb::tlbi_va_operand(va, asid));
 }
 
 /// Break-before-make maintenance after the invalid store. Runs
-/// `tlb::BBM_AFTER_INVALID`.
+/// `tlb::BBM_AFTER_INVALID` for a kernel VA (global entries, ASID 0) and
+/// `tlb::BBM_AFTER_INVALID_ALL_ASIDS` for a user VA, whose space the seam
+/// does not name, after asserting DESIGN §7.9's calling contract for a
+/// user VA.
+/// Arm ARM DDI0487, "Using break-before-make when updating translation
+/// table entries": herd7 does not model the TLB.
+#[track_caller]
 pub(crate) fn bbm_break(va: u64) {
-    run_tlb(&tlb::BBM_AFTER_INVALID, tlb::tlbi_va_operand(va, 0));
+    if is_kernel_va(va) {
+        run_tlb(&tlb::BBM_AFTER_INVALID, tlb::tlbi_va_operand(va, 0));
+    } else {
+        crate::sync_init::assert_tlb_contract();
+        run_tlb(
+            &tlb::BBM_AFTER_INVALID_ALL_ASIDS,
+            tlb::tlbi_va_operand(va, 0),
+        );
+    }
+}
+
+/// `dsb ishst`: a space's table stores reach the walker before a TTBR0
+/// write that names it under an ASID, where no local invalidate follows.
+/// Arm ARM DDI0487, "TLB maintenance requirements": a table store is seen by
+/// the walker only after a DSB.
+pub fn dsb_ishst() {
+    run_tlb(&[tlb::TlbOp::DsbIshst], 0);
 }
 
 /// Barriers after the new store of break-before-make. Runs
-/// `tlb::BBM_AFTER_MAKE`.
+/// `tlb::BBM_AFTER_MAKE`. Arm ARM DDI0487, "Using break-before-make when
+/// updating translation table entries": herd7 does not model the TLB.
 pub(crate) fn bbm_make() {
     run_tlb(&tlb::BBM_AFTER_MAKE, 0);
 }
 
 /// Publish a new table before the descriptor that links it. Runs
-/// `tlb::PUBLISH_TABLE`.
+/// `tlb::PUBLISH_TABLE`. Arm ARM DDI0487, "Ordering of memory accesses from
+/// translation table walks": herd7 does not model the walk.
 pub(crate) fn publish_table() {
     run_tlb(&tlb::PUBLISH_TABLE, 0);
 }
@@ -303,6 +529,27 @@ pub fn read_ttbr0() -> u64 {
         asm!("mrs {0}, ttbr0_el1", out(reg) v, options(nomem, nostack, preserves_flags));
     }
     v
+}
+
+/// Whether a stage-1 read of `va` translates in the kernel's regime (EL1&0,
+/// or EL2&0 under VHE): `AT S1E1R` (`AT S1E2R` under VHE), then
+/// `PAR_EL1.F`. Call with IRQs masked, so no handler's `AT` overwrites
+/// `PAR_EL1` between the two.
+#[cfg(feature = "kernel_tests")]
+pub fn stage1_read_translates(va: u64) -> bool {
+    let par: u64;
+    // SAFETY: `AT` only writes PAR_EL1, which nothing else in the kernel
+    // holds across an instruction; established here.
+    unsafe {
+        if el2_vhe() {
+            asm!("at s1e2r, {va}", "isb", "mrs {par}, par_el1", va = in(reg) va,
+                par = out(reg) par, options(nostack, preserves_flags));
+        } else {
+            asm!("at s1e1r, {va}", "isb", "mrs {par}, par_el1", va = in(reg) va,
+                par = out(reg) par, options(nostack, preserves_flags));
+        }
+    }
+    par & 1 == 0
 }
 
 /// Write the #202 computed EL0/EL1 environment registers whole.
@@ -501,6 +748,19 @@ pub fn wait_for_interrupt() {
     idle_wait();
 }
 
+/// Raise the undefined-instruction exception (`udf #0`): the early-fault
+/// test build's trip (ROADMAP §11.1), `early_fault_test` only (AGENTS.md
+/// rule 9).
+#[cfg(feature = "early_fault_test")]
+pub fn undefined_instruction() {
+    // SAFETY: invariant: the instruction only raises the undefined-instruction
+    // exception, whose early handler reports it and never returns, and it
+    // touches no memory; established by `arch::aarch64::vectors::init_early`, which `_start` runs first.
+    unsafe {
+        core::arch::asm!("udf #0", options(nomem, nostack));
+    }
+}
+
 pub fn halt() -> ! {
     irq_disable();
     loop {
@@ -585,12 +845,16 @@ pub fn frame_pointer() -> u64 {
     fp
 }
 
-#[inline]
+/// The PC of this instruction, in the function it is inlined into. Not
+/// `x30`: after the function's first call that holds a return address
+/// into its caller, which a backtrace would print twice.
+#[inline(always)]
 pub fn instruction_pointer() -> u64 {
-    let lr: u64;
-    // SAFETY: approximate PC from LR; established here.
-    unsafe { asm!("mov {0}, x30", out(reg) lr, options(nomem, nostack, preserves_flags)) };
-    lr
+    let pc: u64;
+    // SAFETY: `adr` reads the PC into a register and touches nothing
+    // else; established here.
+    unsafe { asm!("adr {0}, .", out(reg) pc, options(nomem, nostack, preserves_flags)) };
+    pc
 }
 
 #[inline]
@@ -740,7 +1004,9 @@ pub fn rflags() -> u64 {
     irq_flags()
 }
 
-/// Full-system barrier. Shared code names `mfence`.
+/// Full-system barrier. Shared code names `mfence`. Arm ARM DDI0487, "Memory barriers",
+/// the DSB: `dsb sy` completes every earlier
+/// access, Device included, which herd7 does not model.
 #[inline]
 #[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
 pub fn mfence() {

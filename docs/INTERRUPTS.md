@@ -231,8 +231,12 @@ INTID map (aarch64, the counterpart of the vector map above). A hwirq is an INTI
 | 2 | SGI | Panic stop ([§2.5](INVARIANTS.md#25-panic-policy)) |
 | 3–7 | SGI | Free |
 | 8–15 | SGI | Left to the Secure world |
-| 16–31 | PPI | Per-CPU. The generic timer's PPI is one `IrqId` on every CPU (`irq::map_percpu`). |
+| 16–31 | PPI | Per-CPU. The generic timer's PPI is one `IrqId` on every CPU (`irq::map_percpu`). No other PPI is used. |
+| 27 | PPI 11 | The tick at EL1: the EL1 virtual timer, the timer node's third `interrupts` entry. |
+| node's 5th entry | PPI | The tick at EL2 with VHE when the timer node has five entries: the EL2 virtual timer (`hyp-virt`). |
+| 26 | PPI 10 | The tick at EL2 with VHE when the node has four entries: the EL2 physical timer (`hyp-phys`), the fourth entry. |
 | 32–1019 | SPI | Wired devices and GICv2m MSI |
+| from the device tree | SPI | Each virtio-mmio transport's interrupt, from its node's `interrupts` (on QEMU `virt`, SPI 16 on, INTID 48 on). The PL031's interrupt is parsed but not enabled, and the PL011's is not read. |
 | 1020–1023 | Special | IAR only; 1023 is spurious. Not EOI'd, not dispatched, no GICD write. |
 | 1024–8191 | Reserved | Not a programmable INTID. |
 | 8192– | LPI | GICv3 ITS MSI. Allocated once, never moved; `GICR_CTLR.EnableLPIs` stays set. |
@@ -705,7 +709,10 @@ syscall body after the stub has unmasked IRQs (ROADMAP §11.6).
     the FP check; the work it finds is a kill or a stop (`proc_init::exit_work_pending`), and a
     reschedule runs in the interrupt body (the timer's and the reschedule IPI's), not here. `kill`
     publishes a Term or Stop signal and then kicks the target's CPU (`ipi_init::kick`). In-guest
-    `signal_on_return` and `exit_work_ipi` cover it.
+    `signal_on_return` and `exit_work_ipi` cover it. On aarch64 the same function
+    (`exit_work_init::exit_work`, which both ports' `syscall_init` re-export) runs from
+    `vibeos_el0_exit` after the EL0 return path sets all of DAIF, on every EL0 exception's return,
+    and unmasks all of DAIF for the work, as a syscall body runs.
 12. Signal-handler entry, on both architectures. Delivery saves the interrupted context (the user
     frame above, after any syscall-restart rewind) and its FP state into Linux's signal frame on the
     user stack (ROADMAP §13.8), then rewrites the user frame so the return to user mode enters the

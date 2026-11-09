@@ -426,8 +426,11 @@ def _ktest_boot(
     results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
     klines = frame.kernel_lines(raw.lines)
     results.current().record_ktest_lines(klines)
+    weak = results.weak_order_rows(klines)
+    if weak:
+        results.current().add_section(results.WEAK_ORDER, weak)
     verdict = check_ktest_output(
-        raw.lines, raw.exit_code, pass_status=ktest_pass_status(cfg)
+        raw.lines, raw.exit_code, pass_status=ktest_pass_status(cfg), arch=cfg.arch
     )
     write_stack_summary(label, check_stack_depth(klines, enforce=False))
     check_stack_depth(klines, enforce=enforce_stack)
@@ -821,7 +824,7 @@ def check_hpet_off_boot(lines: list[str], exit_code: int | None, cfg: QemuConfig
     `HPET_OFF_KTEST`. No block or persist lines are required.
     Raises `HarnessError("hpet=off boot: ...")`."""
     try:
-        verdict = check_ktest_output(lines, exit_code)
+        verdict = check_ktest_output(lines, exit_code, arch=cfg.arch)
         skips.check_skips(
             verdict.ktest_skips,
             verdict.ktest_runs,
@@ -908,6 +911,15 @@ PROOF_BOOTS: tuple[ProofBoot, ...] = (
         lambda s, _h: s >= 4,
         arches=("aarch64",),
     ),
+    # aarch64 only, at `-smp 4`, on `test-kernel-smp4-5`'s `aarch64_boots`: the ASID box's
+    # 1,000 processes under the 4-bit cap (ROADMAP §11.2).
+    ProofBoot(
+        "asid-4bit",
+        "aarch64 4-bit ASID boot",
+        "_asid_4bit_boot",
+        lambda s, _h: s >= 4,
+        arches=("aarch64",),
+    ),
 )
 
 
@@ -932,6 +944,59 @@ def _stalled_ap_boot(env: EnvConfig) -> None:
     It must park (ROADMAP §11.4, F032).
     """
     _proof_boot(env, "stalled-ap", ktest="stalled_ap_leak", repeat=None)
+
+
+ASID_4BIT_TEST = "asid_procs_4bit"
+
+
+def _asid_4bit_boot(env: EnvConfig) -> None:
+    """`asid_procs_4bit` alone: naming the opt-in row caps ASIDs at 4 bits
+    for the boot, and its 1,000 processes force rollovers (ROADMAP §11.2)."""
+    raw = _single_test_boot(env, ASID_4BIT_TEST, "asid 4-bit")
+    check_select_run(raw.lines, {ASID_4BIT_TEST: 1}, ())
+
+
+# The HHDM boot (ROADMAP §11.1, `make test-kernel-hhdm`): the ktest ELF in
+# the `ktest-hhdm` image, whose Limine randomises the HHDM base. The boot
+# itself runs every translation before and after the kernel's own page
+# tables (pmm, paging, the early device maps, AP bring-up at `-smp 2`);
+# these rows then check `BootInfo`'s offset is the randomised one paging
+# uses, and map, allocate and read memory through it.
+HHDM_TEST = "hhdm_randomised"
+HHDM_KTEST: tuple[str, ...] = (
+    "bootinfo_consistent",
+    HHDM_TEST,
+    "fw_cfg_probe",
+    "fw_cfg_dma",
+    "cmdline_captured",
+    "map_unmap",
+    "heap_box",
+    "heap_growth",
+    "kva_roundtrip",
+    "vmap",
+    "ioremap_failure_returns_va",
+    "frames_none_leaked",
+    "current_mapper_holds_pt",
+    "vmap_32_frames_unmapped",
+    "physmap_kernel_span_4k",
+    "user_runtime",
+)
+
+
+def hhdm_boot(env: EnvConfig) -> int:
+    """`HHDM_KTEST` alone in the HHDM image (`VIBEOS_ISO`): each row runs
+    once and passes, `hhdm_randomised` included, which fails when Limine
+    left the base unrandomised."""
+    try:
+        raw = _proof_boot(env, "hhdm", ktest=",".join(HHDM_KTEST), repeat=None)
+        check_select_run(raw.lines, {n: 1 for n in HHDM_KTEST}, ())
+    except HarnessError as e:
+        _record("ktest_hhdm_boot", False)
+        print(f"[ktest] FAIL hhdm boot: {e}", file=sys.stderr)
+        return 1
+    _record("ktest_hhdm_boot", True)
+    print("[ktest] hhdm boot: every row passed on the randomised HHDM", file=sys.stderr)
+    return 0
 
 
 def _aff_off_boot(env: EnvConfig) -> None:
@@ -1001,10 +1066,18 @@ def main(argv: list[str] | None = None) -> int:
         choices=sorted(ktest_shards.shard_names()),
         help="run one per-push shard of its variant (tests/harness/ktest_shards.py)",
     )
+    parser.add_argument(
+        "--hhdm",
+        action="store_true",
+        help="boot HHDM_KTEST alone in the randomised-HHDM image (ROADMAP §11.1)",
+    )
     args = parser.parse_args([] if argv is None else argv)
     apply_arch_cli(args.arch)
-    env = env_config(default_iso=default_iso("ktest"), default_timeout=BOOT_ALLOWANCE_S)
+    iso = default_iso("ktest-hhdm" if args.hhdm else "ktest")
+    env = env_config(default_iso=iso, default_timeout=BOOT_ALLOWANCE_S)
     results.Results(env.tier, env.arch)
+    if args.hhdm:
+        return hhdm_boot(env)
     if args.shard is None:
         boots = proof_boot_names(env.smp, args.hpet_off, env.arch)
         rc = main_boot(env, None)

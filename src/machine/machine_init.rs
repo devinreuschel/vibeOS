@@ -30,10 +30,13 @@ pub fn info() -> Option<&'static MachineDesc> {
 /// Halts if a reserved range will not fit or the device walk cannot finish.
 /// `no-map` ranges are published when every reservation was recorded.
 pub fn init_from_dtb(boot: &BootInfo) {
-    let Some(dtb) = boot.dtb else {
+    // SAFETY: `init_from_dtb` runs from `normal_boot_tail` right after
+    // `boot::capture` and before `pmm_init::init`, as `BootInfo::with_dtb`
+    // requires; established by `normal_boot_tail`.
+    let Some(parsed) = (unsafe { boot.with_dtb(vibeos::machine::fdt::parse_dtb) }) else {
         return;
     };
-    let d = match vibeos::machine::fdt::parse_dtb(dtb) {
+    let d = match parsed {
         Ok(vibeos::machine::fdt::Parsed::Complete(d)) => {
             publish_nomap(&d);
             d
@@ -108,6 +111,7 @@ fn warn_dropped(d: &MachineDesc) {
         (d.dropped_pci_hosts, "dropped", "pci hosts"),
         (d.dropped_interrupt_rows, "dropped", "interrupt-map rows"),
         (d.dropped_msi_rows, "dropped", "msi-map rows"),
+        (d.dropped_pci_windows, "dropped", "pci windows"),
         (d.dropped_irq_controllers, "dropped", "irq controllers"),
         (d.dropped_isos, "dropped", "interrupt overrides"),
         (d.dropped_timers, "dropped", "timers"),

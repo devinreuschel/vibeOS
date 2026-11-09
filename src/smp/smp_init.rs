@@ -533,6 +533,7 @@ fn report_tsc_warp() {
         invariant: time_init::tsc_invariant(),
         warp_measured: runs > 0,
         max_skew: time_init::tsc_max_skew(),
+        uniform: false,
     });
 }
 
@@ -720,6 +721,8 @@ pub unsafe fn init() {
     #[cfg(target_arch = "aarch64")]
     {
         init_aarch64();
+        arch::aarch64::cpu::freeze_dma_granule();
+        crate::log::trace_init::publish_cntvct_clock();
         crate::marker!(marker::SMP_DONE);
     }
     #[cfg(target_arch = "x86_64")]
@@ -1118,12 +1121,17 @@ fn init_aarch64() {
         }
         p = p.saturating_add(4096);
     }
-    let Some((ttbr0_id, ttbr0_empty, mut id_tables)) =
-        arch::aarch64::secondary::build_identity(&pas[..])
-    else {
+    let Some((ttbr0_id, mut id_tables)) = arch::aarch64::secondary::build_identity(&pas[..]) else {
         crate::klog!(vibeos::log::Level::Error, "vibeOS: smp: identity map");
         return;
     };
+    // The stub leaves TTBR0 at the permanent empty user root, the one every
+    // kernel thread runs on.
+    let ttbr0_empty = crate::paging_init::empty_user_root();
+    if ttbr0_empty == 0 {
+        crate::klog!(vibeos::log::Level::Error, "vibeOS: smp: no empty TTBR0");
+        return;
+    }
     let mut n_id = 0usize;
     for &pa in id_tables.iter() {
         if pa != 0 {
@@ -1270,7 +1278,7 @@ fn start_one_aarch64(
         finish_aarch64_failure(cpu_id, hw_id, idle_id, workers, published);
         return StartAp::Failed;
     }
-    let Some(param_pa) = alloc_param_page() else {
+    let Some(param_pa) = crate::paging_init::alloc_zeroed(0) else {
         crate::marker!("vibeOS: smp: apic {hw_id} alloc failed");
         free_live_ap(cpu_id, idle_id, workers, published, false);
         return StartAp::Failed;
@@ -1324,6 +1332,13 @@ fn start_one_aarch64(
         );
         return aarch64_lost(cpu_id, hw_id, idle_id, workers, published);
     }
+    if status == vibeos::arch::aarch64::psci::STATUS_ASID {
+        crate::klog!(
+            vibeos::log::Level::Error,
+            "vibeOS: smp: cpu {hw_id:#x} asid bits below the boot cpu's 16"
+        );
+        return aarch64_lost(cpu_id, hw_id, idle_id, workers, published);
+    }
     if status != vibeos::arch::aarch64::psci::STATUS_ARRIVED {
         crate::marker!("vibeOS: smp: apic {hw_id} timed out");
         return aarch64_lost(cpu_id, hw_id, idle_id, workers, published);
@@ -1344,16 +1359,8 @@ fn start_one_aarch64(
     StartAp::Online
 }
 
-#[cfg(target_arch = "aarch64")]
-fn alloc_param_page() -> Option<u64> {
-    let f = crate::pmm_init::with_buddy(|b| b.alloc(0))?;
-    let pa = f.into_entry();
-    let va = crate::paging_init::hhdm_offset().wrapping_add(pa);
-    // SAFETY: buddy page, HHDM maps it (I14). established here.
-    unsafe { core::ptr::write_bytes(va as *mut u8, 0, 4096) };
-    Some(pa)
-}
-
+/// The status the secondary stub publishes with `stlr`, read with an Acquire
+/// fence before the param page is reused. tests/litmus/secondary_status.litmus
 #[cfg(target_arch = "aarch64")]
 fn wait_secondary_status(param_va: u64) -> u64 {
     let status = param_va.wrapping_add(vibeos::arch::aarch64::psci::SecondaryParam::STATUS as u64)
@@ -1363,6 +1370,9 @@ fn wait_secondary_status(param_va: u64) -> u64 {
         // SAFETY: HHDM of this core's param page. established here.
         let s = unsafe { core::ptr::read_volatile(status) };
         if s != vibeos::arch::aarch64::psci::STATUS_NONE {
+            // Acquire: pairs with the stub's `stlr` of the status in
+            // `arch::aarch64::secondary`, its last access to the page.
+            core::sync::atomic::fence(Ordering::Acquire);
             return s;
         }
         if time_init::now_ns().saturating_sub(t0) > READY_TIMEOUT_MS.saturating_mul(1_000_000) {
@@ -1437,15 +1447,30 @@ extern "C" fn ap_entry_aarch64(cpu: *mut PerCpu) -> ! {
     // SAFETY: `cpu` is this AP's slot; the BSP's `with_cpu` ended before
     // CPU_ON (I43, I21, established at `smp_init::start_one_aarch64`).
     let cpu = unsafe { &mut *cpu };
+    #[cfg(feature = "kernel_tests")]
+    arch::aarch64::secondary::note_ap_entry_ttbr0(cpu.cpu_id);
     // SAFETY: this CPU's `PerCpu`, IRQs masked. established here.
     unsafe { per_cpu_init::install_gs(cpu) };
     // BSP published this CPU's idle TCB before CPU_ON; `SP_EL0` is this
     // CPU's and still 0 (`mark_live` ran on the BSP).
     per_cpu_init::set_current_thread(cpu, cpu.idle);
     arch::aarch64::vectors::load();
-    // SAFETY: VBAR is live; `crate::syscall_init::init_ap` writes this
-    // CPU's empty TTBR0; established here.
-    unsafe { crate::syscall_init::init_ap(core::ptr::null(), 0) };
+    // Before `ready`, so this CPU's cache lines are in the meet before it
+    // can run user code; after `install_gs`, so a refusal prints through
+    // `marker!`, whose lines stay whole while other CPUs print.
+    if let Err(why) = arch::aarch64::cpu::note_cache() {
+        match why {
+            arch::aarch64::cpu::CwgRefusal::AbovePage => {
+                crate::marker!("vibeOS: cpu: cwg above a page");
+            }
+            arch::aarch64::cpu::CwgRefusal::AboveFrozen => {
+                crate::marker!("vibeOS: cpu: cwg above the frozen dma granule");
+            }
+        }
+        park_lost();
+    }
+    // TTBR0 is already the empty root: the entry stub loaded it and
+    // flushed this CPU's TLB (`arch::aarch64::secondary`).
     arch::aarch64::cpu::release_debug_os_lock();
     arch::aarch64::cpu::print_exception_level();
     // SAFETY: this CPU's GIC; IRQs masked. established here.

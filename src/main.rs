@@ -168,8 +168,16 @@ pub extern "C" fn _start() -> ! {
         arch::current::halt();
     }
     crate::marker!(marker::LIMINE_OK);
+    // SAFETY: the boot CPU with IF=0, before `idt::init`, as
+    // `idt::init_early` requires; established here (DESIGN §3.3 boot order).
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        arch::idt::init_early()
+    };
     #[cfg(target_arch = "x86_64")]
     crate::log::pvpanic_init::probe();
+    #[cfg(feature = "early_fault_test")]
+    crate::log::panic_test::early_fault_trip();
 
     // With `--features panic_test`, prove the panic path end to end.
     // Kept before PMM init so the panic path still exercises only the
@@ -291,7 +299,7 @@ fn normal_boot_tail() -> ! {
     crate::marker!(marker::GDT_OK);
 
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
-    // below: the ACPI walk ran and no IDT is loaded yet, as `pic::remap_and_mask` requires; established here.
+    // below: IF=0, the ACPI walk ran, and `idt::init` has not run (the early IDT reports only exceptions), as `pic::remap_and_mask` requires; established here.
     unsafe { arch::pic::remap_and_mask() };
     #[cfg(target_arch = "x86_64")]
     crate::marker!(marker::PIC_REMAPPED);
@@ -489,6 +497,8 @@ extern "C" fn boot_rest() -> ! {
     crate::log::panic_test::nest_trip();
     #[cfg(feature = "panic_stop_test")]
     crate::log::panic_test::stop_trip();
+    #[cfg(feature = "kstack_overflow_test")]
+    crate::log::panic_test::kstack_overflow_trip();
 
     // `shell ready` is last. gp-test trips after ramdisk so a #GP dump
     // still has a clean contract through `block: …`. Every build registers

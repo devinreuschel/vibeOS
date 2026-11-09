@@ -1,0 +1,16 @@
+AArch64 vibeos-secondary-status
+(* The secondary stub loads from its param page, then publishes its status
+   with STLR as its last access. The boot CPU's wait_secondary_status loads
+   the status, Acquire-fences (DMB ISHLD), then reuses the page. The stub's
+   load seeing the reuse store while the boot CPU saw the status is
+   forbidden. *)
+{
+0:X1=status; 0:X2=param;
+1:X1=status; 1:X2=param;
+}
+ P0              | P1              ;
+ LDR W3,[X2]     | LDR W4,[X1]     ;
+ MOV W0,#1       | DMB ISHLD       ;
+ STLR W0,[X1]    | MOV W0,#2       ;
+                 | STR W0,[X2]     ;
+exists (0:X3=2 /\ 1:X4=1)

@@ -6,6 +6,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[cfg(target_arch = "aarch64")]
 use vibeos::elf::EM_AARCH64;
@@ -215,6 +216,72 @@ pub(crate) fn run(img: &Image, argv: &[&str]) -> Result<u32, LoadError> {
 #[allow(dead_code, reason = "x86 ktests wait for reclaim")]
 pub(crate) fn frames_settle(before: usize) -> bool {
     super::wait_for(|| super::free_frames() == before)
+}
+
+/// `addr` of the user fault whose body yields once, at its top; 0 for none.
+static FAULT_YIELD_ADDR: AtomicU64 = AtomicU64::new(0);
+static FAULT_YIELDING: AtomicBool = AtomicBool::new(false);
+static FAULT_DURING_YIELD: AtomicU64 = AtomicU64::new(0);
+
+/// The next ring-3 page fault at `addr` (CR2 on x86_64, FAR on aarch64)
+/// yields at the top of its body until another ring-3 page-fault body has
+/// run, for at most 1 s (ROADMAP §10.6, §11.3).
+pub(crate) fn arm_fault_yield(addr: u64) {
+    // Release: pairs with the Acquire loads in `on_user_fault` and `fault_during_yield`.
+    FAULT_DURING_YIELD.store(0, Ordering::Release);
+    // Release: pairs with the Acquire load in `on_user_fault`.
+    FAULT_YIELDING.store(false, Ordering::Release);
+    // Release: pairs with the Acquire load and compare-exchange in `on_user_fault`.
+    FAULT_YIELD_ADDR.store(addr, Ordering::Release);
+}
+
+pub(crate) fn disarm_fault_yield() {
+    // Release: pairs with the Acquire load and compare-exchange in `on_user_fault`.
+    FAULT_YIELD_ADDR.store(0, Ordering::Release);
+}
+
+/// The fault address of the first ring-3 page-fault body that ran during
+/// the yield; 0 for none.
+pub(crate) fn fault_during_yield() -> u64 {
+    // Acquire: pairs with the Release stores in `on_user_fault` and `arm_fault_yield`.
+    FAULT_DURING_YIELD.load(Ordering::Acquire)
+}
+
+/// Top of a ring-3 page-fault body, after the entry has saved the fault
+/// address into the frame and unmasked interrupts: x86_64's `#PF` body and
+/// aarch64's EL0 data and instruction aborts.
+pub(crate) fn on_user_fault(addr: u64) {
+    // Acquire: pairs with the Release stores of `FAULT_YIELDING` below and in `arm_fault_yield`.
+    if FAULT_YIELDING.load(Ordering::Acquire) {
+        // Acquire: pairs with the Release stores in `arm_fault_yield` and below.
+        if FAULT_DURING_YIELD.load(Ordering::Acquire) == 0 {
+            // Release: pairs with the yield loop's Acquire load below and `fault_during_yield`.
+            FAULT_DURING_YIELD.store(addr, Ordering::Release);
+        }
+        return;
+    }
+    // Acquire: pairs with the Release stores in `arm_fault_yield` and `disarm_fault_yield`.
+    let armed = FAULT_YIELD_ADDR.load(Ordering::Acquire);
+    // AcqRel, Acquire on failure: pairs with the Release stores of the arm and disarm.
+    if armed == 0
+        || addr != armed
+        || FAULT_YIELD_ADDR
+            .compare_exchange(armed, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return;
+    }
+    // Release: pairs with the Acquire load at the top of a later body.
+    FAULT_YIELDING.store(true, Ordering::Release);
+    let t0 = crate::time_init::now_ns();
+    // Acquire: pairs with the Release store of another body's address above.
+    while FAULT_DURING_YIELD.load(Ordering::Acquire) == 0
+        && crate::time_init::now_ns().saturating_sub(t0) < 1_000_000_000
+    {
+        crate::thread_init::yield_now();
+    }
+    // Release: pairs with the Acquire load at the top of a later body.
+    FAULT_YIELDING.store(false, Ordering::Release);
 }
 
 /// `user_code!(NAME, "<asm>")` assembles position-independent code into

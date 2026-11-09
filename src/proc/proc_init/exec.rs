@@ -95,6 +95,7 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
         }
     };
     let root = space.root().as_u64();
+    let ctx = space.ctx_addr();
     let mut child = *frame;
     Arch::set_ret(&mut child, 0);
     let fs = {
@@ -119,7 +120,7 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
             }
         }
     };
-    let h = match thread_init::spawn_user("user", user_thread_entry, pid, root, &child) {
+    let h = match thread_init::spawn_user("user", user_thread_entry, pid, root, ctx, &child) {
         Ok(h) => h,
         Err(e) => {
             // Nothing names the clone's root yet: no thread was made, so
@@ -233,6 +234,7 @@ pub(super) fn sys_execve(
     let rsp = loaded.rsp;
     let fs = loaded.fs;
     let root = loaded.space.root().as_u64();
+    let ctx = loaded.space.ctx_addr();
     let mut new = Some(loaded.space);
     let old = with_table(|t| {
         let p = t.get_mut(pid)?;
@@ -248,12 +250,12 @@ pub(super) fn sys_execve(
         return Err(KError::Srch);
     };
     close_where(pid, "execve close-on-exec", Fd::cloexec);
-    thread_init::set_pid_cr3(tid, pid, root);
+    thread_init::set_pid_cr3(tid, pid, root, ctx);
     // SAFETY: invariant I44, established at `addr_space_init::SpaceCore`'s
     // drop: `root` is the root of the space `create` built and `p.space`
     // now holds, and `set_pid_cr3` recorded it in this thread's TCB on the
     // line above, here.
-    unsafe { addr_space_init::load_cr3_u64(root) };
+    unsafe { addr_space_init::load_cr3_u64(root, ctx) };
     // The old space's last `users` put, with no lock held and its root no
     // longer loaded or named: the teardown sleeps for its `mm` lock.
     drop(old);

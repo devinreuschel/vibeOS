@@ -179,6 +179,28 @@ pub(crate) fn scan_live_stacks(mut f: impl FnMut(vibeos::sched::stack_depth::Dee
     }
 }
 
+/// Each live thread's id, name and stack `[base, top)`, one `SCHED`
+/// section per slot, handed to `f` with the lock dropped (ROADMAP §11.3's
+/// stack-size check). A thread without a stack is left out.
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub(crate) fn live_stack_spans(mut f: impl FnMut(u32, &'static str, u64, u64)) {
+    let mut i = 0usize;
+    while i < MAX_THREADS {
+        let span = with_sched(|s| {
+            let t = s.slots.get(i)?.as_deref()?;
+            if t.state == ThreadState::Dead {
+                return None;
+            }
+            let st = t.stack.as_ref()?;
+            Some((t.id.0, t.name, st.base().as_u64(), st.top().as_u64()))
+        });
+        if let Some((id, name, base, top)) = span {
+            f(id, name, base, top);
+        }
+        i += 1;
+    }
+}
+
 /// The id, name, CPU and `run_tsc` of each thread in the table, up to
 /// `out.len()`, under one SCHED section: a test compares two of these to
 /// name the threads a CPU ran between them. Returns how many it wrote.

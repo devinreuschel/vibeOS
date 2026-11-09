@@ -223,7 +223,6 @@ fn device_irq(frame: &mut arch::idt::TrapFrame) {
 
 pub fn dispatch(vec: u8) {
     hardirq::set(true);
-    let mut owned = false;
     let irq_raw = VEC_TO_IRQ
         .get(usize::from(vec))
         .map(|s| {
@@ -233,46 +232,7 @@ pub fn dispatch(vec: u8) {
         })
         .unwrap_or(0);
     let irq = IrqId::from_raw(irq_raw);
-    if let Some(i) = irq.slot() {
-        let (top, work, ctx) = with_irq(|s| {
-            (
-                s.th.top.get(i).copied().flatten(),
-                s.th.work.get(i).copied().flatten(),
-                s.th.ctx.get(i).cloned().flatten(),
-            )
-        });
-        if work.is_some() || top.is_some() {
-            owned = true;
-            if let Some(h) = top {
-                h(ctx.as_deref());
-            }
-            thread_init::with_sched(|sched| {
-                with_irq(|s| {
-                    if let Some(p) = s.th.pending.get_mut(i) {
-                        *p = true;
-                    }
-                    if s.th.started {
-                        sched.wake_one(&mut s.th.wq);
-                    }
-                });
-            });
-            // A count, never the last while the vector holds its own; a
-            // last put in hard IRQ defers (DESIGN §2.11 rule 6).
-            drop(ctx);
-        } else if let Some(slot) = HANDLERS.get(i) {
-            // Acquire: pairs with the Release stores in `set_handler` and `free_vector`.
-            let p = slot.load(Ordering::Acquire);
-            if p != 0 {
-                owned = true;
-                // SAFETY: invariant: a nonzero `HANDLERS` slot holds a
-                // `fn()`; established by `irq::irq_init::set_handler`, its
-                // only nonzero store.
-                let h: Handler = unsafe { core::mem::transmute(p) };
-                h();
-            }
-        }
-    }
-    if owned {
+    if run_handler(irq) {
         let chip = with_irq(|s| s.table.chip(irq));
         match chip {
             Some(c) => c.eoi(u32::from(vec)),
@@ -283,6 +243,55 @@ pub fn dispatch(vec: u8) {
         unowned(vec);
     }
     hardirq::set(false);
+}
+
+/// Run `irq`'s handler in hard IRQ, the one body `dispatch` and
+/// `dispatch_intid` share: a threaded handler's top half, then its worker
+/// marked pending and woken, or else a plain handler; the two are
+/// exclusive. Returns whether a handler owned the interrupt.
+fn run_handler(irq: IrqId) -> bool {
+    let Some(i) = irq.slot() else {
+        return false;
+    };
+    let (top, work, ctx) = with_irq(|s| {
+        (
+            s.th.top.get(i).copied().flatten(),
+            s.th.work.get(i).copied().flatten(),
+            s.th.ctx.get(i).cloned().flatten(),
+        )
+    });
+    if work.is_some() || top.is_some() {
+        if let Some(h) = top {
+            h(ctx.as_deref());
+        }
+        thread_init::with_sched(|sched| {
+            with_irq(|s| {
+                if let Some(p) = s.th.pending.get_mut(i) {
+                    *p = true;
+                }
+                if s.th.started {
+                    sched.wake_one(&mut s.th.wq);
+                }
+            });
+        });
+        // A count, never the last while the vector holds its own; a
+        // last put in hard IRQ defers (DESIGN §2.11 rule 6).
+        drop(ctx);
+        return true;
+    }
+    let Some(slot) = HANDLERS.get(i) else {
+        return false;
+    };
+    // Acquire: pairs with the Release stores in `set_handler` and `free_vector`.
+    let p = slot.load(Ordering::Acquire);
+    if p == 0 {
+        return false;
+    }
+    // SAFETY: invariant: a nonzero `HANDLERS` slot holds a `fn()`;
+    // established by `irq::irq_init::set_handler`, its only nonzero store.
+    let h: Handler = unsafe { core::mem::transmute(p) };
+    h();
+    true
 }
 
 /// Deliver a GIC INTID to its `IrqId` handler, or the timer / SGI path.
@@ -309,42 +318,11 @@ pub fn dispatch_intid(intid: u32) {
     #[cfg(feature = "kernel_tests")]
     crate::arch::aarch64::gic::ktest_note(intid);
     hardirq::set(true);
-    let irq_raw = crate::arch::aarch64::gic::lookup(intid);
-    let irq = IrqId::from_raw(irq_raw);
-    if let Some(i) = irq.slot() {
-        let (top, work, ctx) = with_irq(|s| {
-            (
-                s.th.top.get(i).copied().flatten(),
-                s.th.work.get(i).copied().flatten(),
-                s.th.ctx.get(i).cloned().flatten(),
-            )
-        });
-        // threaded and plain handlers are exclusive, as in `dispatch`
-        if work.is_some() || top.is_some() {
-            if let Some(h) = top {
-                h(ctx.as_deref());
-            }
-            thread_init::with_sched(|sched| {
-                with_irq(|s| {
-                    if let Some(p) = s.th.pending.get_mut(i) {
-                        *p = true;
-                    }
-                    if s.th.started {
-                        sched.wake_one(&mut s.th.wq);
-                    }
-                });
-            });
-            drop(ctx);
-        } else if let Some(slot) = HANDLERS.get(i) {
-            // Acquire: pairs with the Release store in `set_handler`.
-            let p = slot.load(Ordering::Acquire);
-            if p != 0 {
-                // SAFETY: a nonzero `HANDLERS` slot holds a `fn()`;
-                // established by `irq::irq_init::set_handler`.
-                let h: Handler = unsafe { core::mem::transmute(p) };
-                h();
-            }
-        }
+    let irq = IrqId::from_raw(crate::arch::aarch64::gic::lookup(intid));
+    if irq.slot().is_some() {
+        // The GIC EOIs every INTID; a bound one with no handler yet stays
+        // as its owner configured it.
+        run_handler(irq);
     } else if let Some(c) = crate::arch::aarch64::gic::chip() {
         // No IrqId: a level SPI would re-pend after EOI forever.
         c.mask(intid);
@@ -1014,6 +992,25 @@ pub fn enable_msix(dev: &Device, table_index: u16, irq: IrqId) -> Result<(), Irq
         });
     }
     Ok(())
+}
+
+/// The four dwords of `irq`'s live MSI-X table entry (address low, address
+/// high, data, vector control), or None when `enable_msix` armed none.
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub fn msix_entry_dwords(irq: IrqId) -> Option<[u32; 4]> {
+    let live = with_irq(|s| irq.slot().and_then(|i| s.msix.get(i).copied().flatten()))?;
+    let base = live.table.wrapping_add((live.index as u64) * 16) as *const u32;
+    // SAFETY: invariant I49, established by `irq::irq_init::enable_msix`:
+    // `live.table` is the MSI-X table VA that call checked for `live.index`,
+    // so the entry's four dwords are mapped, aligned device registers.
+    unsafe {
+        Some([
+            base.read_volatile(),
+            base.add(1).read_volatile(),
+            base.add(2).read_volatile(),
+            base.add(3).read_volatile(),
+        ])
+    }
 }
 
 pub fn disable_msix(dev: &Device) {

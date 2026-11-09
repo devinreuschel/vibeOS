@@ -135,6 +135,7 @@ impl IoWaiter {
     /// visible, so nothing after it may touch `*this`. A raw pointer, not
     /// `&self`: a reference argument counts as dereferenceable for the
     /// whole call, so the compiler could read `*self` after the store.
+    /// tests/litmus/publish_last.litmus
     ///
     /// # Safety
     ///

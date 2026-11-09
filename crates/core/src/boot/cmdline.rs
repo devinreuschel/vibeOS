@@ -88,6 +88,11 @@ pub const OPTIONS: &[Opt] = &[
         origin: Origin::Vibeos,
         class: Class::Internal,
     },
+    Opt {
+        name: "vibeos.virtio_blk_noncoherent",
+        origin: Origin::Vibeos,
+        class: Class::Internal,
+    },
 ];
 
 /// Sysctl paths vibeOS implements, dotted. None yet: every

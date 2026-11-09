@@ -104,6 +104,41 @@ pub(crate) fn test_block_vblk_mmio_smp() -> Outcome {
     Outcome::Ok
 }
 
+/// The virtio-mmio disk's interrupt is an SPI the device tree names, and a
+/// request's completion arrives through it (ROADMAP §11.3, the wired path
+/// beside MSI).
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn test_virtio_mmio_spi() -> Outcome {
+    // INTIDs 32 to 1019 are SPIs (GICv3 architecture specification, INTID ranges).
+    const SPI: core::ops::Range<u32> = 32..1020;
+    if mmio_blk(|b| b.live()).is_none() {
+        return Outcome::Skip("no virtio-mmio blk");
+    }
+    let Some(dev) = mmio_blk(|b| b.dev().clone()) else {
+        return Outcome::Fail("no mmio device");
+    };
+    let intid = match crate::virtio_mmio_init::irq_spec(&dev) {
+        Some(vibeos::irq::IrqSpecifier::Gic { intid }) => intid,
+        _ => return Outcome::Fail("no device-tree interrupt"),
+    };
+    if !SPI.contains(&intid) {
+        return crate::fail_fmt!("intid {intid} is not an SPI");
+    }
+    let top0 = mmio_blk(|b| b.top_hits()).unwrap_or(0);
+    let mut buf = [0u8; 512];
+    if mmio_blk(|b| b.read(0, &mut buf)).is_none_or(|r| r.is_err()) {
+        return Outcome::Fail("read");
+    }
+    let delivered = spin_until_ns(
+        || mmio_blk(|b| b.top_hits()).unwrap_or(0) != top0,
+        500_000_000,
+    );
+    if !delivered {
+        return crate::fail_fmt!("spi {intid} not delivered");
+    }
+    Outcome::Ok
+}
+
 #[cfg(target_arch = "aarch64")]
 pub(crate) fn test_dev_random_source() -> Outcome {
     if !virtio_init::rng_bound() && crate::arch::current::hw_rng64().is_none() {

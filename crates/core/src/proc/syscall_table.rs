@@ -955,6 +955,13 @@ pub mod aarch64 {
     /// The table dispatch indexes by number.
     pub static TABLE: NrTable = NrTable::new(NrRule::Low32, &SLOTS);
 
+    /// The `x` register `svc #0` takes the number in (SYSCALL.md §1.1).
+    pub const NR_REG: usize = 8;
+    /// The `x` registers of the arguments, in order.
+    pub const ARG_REGS: [usize; 6] = [0, 1, 2, 3, 4, 5];
+    /// The `x` register the result goes in.
+    pub const RET_REG: usize = 0;
+
     /// Call `sys`'s handler, each register cut to its argument's C type.
     pub fn call<H: Handlers + ?Sized>(h: &mut H, sys: Sys, regs: &[u64; 6]) -> SysResult {
         match sys {

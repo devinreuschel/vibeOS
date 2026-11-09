@@ -1,4 +1,4 @@
-//! aarch64 boot helpers: exception level, ISA floor, early vectors.
+//! aarch64 boot helpers: exception level, ISA floor, early console.
 
 use core::cell::UnsafeCell;
 
@@ -6,7 +6,7 @@ use vibeos::arch::BootHandover;
 use vibeos::arch::aarch64::paging::{self, DESC_ADDR_MASK, DESC_TABLE, DESC_VALID};
 use vibeos::paging::{PhysAddr, VirtAddr, mmio_flags};
 
-use super::{Arch, cpu, vectors};
+use super::{Arch, cpu};
 use crate::boot::{self, BootInfo};
 
 /// QEMU `virt` PL011 before the device tree is walked.
@@ -133,16 +133,20 @@ fn alloc_early_table(kphys: u64, used: &mut usize) -> Option<u64> {
         .map(|off| kphys.wrapping_add(off))
 }
 
-/// After the first log line: EL marker, ISA info line, early VBAR. The ISA
-/// floor itself is checked in `_start`, before that line.
+/// After the first log line: EL marker, cache meet, ISA info line, PAN.
+/// The ISA floor itself is checked in `_start`, before that line, and the
+/// early VBAR is set there before the check.
 pub fn early_init() {
     cpu::note_exception_level();
-    cpu::note_cache();
+    if let Err(why) = cpu::note_cache() {
+        // The boot CPU before SMP: `serial::raw` needs no log path.
+        crate::serial::raw::put_boot_line(why.line().as_bytes());
+        cpu::halt();
+    }
     super::percpu::set_tpidr_el2(cpu::el2_vhe());
     cpu::log_isa_floor();
     cpu::set_pan();
     cpu::clear_tpidrro_el0();
-    vectors::init_early();
 }
 
 impl BootHandover for Arch {

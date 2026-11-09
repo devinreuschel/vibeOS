@@ -59,7 +59,7 @@ fn pick(desc: Option<TimerDesc>) -> (Which, u32, u64) {
         }) => (irqs, nirq, clock_frequency),
         _ => ([0; 5], 0, None),
     };
-    let hz = clock.map(u64::from).filter(|h| *h != 0).unwrap_or(frq);
+    let hz = vibeos::arch::aarch64::sysreg::counter_hz(clock, frq);
     let vhe = cpu::el2_vhe();
     // irqs[] are INTID cells: type, number packed? FDT parser stores the
     // interrupt number cells in tree order as the PPI numbers (or INTIDs).

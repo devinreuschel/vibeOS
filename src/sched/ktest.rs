@@ -29,7 +29,7 @@ pub(crate) use registry::{test_ktest_fail_fmt, test_ktest_helpers, test_ktest_ro
 pub(crate) use requeue::test_requeue_moves_each_dequeue;
 pub(crate) use sleep::{
     block_in_hard_irq_asserts, in_hard_irq_top_bottom, lock_across_switch_asserts,
-    sleep_under_spinlock_asserts,
+    sleep_under_spinlock_asserts, tlb_contract_asserts,
 };
 pub(crate) use sweep::{sched_overdue_lost_timeout, sched_sweep_cost};
 
@@ -1379,6 +1379,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("block_in_hard_irq_asserts", block_in_hard_irq_asserts),
     test("in_hard_irq_top_bottom", in_hard_irq_top_bottom),
     test("sleep_under_spinlock_asserts", sleep_under_spinlock_asserts),
+    test("tlb_contract_asserts", tlb_contract_asserts),
     test("boot_stack_guarded", boot_stack_guarded),
     test("stack_depth_exit_scan", stack_depth_exit_scan),
     test("stack_depth_planted", stack_depth_planted)

@@ -1,5 +1,6 @@
 //! The aarch64 port: its kernel half (DESIGN §1.3).
 
+pub mod asid;
 pub(crate) mod boot;
 #[cfg(feature = "kernel_tests")]
 #[allow(
@@ -62,6 +63,32 @@ pub(crate) mod ktest_asid;
     reason = "kernel_tests-only in-guest tests: a failure ends a test, not the kernel"
 )]
 pub(crate) mod ktest_el0;
+#[cfg(feature = "kernel_tests")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::let_underscore_must_use,
+    clippy::unused_result_ok,
+    clippy::disallowed_types,
+    clippy::disallowed_macros,
+    reason = "kernel_tests-only in-guest tests: a failure ends a test, not the kernel"
+)]
+pub(crate) mod ktest_gic;
+#[cfg(feature = "kernel_tests")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::let_underscore_must_use,
+    clippy::unused_result_ok,
+    clippy::disallowed_types,
+    clippy::disallowed_macros,
+    reason = "kernel_tests-only in-guest tests: a failure ends a test, not the kernel"
+)]
+pub(crate) mod ktest_stacks;
 #[cfg(feature = "kernel_tests")]
 #[allow(
     clippy::unwrap_used,
@@ -203,20 +230,27 @@ impl Barriers for Arch {
         fence(Ordering::Release);
         // SAFETY: `dmb oshst` orders stores to device-visible memory. established here.
         unsafe {
-            core::arch::asm!("dmb oshst", options(nostack, preserves_flags));
+            core::arch::asm!(
+                vibeos::aarch64_dma_wmb_insn!(),
+                options(nostack, preserves_flags)
+            );
         }
         // Release: pairs with nothing.
         compiler_fence(Ordering::Release);
     }
 
-    /// tests/litmus/log_ring.litmus
+    /// tests/litmus/virtio_avail.litmus (its reader's `DMB OSHLD` between
+    /// the index load and the descriptor load)
     #[inline]
     fn dma_rmb() {
         // Acquire: pairs with the Release fence in `dma_wmb`.
         fence(Ordering::Acquire);
         // SAFETY: `dmb oshld` orders loads from device-visible memory. established here.
         unsafe {
-            core::arch::asm!("dmb oshld", options(nostack, preserves_flags));
+            core::arch::asm!(
+                vibeos::aarch64_dma_rmb_insn!(),
+                options(nostack, preserves_flags)
+            );
         }
         // Acquire: pairs with nothing.
         compiler_fence(Ordering::Acquire);
@@ -228,7 +262,10 @@ impl Barriers for Arch {
     fn dma_mb() {
         // SAFETY: `dmb osh` is a full outer-shareable barrier. established here.
         unsafe {
-            core::arch::asm!("dmb osh", options(nostack, preserves_flags));
+            core::arch::asm!(
+                vibeos::aarch64_dma_mb_insn!(),
+                options(nostack, preserves_flags)
+            );
         }
     }
 
@@ -259,11 +296,29 @@ impl Barriers for Arch {
         unsafe { core::ptr::write_volatile(reg, v) };
     }
 
-    #[inline]
-    unsafe fn sync_for_device(_start: *const u8, _len: usize) {}
+    /// DESIGN §4.7: `dc cvac` on every line, then `dsb sy`, whatever the
+    /// transfer's direction (`tlb::dma_clean`).
+    unsafe fn sync_for_device(start: *const u8, len: usize) {
+        // SAFETY: the range is mapped DMA memory the caller owns, the
+        // `# Safety` contract of `vibeos::arch::Barriers::sync_for_device`;
+        // established here by the caller's unsafe call.
+        unsafe { cpu::dma_clean(start as u64, len as u64) };
+    }
 
-    #[inline]
-    unsafe fn sync_for_cpu(_start: *const u8, _len: usize) {}
+    /// DESIGN §4.7: `dc ivac` on every whole line (`dc civac` on a partial
+    /// one), then `dsb sy` (`tlb::dma_inval`).
+    unsafe fn sync_for_cpu(start: *const u8, len: usize) {
+        // SAFETY: the range is mapped DMA memory the caller owns with no
+        // CPU store pending, the `# Safety` contract of
+        // `vibeos::arch::Barriers::sync_for_cpu`; established here by the
+        // caller's unsafe call.
+        unsafe { cpu::dma_inval(start as u64, len as u64) };
+    }
+
+    /// `CTR_EL0.CWG`, the largest over every CPU (`cpu::dma_granule`).
+    fn dma_granule() -> usize {
+        cpu::dma_granule()
+    }
     unsafe fn sync_icache(start: *const u8, len: usize) {
         // SAFETY: the range is mapped and readable, the `# Safety` contract
         // of `vibeos::arch::Barriers::sync_icache`; established here by the

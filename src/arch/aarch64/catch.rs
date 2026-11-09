@@ -2,7 +2,7 @@
 
 use core::arch::global_asm;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::arch::aarch64::trap;
 
@@ -38,6 +38,9 @@ pub struct Caught {
     #[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
     pub elr: u64,
     pub handler_rsp: u64,
+    /// The stack-overflow entry (`overflow`) reported the fault, not the
+    /// data-abort path (`intercept`).
+    pub stack_overflow: bool,
 }
 
 static KIND: AtomicU8 = AtomicU8::new(ST_OFF);
@@ -50,6 +53,7 @@ static GOT_FAR: AtomicU64 = AtomicU64::new(0);
 static GOT_ESR: AtomicU64 = AtomicU64::new(0);
 static GOT_ELR: AtomicU64 = AtomicU64::new(0);
 static GOT_SP: AtomicU64 = AtomicU64::new(0);
+static GOT_OVERFLOW: AtomicBool = AtomicBool::new(false);
 
 struct CatchBuf(UnsafeCell<JmpBuf>);
 
@@ -122,6 +126,9 @@ fn armed_token() -> u32 {
 }
 
 fn catch_kind<F: FnOnce()>(kind: u8, f: F) -> Option<Caught> {
+    // Relaxed: pairs with the Relaxed load below on this CPU; no earlier
+    // window's report survives into this one.
+    GOT_OVERFLOW.store(false, Ordering::Relaxed);
     // Release: pairs with the Acquire load in `overflow` / `intercept`.
     KIND.store(kind, Ordering::Release);
     // Release: pairs with the Acquire load in `overflow` / `intercept` / `on_panic`.
@@ -150,6 +157,8 @@ fn catch_kind<F: FnOnce()>(kind: u8, f: F) -> Option<Caught> {
         elr: GOT_ELR.load(Ordering::Relaxed),
         // Relaxed: pairs with the Relaxed stores in `overflow` / `intercept` on this CPU.
         handler_rsp: GOT_SP.load(Ordering::Relaxed),
+        // Relaxed: pairs with the Relaxed store in `overflow` on this CPU.
+        stack_overflow: GOT_OVERFLOW.load(Ordering::Relaxed),
     })
 }
 
@@ -192,6 +201,8 @@ pub fn overflow(far: u64, esr: u64, elr: u64, sp: u64) -> bool {
     GOT_ELR.store(elr, Ordering::Relaxed);
     // Relaxed: pairs with the Relaxed loads in `catch` on this CPU.
     GOT_SP.store(sp, Ordering::Relaxed);
+    // Relaxed: pairs with the Relaxed load in `catch_kind` on this CPU.
+    GOT_OVERFLOW.store(true, Ordering::Relaxed);
     // SAFETY: `vibeos_jmpbuf` was filled by `setjmp` on this CPU; established here.
     unsafe { vibeos_longjmp(BUF.0.get(), 1) };
 }

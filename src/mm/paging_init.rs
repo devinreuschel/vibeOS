@@ -98,6 +98,25 @@ fn sym_addr(sym: &u8) -> u64 {
 
 // ------------------ frame allocator glue ------------------
 
+/// A naturally aligned block of `1 << order` frames from the global buddy,
+/// zeroed through the physmap, as the physical address of its first frame:
+/// the caller owns the block and gives it back with
+/// `Frames::from_entry(pa, order)`. `None` when the buddy has no block of
+/// that order. The aarch64 port's boot tables, AP parameter pages, and GIC
+/// tables take theirs here.
+#[cfg(target_arch = "aarch64")]
+pub fn alloc_zeroed(order: u8) -> Option<u64> {
+    let bytes = usize::try_from(PAGE_SIZE_4K.checked_shl(u32::from(order))?).ok()?;
+    let f = pmm_init::with_buddy(|b| b.alloc(order))?;
+    let pa = f.into_entry();
+    let va = hhdm_offset().wrapping_add(pa);
+    // SAFETY: invariant I14: the block is buddy RAM this fn just took and
+    // nothing else names, and the physmap maps every buddy frame writable
+    // at `hhdm_offset()`; established by `paging_init::install`.
+    unsafe { core::ptr::write_bytes(va as *mut u8, 0, bytes) };
+    Some(pa)
+}
+
 /// Adapter: `FrameAlloc` for `paging::Mapper` backed by the global
 /// buddy. Every allocation goes through `pmm_init::with_buddy` so the
 /// same single-CPU safety story applies (DESIGN §7.7 upgrade in phase 4).
@@ -575,16 +594,14 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         ) {
             boot::halt_with("vibeOS: paging: uart map failed");
         }
-        let fw = crate::machine_init::info()
-            .and_then(|d| d.fw_cfg)
-            .map(|d| d.base)
-            .unwrap_or(0x0902_0000);
-        if !map_device_window(
-            &mut mapper,
-            &mut alloc,
-            fw,
-            crate::boot::fw_cfg_init::MMIO_SPAN,
-        ) {
+        if let Some(fw) = fw_cfg_base()
+            && !map_device_window(
+                &mut mapper,
+                &mut alloc,
+                fw,
+                crate::boot::fw_cfg_init::MMIO_SPAN,
+            )
+        {
             boot::halt_with("vibeOS: paging: fw_cfg map failed");
         }
     }
@@ -696,11 +713,11 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         // The mapped page starts at `uart & !0xFFF`; the registers sit at
         // `uart`, so the in-page offset is kept.
         crate::serial::raw::set_mmio(hhdm_offset().wrapping_add(uart));
-        let fw = crate::machine_init::info()
-            .and_then(|d| d.fw_cfg)
-            .map(|d| d.base)
-            .unwrap_or(0x0902_0000);
-        crate::boot::fw_cfg_init::set_mmio_va(hhdm_offset().wrapping_add(fw));
+        // A parsed tree without a `qemu,fw-cfg-mmio` node leaves fw_cfg
+        // absent: 0 makes `fw_cfg_init::mmio_va` read `None`.
+        crate::boot::fw_cfg_init::set_mmio_va(
+            fw_cfg_base().map_or(0, |fw| hhdm_offset().wrapping_add(fw)),
+        );
     }
     // Release: pairs with the Acquire load in `identity_covers`.
     #[cfg(target_arch = "x86_64")]
@@ -1034,4 +1051,16 @@ const fn paging_align_up(x: u64, a: u64) -> u64 {
 #[inline]
 const fn paging_align_down(x: u64, a: u64) -> u64 {
     x & !(a - 1)
+}
+
+/// The fw_cfg window's physical base: the device tree's
+/// `qemu,fw-cfg-mmio` node once the tree is parsed, `None` when the tree
+/// names none, and QEMU `virt`'s 0x0902_0000 when there is no tree, as the
+/// early console map assumes before the walk.
+#[cfg(target_arch = "aarch64")]
+fn fw_cfg_base() -> Option<u64> {
+    match crate::machine_init::info() {
+        Some(d) => d.fw_cfg.map(|m| m.base),
+        None => Some(0x0902_0000),
+    }
 }

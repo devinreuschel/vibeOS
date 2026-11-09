@@ -65,7 +65,7 @@ static STATE: SpinMutex<State> = SpinMutex::with_rank(
 fn ack_isr(st: &State) {
     for d in st.devs.iter().flatten() {
         if d.isr != 0 {
-            let _ = r8(d.isr, 0);
+            let _ = crate::virtio_init::read_isr8(d.isr);
         }
     }
 }
@@ -191,6 +191,7 @@ fn fail_setup(dev: &DevRef, common: u64, irq: Option<IrqId>, bufs: [Option<DmaBu
 }
 
 fn setup(dev: &DevRef, caps: ModernCaps) -> Result<Dev, VirtioError> {
+    crate::virtio_init::refuse_non_coherent("virtio-input", dev)?;
     let common_cap = caps.common.ok_or(VirtioError::NoCaps)?;
     let notify_cap = caps.notify.ok_or(VirtioError::NoCaps)?;
     let isr_cap = caps.isr.ok_or(VirtioError::NoCaps)?;
@@ -258,12 +259,12 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<Dev, VirtioError> {
         fail_setup(dev, common, irq_opt(irq_raw), [None, None]);
         return Err(VirtioError::BadQueue);
     };
-    let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64)) else {
+    let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64, dev.dma_coherent)) else {
         fail_setup(dev, common, irq_opt(irq_raw), [None, None]);
         return Err(VirtioError::Failed);
     };
     let data_len = (qsz as u64).saturating_mul(EVENT_SIZE as u64);
-    let Some(data) = dma_init::alloc(DmaAlloc::dma32(data_len.max(8))) else {
+    let Some(data) = dma_init::alloc(DmaAlloc::dma32(data_len.max(8), dev.dma_coherent)) else {
         fail_setup(dev, common, irq_opt(irq_raw), [Some(qdma), None]);
         return Err(VirtioError::Failed);
     };
@@ -275,8 +276,15 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<Dev, VirtioError> {
     }
     // SAFETY: invariant I53: `qdma` is a page-aligned DMA buffer of at
     // least `layout.total` bytes; established by `dma_init::alloc`.
-    let mut vq = unsafe {
+    let vq = unsafe {
         arch::current::SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0)
+    };
+    let mut vq = match vq {
+        Ok(vq) => vq,
+        Err(e) => {
+            fail_setup(dev, common, irq_opt(irq_raw), [Some(qdma), Some(data)]);
+            return Err(e);
+        }
     };
     vq.init();
     qdma.sync_for_device::<Arch>();

@@ -53,6 +53,8 @@ pub(crate) use boot::bootstrap_stack;
 pub use boot::init_bootstrap;
 pub use idle::halt_if_idle;
 pub use sweep::start_sweep;
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub(crate) use table::live_stack_spans;
 #[cfg(feature = "kernel_tests")]
 pub(crate) use table::scan_live_stacks;
 pub(crate) use table::table_root;
@@ -67,7 +69,7 @@ pub use user::{reset_user_segs, set_tls_base, set_user_segs};
 
 // The syscall layer's hooks (DESIGN §1.2), which `syscall_init::init_bsp`
 // sets before the scheduler runs a second thread.
-/// The hardware side of a context switch (FPU, RSP0, CR3):
+/// The hardware side of a context switch (FPU, RSP0, CR3, user TLS base):
 /// `syscall_init::on_switch`. Unset, a switch changes none of them.
 static SWITCH_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
@@ -88,6 +90,21 @@ unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
     // Acquire: pairs with the Release store in `set_switch_hooks`.
     let p = SWITCH_HOOK.load(Ordering::Acquire);
     if p.is_null() {
+        // Unset only before `syscall_init::init_bsp`, when no user thread
+        // exists: the hook is the one owner of the user TLS base and
+        // selectors (DESIGN §7.5), so a user thread switched without it
+        // would keep another thread's.
+        #[cfg(debug_assertions)]
+        {
+            // SAFETY: invariant I9: `old` and `new` are null or live TCBs,
+            // as this fn's `# Safety` states; established by
+            // `thread_init::switch_now`.
+            let (old, new) = unsafe { (old.as_ref(), new.as_ref()) };
+            debug_assert!(
+                old.is_none_or(|t| t.pid == 0) && new.is_none_or(|t| t.pid == 0),
+                "context switch of a user thread before the switch hook"
+            );
+        }
         return;
     }
     // SAFETY: invariant: a non-null `SWITCH_HOOK` holds an
@@ -683,21 +700,9 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
             );
             per_cpu_init::set_current_thread(cpu, new_ptr);
             (*new_ptr).on_cpu.set();
-            // A user thread's ring-3 DS, ES, FS and GS (DESIGN §7.5). Save
-            // the outgoing TLS base before `on_switch` and before a
-            // selector load, which can zero `FS_BASE`.
-            if (*old_ptr).pid != 0 {
-                (*old_ptr).user_segs = crate::arch::gdt::read_user_segs();
-                (*old_ptr).tls_base = crate::arch::current::user_tls();
-            }
+            // The port's hardware side, the user TLS base and x86_64's
+            // selectors included (DESIGN §7.5).
             on_switch(cpu, old_ptr, new_ptr);
-            if (*new_ptr).pid != 0 {
-                crate::arch::gdt::load_user_segs((*new_ptr).user_segs);
-                // SAFETY: `tls_base` is 0 or the image's thread pointer,
-                // a user address `setup_tls` chose; established by
-                // `user_init::setup_tls` and `on_switch`.
-                crate::arch::current::set_user_tls((*new_ptr).tls_base);
-            }
         }
     });
     // The switch asm turns IF on for a thread whose `irq_nest` is 0.
@@ -1011,6 +1016,7 @@ pub fn spawn_user(
     entry: fn(),
     pid: u32,
     root: u64,
+    ctx: usize,
     frame: &UserFrame,
 ) -> Result<ThreadHandle, SpawnError> {
     let h = spawn_inner(
@@ -1033,6 +1039,9 @@ pub fn spawn_user(
         let (Some(tcb), Some(top)) = (tcb, top) else {
             panic!("spawn_user: thread {} has no stack", h.id().0);
         };
+        // Beside the `as_cr3` that `spawn_inner` wrote, before the thread
+        // can run.
+        tcb.as_ctx = ctx;
         let at = top - USER_FRAME_BYTES as u64;
         // SAFETY: invariant I25: `[top - USER_FRAME_BYTES, top)` is the
         // user frame of this thread's own kernel stack, mapped and unused:
@@ -1252,6 +1261,7 @@ fn fill_tcb(
     tcb.run_tsc = 0;
     tcb.wait_outcome = WaitOutcome::Woken;
     tcb.as_cr3 = as_cr3;
+    tcb.as_ctx = 0;
     tcb.fpu = initial_fxsave();
     // A reused TCB address: no CPU's `fp_owner` may match it.
     fp_invalidate(tcb);
@@ -1414,11 +1424,15 @@ pub fn current_pid() -> u32 {
     }
 }
 
-pub fn set_pid_cr3(id: ThreadId, pid: u32, root: u64) {
+/// Record `pid`, `root`, and the address of `root`'s space context
+/// (`SpaceCore::ctx_addr`, or 0 for none) in thread `id`'s TCB, under
+/// SCHED, so a switch reads the root and its context together.
+pub fn set_pid_cr3(id: ThreadId, pid: u32, root: u64, ctx: usize) {
     with_sched(|s| {
         if let Some(t) = s.get_mut(id) {
             t.pid = pid;
             t.as_cr3 = root;
+            t.as_ctx = ctx;
         }
     });
 }

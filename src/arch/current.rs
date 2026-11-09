@@ -9,6 +9,14 @@ pub type Arch = super::x86_64::Arch;
 pub type Arch = super::aarch64::Arch;
 
 #[cfg(target_arch = "aarch64")]
+pub use super::aarch64::asid::SpaceCtx;
+/// A user space's per-port context, kept in `addr_space_init::SpaceCore`
+/// and named by `Tcb.as_ctx`: the ASID word on aarch64, nothing on x86_64
+/// until PCID (ROADMAP §18.3).
+#[cfg(target_arch = "x86_64")]
+pub use super::x86_64::mmu::SpaceCtx;
+
+#[cfg(target_arch = "aarch64")]
 pub use super::aarch64::mmu::enable_nx;
 /// The page-table port items that are not `PageTable` methods.
 #[cfg(target_arch = "x86_64")]
@@ -30,6 +38,14 @@ pub use super::x86_64::cpu::{
     interrupts_enabled, set_per_cpu_hooks, set_user_tls, stack_pointer, sti as irq_enable,
     user_tls,
 };
+
+/// The unmask a body run from a user-mode exception takes and the mask it
+/// leaves with (DESIGN §2.9 rule 3): IF on x86_64, all of DAIF on aarch64.
+#[cfg(target_arch = "aarch64")]
+pub use super::aarch64::cpu::{daif_clear_all as body_unmask, daif_set_all as body_mask};
+/// As above: on x86_64, `sti` and `cli`.
+#[cfg(target_arch = "x86_64")]
+pub use super::x86_64::cpu::{cli as body_mask, sti as body_unmask};
 
 // The registers the panic path saves for a CPU that stops (DESIGN §2.5
 // step 1): where it is, its frame pointer, and its flags.

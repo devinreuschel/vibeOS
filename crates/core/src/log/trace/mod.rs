@@ -43,6 +43,11 @@ pub const TSC_INVARIANT: u32 = 2;
 pub const WARP_MEASURED: u32 = 4;
 /// Header flag: the warp test saw a backward step.
 pub const WARP_BACKWARD: u32 = 8;
+/// Header flag: every CPU reads the counter from one system counter with
+/// one offset (aarch64's `CNTVCT_EL0`: `CNTPCT_EL0` minus a `CNTVOFF_EL2`
+/// that every CPU holds equal), so it needs no warp test, and `freq_hz` is
+/// the `CNTFRQ_EL0` value the kernel recorded.
+pub const COUNTER_UNIFORM: u32 = 16;
 
 /// A tracepoint. Value 0 is never an event, so a zeroed slot is not one.
 #[repr(u32)]
@@ -309,6 +314,7 @@ impl<const N: usize> Ring<N> {
 
     /// Append one record. The caller is this ring's CPU, with interrupts
     /// off, so pushes to one ring never overlap (DESIGN §2.2).
+    /// tests/litmus/log_ring.litmus
     pub fn push(&self, cpu: u32, ev: Event, tsc: u64, a: u64, b: u64) {
         if N == 0 {
             return;
@@ -344,6 +350,7 @@ impl<const N: usize> Ring<N> {
 
     /// A seqlock read of the slot for position `pos`: the record, or
     /// `None` when it is torn, stale or overwritten ([`valid_at`]).
+    /// tests/litmus/log_ring.litmus
     pub fn get(&self, pos: u64) -> Option<RecordData> {
         if N == 0 {
             return None;
@@ -655,13 +662,19 @@ pub struct ClockInfo {
     pub warp_measured: bool,
     /// The largest backward step the warp test saw, in cycles; 0 for none.
     pub max_skew: u64,
+    /// The counter is uniform across CPUs by architecture
+    /// ([`COUNTER_UNIFORM`]).
+    pub uniform: bool,
 }
 
 impl ClockInfo {
     /// DESIGN §6.4: records order across CPUs only when the counter is
-    /// invariant and the warp test ran and saw no backward step.
+    /// uniform across CPUs by architecture, or invariant with a warp test
+    /// that ran and saw no backward step.
     pub const fn order(&self) -> Order {
-        if !self.invariant {
+        if self.uniform {
+            Order::Global
+        } else if !self.invariant {
             Order::PerCpu("tsc not invariant")
         } else if !self.warp_measured {
             Order::PerCpu("tsc warp test did not run")
@@ -684,6 +697,9 @@ impl ClockInfo {
         if self.max_skew != 0 {
             f |= WARP_BACKWARD;
         }
+        if self.uniform {
+            f |= COUNTER_UNIFORM;
+        }
         f
     }
 
@@ -698,6 +714,7 @@ impl ClockInfo {
             invariant: flags & TSC_INVARIANT != 0,
             warp_measured: flags & WARP_MEASURED != 0,
             max_skew,
+            uniform: flags & COUNTER_UNIFORM != 0,
         })
     }
 }
@@ -868,13 +885,18 @@ pub fn export_chrome<W: fmt::Write>(
         }
     }
     let (name, reason) = match order {
+        Order::Global if clock.uniform => ("global", "a counter uniform across cpus"),
         Order::Global => (
             "global",
             "invariant tsc and no backward step in the warp test",
         ),
         Order::PerCpu(why) => ("per-cpu", why),
     };
-    let clk = if clock.freq_hz == 0 { "cycles" } else { "tsc" };
+    let clk = match (clock.freq_hz, clock.uniform) {
+        (0, _) => "cycles",
+        (_, true) => "cntvct",
+        (_, false) => "tsc",
+    };
     write!(
         out,
         "],\"displayTimeUnit\":\"ns\",\"otherData\":{{\"clock\":\"{clk}\",\"freq_hz\":\"{}\",\"order\":\"{name}\",\"reason\":\"{reason}\",\"skew_cycles\":\"{}\"}}}}",

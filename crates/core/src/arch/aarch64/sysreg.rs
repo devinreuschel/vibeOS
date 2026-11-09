@@ -122,6 +122,17 @@ pub const fn cntkctl_el1() -> u64 {
     EL0VCTEN
 }
 
+/// The generic timer's counter frequency: the device-tree timer node's
+/// `clock-frequency` when it gives a nonzero one, which the
+/// `arm,armv8-timer` binding allows for firmware that programs
+/// `CNTFRQ_EL0` wrongly, and `CNTFRQ_EL0` otherwise.
+pub fn counter_hz(dt_clock_frequency: Option<u32>, cntfrq: u64) -> u64 {
+    match dt_clock_frequency {
+        Some(hz) if hz != 0 => u64::from(hz),
+        _ => cntfrq,
+    }
+}
+
 /// Smallest data-cache line in bytes, from `CTR_EL0.DminLine` (bits 19:16;
 /// Arm ARM DDI0487): the line is `4 << DminLine` bytes.
 pub const fn dcache_line_bytes(ctr: u64) -> usize {
@@ -187,6 +198,7 @@ mod tests {
         assert_eq!(t & (1 << 22), 0, "A1");
         assert_ne!(t & (1 << 36), 0, "AS");
         assert_eq!((t >> 30) & 0b11, 0b10, "TG1 4K");
+        assert_eq!((t >> 14) & 0b11, 0b00, "TG0 4K");
         assert_eq!(tcr_el1(false) & (1 << 36), 0);
     }
 
@@ -275,6 +287,22 @@ mod tests {
         assert!(!asid16_from_mmfr0(0));
     }
 
+    /// ROADMAP §11.2: `TCR_EL1.A1` clear, so TTBR0 carries the ASID and one
+    /// write changes root and ASID together; `TCR_EL1.AS` set exactly when
+    /// the CPU reports 16-bit ASIDs, which is when `asid::width` picks 16.
+    #[test]
+    fn tcr_asid_fields() {
+        const A1: u64 = 1 << 22;
+        const AS: u64 = 1 << 36;
+        for mmfr0 in [0u64, 2 << 4] {
+            let asid16 = asid16_from_mmfr0(mmfr0);
+            let tcr = tcr_el1(asid16);
+            assert_eq!(tcr & A1, 0);
+            assert_eq!(tcr & AS != 0, asid16);
+            assert_eq!(crate::mm::asid::width(asid16, None) == 16, asid16);
+        }
+    }
+
     #[test]
     fn counter_bits_follow_the_regime() {
         // CNTKCTL_EL1, and CNTHCTL_EL2 when HCR_EL2.E2H is 1.
@@ -282,6 +310,15 @@ mod tests {
         const EL0VCTEN: u64 = 1 << 1;
         assert_eq!(cntkctl_el1(), EL0VCTEN);
         assert_eq!(cntkctl_el1() & EL0PCTEN, 0);
+    }
+
+    #[test]
+    fn counter_hz_prefers_the_device_tree() {
+        assert_eq!(counter_hz(None, 62_500_000), 62_500_000);
+        assert_eq!(counter_hz(Some(19_200_000), 62_500_000), 19_200_000);
+        // A zero `clock-frequency` names no frequency.
+        assert_eq!(counter_hz(Some(0), 62_500_000), 62_500_000);
+        assert_eq!(counter_hz(Some(u32::MAX), 1), u64::from(u32::MAX));
     }
 
     #[test]
