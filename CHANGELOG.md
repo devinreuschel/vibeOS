@@ -31,12 +31,12 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   ranges stay out of the buddy ([ROADMAP §11.5](docs/ROADMAP.md#115-devices)).
 - `make check` fails a Relaxed, Acquire, Release or AcqRel ordering with no
   comment naming what it pairs with ([ROADMAP §11.7](docs/ROADMAP.md#117-build-harness-ci)).
-- aarch64 ASIDs: a context switch keeps the TLB, and boot logs `vibeOS: asid: <n>-bit` or
-  `vibeOS: asid: off` with the reason ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
-- aarch64 non-coherent DMA: cache clean and invalidate around each transfer, and device MMIO
-  through ordered accessors ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
-- An aarch64 CPU whose cache writeback granule is larger than a page, or than the granule frozen
-  at `smp: done`, prints `vibeOS: cpu: cwg above ...` and parks.
+- aarch64 ASIDs (box open until its HVF record): a context switch keeps the TLB; boot logs
+  `vibeOS: asid: <n>-bit` or `vibeOS: asid: off` ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
+- aarch64 non-coherent DMA (box open until its HVF record): clean and invalidate around each
+  transfer, device MMIO through ordered accessors ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
+- An aarch64 CPU whose cache writeback granule exceeds a page, or the granule frozen at `smp: done`,
+  prints `vibeOS: cpu: cwg above ...` and parks ([ROADMAP §11.2](docs/ROADMAP.md#112-memory)).
 - A fault before the full IDT (x86_64) or vector table (aarch64) prints one
   `vibeOS: panic: early vec=...` line and halts ([ROADMAP §11.1](docs/ROADMAP.md#111-boot)).
 - `make test-forensics ARCH=aarch64` reads aarch64 vmcores, and `make debug ARCH=aarch64`

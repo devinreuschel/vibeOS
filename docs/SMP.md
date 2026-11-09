@@ -673,7 +673,7 @@ frees nothing. A round that changes only leaf PTEs skips lazy CPUs, which catch 
 generation on their next switch to a user address space, the same one included. A round that frees
 page-table pages also sends lazy CPUs an IPI on x86_64, because a lazy CPU's paging-structure caches
 and speculative walks can still read a freed table. aarch64 sends no IPI: its broadcast TLBI
-(`vae1is` for a freed table) reaches every CPU, and the core reference keeps the root page and its
+(today `vaale1is` per page; a table-freeing `vae1is` form would be re-added with this) reaches every CPU, and the core reference keeps the root page and its
 ASID until the lazy CPU loads another root. Until then, a switch to a kernel thread loads the kernel
 root, and on aarch64 points TTBR0 at the empty user root.
 

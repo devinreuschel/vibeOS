@@ -467,6 +467,11 @@ fn kill_line_cr2(pid: u32) -> Option<u64> {
 /// (ROADMAP §10.6, F011): a 50 ms `getpid` on CPU 0 acks another CPU's
 /// shootdown and is preempted by a ready thread, and a `#PF` body that
 /// yields to another process's fault still reports its own CR2.
+///
+/// On aarch64 the shootdown half proves nothing: `vunmap`'s broadcast TLBI
+/// waits for no peer, so the unmap returns before `getpid` ends whatever
+/// DAIF holds. There the preemption half (`spin_switches`) is the proof
+/// that the body runs with IRQs unmasked.
 pub(crate) fn test_syscall_body_if_on() -> Outcome {
     let Some(other) = crate::ktest::second_cpu() else {
         return Outcome::Skip("needs 2 CPUs");
