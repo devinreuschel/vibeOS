@@ -548,8 +548,12 @@ miri:
 	MIRIFLAGS=-Zmiri-ignore-leaks cargo miri test -p vibeos-core --lib --features std --target $(HOST_TRIPLE)
 	MIRIFLAGS=-Zmiri-ignore-leaks cargo miri test -p vibeos-core --doc --features std --target $(HOST_TRIPLE)
 
+# The harness units describe both arches themselves, so they run without the
+# caller's ARCH: `make ARCH=aarch64 check` exports VIBEOS_ARCH and passes ARCH to
+# every make the tests start through MAKEFLAGS.
 test-harness:
-	VIBEOS_TIER=$@ GITHUB_STEP_SUMMARY= python3 -m unittest discover -s tests/harness -t . -v
+	env -u VIBEOS_ARCH -u MAKEFLAGS -u MFLAGS -u ARCH VIBEOS_TIER=$@ GITHUB_STEP_SUMMARY= \
+	    python3 -m unittest discover -s tests/harness -t . -v
 
 # Host mkfs/fsck share crates/core/src/fs/vibefs/. Artifacts land under
 # $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/ (A2). Defined above the tiers that
