@@ -700,4 +700,41 @@ mod loom_models {
     fn loom_asid_skip_reserve_fails() {
         model(Some(Site::AsidSkipReserve));
     }
+
+    /// CPU 0 and CPU 1 switch into one space, sharing its word, while
+    /// CPU 1 rolls over first. However the two interleave, both load the
+    /// same ASID, and the word names that ASID afterwards, so a broadcast
+    /// `tlbi` by the word's ASID reaches both CPUs. Bound: 2 threads (CPU 0
+    /// one switch, CPU 1 one rollover and one switch), 3 preemptions.
+    #[test]
+    fn loom_asid_shared_space_word() {
+        let bound = Bound {
+            threads: 2,
+            preemptions: 3,
+        };
+        check(None, bound, || {
+            let alloc = Arc::new(AsidAlloc::new(2, 2).unwrap());
+            let space = Arc::new(AtomicU64::new(0));
+            let _ = switch(&alloc, 0, &space);
+            let (a, s) = (alloc.clone(), space.clone());
+            let t = thread::spawn(move || {
+                a.force_rollover();
+                switch(&a, 1, &s)
+            });
+            let w0 = switch(&alloc, 0, &space);
+            let w1 = t.join().unwrap();
+            assert_ne!(alloc.asid_of(w0), 0, "cpu 0 got no asid");
+            assert_eq!(
+                alloc.asid_of(w0),
+                alloc.asid_of(w1),
+                "one space ran under two asids"
+            );
+            let now = space.load(Ordering::Relaxed);
+            assert_eq!(
+                alloc.asid_of(now),
+                alloc.asid_of(w0),
+                "the word names another asid"
+            );
+        });
+    }
 }
