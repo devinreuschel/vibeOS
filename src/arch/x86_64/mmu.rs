@@ -87,6 +87,16 @@ impl PageTable for Arch {
     }
 }
 
+/// A user space's per-port context: none on x86_64, whose CR3 write flushes
+/// the old space's entries (no PCID until ROADMAP §18.3).
+pub struct SpaceCtx;
+
+impl SpaceCtx {
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
 /// Turn on the NX bit in page-table entries (EFER.NXE), so the kernel's NX
 /// leaves are honored rather than read as reserved-bit violations. Once, on
 /// the BSP before its first switch to the kernel root (DESIGN §7.3's AP

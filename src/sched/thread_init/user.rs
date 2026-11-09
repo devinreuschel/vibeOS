@@ -49,6 +49,7 @@ pub(super) fn box_new_tcb(
         ptr::addr_of_mut!((*p).syscall_count).write(vibeos::atomic::AtomicU64::new(0));
         ptr::addr_of_mut!((*p).pid).write(pid);
         ptr::addr_of_mut!((*p).no_reclaim).write(AtomicU32::new(0));
+        ptr::addr_of_mut!((*p).as_ctx).write(0);
         Ok(TryBox::from_raw(p))
     }
 }

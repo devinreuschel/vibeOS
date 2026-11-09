@@ -207,6 +207,18 @@ for ASID 0 on every TTBR0 switch, and says so at boot. The allocator is portable
 `vibeos-core`, which host tests and a loom model run (ROADMAP §10.8). x86_64's PCID (ROADMAP §18.3)
 is a separate scheme, §7.9's flush generations.
 
+The kernel half is `arch::aarch64::asid`, through which every TTBR0 load goes. The space's word is
+an atomic in `addr_space_init::SpaceCore`, which `Tcb.as_ctx` names beside `Tcb.as_cr3`, so every
+CPU that runs a space shares one word; the slow path reads it again under the lock and stores what it
+allocates there. The boot CPU builds the allocator before any user root loads, logs its width (or why
+ASIDs are off), and runs a local `tlbi vmalle1`. A root with no context, as some in-guest tests load,
+gets ASID 0, followed by a local invalidate of ASID 0 whenever another ASID-0 root was loaded since.
+A user leaf's `tlbi vale1is` names the loaded TTBR0's ASID; a space that is not loaded on the CPU
+changing it is not running, since its own pinned thread is the only one that changes its leaves.
+A `kernel_tests` boot whose selection runs `asid_procs_4bit` caps the width at 4 bits, 15 usable
+ASIDs, so that test's 1,000 processes force rollovers; TCG drops its soft TLB on every ASID change,
+so the same build keeps each CPU's ASID-to-space pairs since its last flush and counts an alias.
+
 Why: a rollover that only broadcasts a flush is not safe. A CPU still running an address space from
 the old generation refills its TLB under that ASID after the flush, and the address space that
 receives the ASID next reads and writes through those entries. Reserving the running ASIDs, and

@@ -410,6 +410,12 @@ pub struct Tcb {
     /// softirq-equivalent item (`sync_init::no_reclaim`). Atomic, because
     /// `Sched::get_mut` builds `&mut Tcb` for threads running elsewhere.
     pub no_reclaim: AtomicU32,
+    /// The address of the port's per-space context of the space whose root
+    /// `as_cr3` names (`addr_space_init::SpaceCore`'s `SpaceCtx`: the
+    /// aarch64 ASID word, DESIGN §7.5), or 0. Set and cleared with
+    /// `as_cr3`, so the space outlives it as it outlives the root
+    /// (invariant I44). Kept last: it fills the tail the alignment pads.
+    pub as_ctx: usize,
 }
 
 /// Callee-saved GPRs, rflags/DAIF, stack pointer, return address.

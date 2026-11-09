@@ -404,15 +404,9 @@ pub fn fill_computed(p: &mut SecondaryParam) {
     // The stub writes CNTHCTL_EL2 only after setting E2H, when bits 0 and 1
     // are EL0PCTEN and EL0VCTEN. capture_el2 stores this same value.
     p.cnthctl_el2 = sysreg::cntkctl_el1();
-    let asid16 = {
-        let mmfr0: u64;
-        // SAFETY: ID register. established here.
-        unsafe {
-            asm!("mrs {0}, ID_AA64MMFR0_EL1", out(reg) mmfr0, options(nomem, nostack, preserves_flags))
-        };
-        sysreg::asid16_from_mmfr0(mmfr0)
-    };
-    p.tcr = sysreg::tcr_el1(asid16);
+    // The boot CPU's TCR, `TCR_EL1.AS` included, which the ASID allocator's
+    // width matches (`arch::aarch64::asid::init_bsp`).
+    p.tcr = sysreg::tcr_el1(super::cpu::asid16());
     p.mair = sysreg::mair_el1();
 }
 

@@ -41,7 +41,7 @@ the identity on them; a second port maps them to its own encoding (ROADMAP §11.
 | IPI send and its ordering | trait (`IpiSend`) | `crates/core/src/irq/ipi.rs`, `src/irq/ipi_init.rs` | `src/arch/x86_64/ipi.rs`, `src/arch/x86_64/apic_init.rs` | `crates/core/src/arch/x86_64/apic.rs`, `crates/core/src/arch/x86_64/vectors.rs` | `src/arch/aarch64/ipi.rs` | none | `crates/core/src/arch/stub.rs` |
 | Timer and cycle counter | trait (`CycleCounter`) | `crates/core/src/time/mod.rs`, `src/time/time_init.rs` | `src/arch/x86_64/mod.rs`, `src/arch/x86_64/apic_init.rs`, `src/time/time_init.rs` | none yet (ROADMAP §11.3) | `src/arch/aarch64/timer.rs`, `src/arch/aarch64/mod.rs` | none | `crates/core/src/arch/stub.rs` |
 | Page-table format and attributes | trait (`PageTable`) | `crates/core/src/mm/paging.rs`, `crates/core/src/proc/addr_space/mod.rs`, `src/mm/paging_init.rs` | `src/arch/x86_64/mmu.rs` | `crates/core/src/arch/x86_64/paging.rs` | `src/arch/aarch64/mmu.rs` | `crates/core/src/arch/aarch64/paging.rs` | `crates/core/src/arch/stub.rs` |
-| TLB maintenance and address-space ids | trait (`PageTable`) | `src/irq/ipi_init.rs`, `src/proc/addr_space_init.rs`, `src/mm/paging_init.rs` | `src/arch/x86_64/mmu.rs` | none yet (ROADMAP §11.2) | `src/arch/aarch64/mmu.rs` | `crates/core/src/arch/aarch64/tlb.rs` | `crates/core/src/arch/stub.rs` |
+| TLB maintenance and address-space ids | trait (`PageTable`) | `src/irq/ipi_init.rs`, `src/proc/addr_space_init.rs`, `src/mm/paging_init.rs`, `crates/core/src/mm/asid.rs` | `src/arch/x86_64/mmu.rs` | none yet (ROADMAP §11.2) | `src/arch/aarch64/mmu.rs`, `src/arch/aarch64/asid.rs`, `src/arch/aarch64/cpu.rs` | `crates/core/src/arch/aarch64/tlb.rs` | `crates/core/src/arch/stub.rs` |
 | Cache maintenance and DMA coherence | trait (`Barriers`) | `crates/core/src/dev/dma.rs`, `src/dev/dma_init.rs` | `src/arch/x86_64/mod.rs` | none yet (ROADMAP §11.2) | `src/arch/aarch64/mod.rs` | none | `crates/core/src/arch/stub.rs` |
 | Barriers (`dma_wmb`, `dma_rmb`, `dma_mb`) and MMIO accessors | trait (`Barriers`) | `crates/core/src/dev/virtio.rs` | `src/arch/x86_64/mod.rs` | none yet (ROADMAP §11.2) | `src/arch/aarch64/mod.rs` | none | `crates/core/src/arch/stub.rs` |
 | Atomics | module selected by `cfg(loom)` | `crates/core/src/atomic.rs` | none yet (ROADMAP §10.8) | none yet (ROADMAP §10.8) | none yet (ROADMAP §10.8) | none yet (ROADMAP §10.8) | none yet (ROADMAP §10.8) |
@@ -75,13 +75,14 @@ and `Port` impls).
 The aarch64 port, both halves, every file under `src/arch/aarch64/` and
 `crates/core/src/arch/aarch64/`: `src/arch/aarch64/mod.rs` (the zero-sized `Arch`
 and its `InterruptMask`, `CycleCounter`, `ContextSwitch`, `Barriers`,
-`PerCpuBase`, `SyscallAbi` and `Port` impls), `src/arch/aarch64/boot.rs`
+`PerCpuBase`, `SyscallAbi` and `Port` impls), `src/arch/aarch64/asid.rs` (the ASID
+allocator's kernel half: every TTBR0 load), `src/arch/aarch64/boot.rs`
 (Limine / Image header, EL2 VHE), `src/arch/aarch64/catch.rs` (`kernel_tests`
 fault catcher), `src/arch/aarch64/cpu.rs` (DAIF, idle `wfi`, RNDR, TLS),
 `src/arch/aarch64/gdt.rs` (overflow stack), `src/arch/aarch64/gic.rs` (GICv2/v3), `src/arch/aarch64/gic_common.rs` (GIC state and MMIO), `src/arch/aarch64/gic_its.rs` (GICv3 ITS),
 `src/arch/aarch64/gs.rs` (TPIDR), `src/arch/aarch64/idt.rs` (vector table install),
 `src/arch/aarch64/ipi.rs` (SGI), `src/arch/aarch64/irqchip.rs` (IrqChip),
-`src/arch/aarch64/ktest.rs`, `src/arch/aarch64/ktest_asid.rs`,
+`src/arch/aarch64/ktest.rs`, `src/arch/aarch64/ktest_asid.rs` (1,000 processes under the 4-bit ASID cap),
 `src/arch/aarch64/ktest_el0.rs`, `src/arch/aarch64/ktest_uaccess.rs`, `src/arch/aarch64/mmu.rs` (TTBR0/TTBR1),
 `src/arch/aarch64/percpu.rs`, `src/arch/aarch64/pic.rs` (no 8259),
 `src/arch/aarch64/power.rs` (PSCI `SYSTEM_OFF` / `SYSTEM_RESET` / `CPU_ON`),

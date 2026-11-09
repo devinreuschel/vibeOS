@@ -22,7 +22,7 @@ use vibeos::pmm::Frames;
 use vibeos::proc::fill::FILL_BATCH;
 use vibeos::thread::ThreadId;
 
-use crate::arch::current::{AddressSpace, Arch};
+use crate::arch::current::{AddressSpace, Arch, SpaceCtx};
 use crate::paging_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
@@ -62,6 +62,9 @@ pub struct SpaceCore {
     /// The regions and the page tables below the root. A sleeping lock:
     /// it ranks before `PT`, which each chunk of work under it takes.
     mm: BlockingMutex<Mm>,
+    /// The port's context for this space (the aarch64 ASID word), which a
+    /// TCB names beside the root (`Tcb.as_ctx`).
+    ctx: SpaceCtx,
 }
 
 /// One `users` reference to a space: the process's thread's, or a pin's.
@@ -94,6 +97,13 @@ impl SpaceCore {
     /// The root table's physical address.
     pub fn root(&self) -> PhysAddr {
         PhysAddr(self.root.as_ref().map_or(0, Frames::base))
+    }
+
+    /// The address of this space's [`SpaceCtx`], for `Tcb.as_ctx` beside
+    /// the root: the core lives at least as long as a TCB names its root
+    /// (invariant I44), so the address stays valid that long.
+    pub fn ctx_addr(&self) -> usize {
+        core::ptr::from_ref(&self.ctx).addr()
     }
 
     /// The portable space, under its lock. Sleeps: never under a spinlock.
@@ -170,6 +180,7 @@ pub fn create() -> Result<NewSpace, AsError> {
     let core = SpaceCore {
         root: Some(root),
         mm: BlockingMutex::new(mm),
+        ctx: SpaceCtx::new(),
     };
     // A failed allocation drops `core`, whose drop frees the root.
     UsersArc::try_new(core)
@@ -408,7 +419,13 @@ unsafe fn unmap_chunks(space: &mut Mm, va: u64, len: u64) -> Result<(), AsError>
 }
 
 /// A flush for `space`'s pages when it is this CPU's user root
-/// (CR3; TTBR0 on aarch64).
+/// (CR3; TTBR0 on aarch64). On aarch64 the `tlbi vale1is` names the loaded
+/// TTBR0's ASID, which is the space's (`arch::aarch64::cpu::tlbi_va`), and
+/// reaches every CPU. A space that is not loaded here is not running: its
+/// leaves change only from its own pinned thread, and the entries its ASID
+/// left on a CPU are unreachable until that ASID is handed out again, which
+/// waits for a rollover and each CPU's local flush before it loads the new
+/// generation (invariant I39).
 fn local_flush(space: &Mm) -> impl FnMut(u64) + use<> {
     let loaded = Arch::user_root() == space.root();
     move |va| {
@@ -608,7 +625,9 @@ fn root_holder(root: u64) -> Option<RootHolder> {
 }
 
 /// Load `want` into CR3 unless this CPU already has it (or it is 0), and
-/// record it in this CPU's `PerCpuRemote.as_cr3`.
+/// record it in this CPU's `PerCpuRemote.as_cr3`. On aarch64 TTBR0 gets
+/// the space's ASID when `ctx` names its context
+/// (`arch::aarch64::asid::load_ttbr0`); x86_64 ignores `ctx`.
 ///
 /// # Safety
 /// `want` is 0, or the physical address of a PML4 whose kernel half is the
@@ -616,8 +635,9 @@ fn root_holder(root: u64) -> Option<RootHolder> {
 /// the kernel root, the caller has recorded it in the current thread's
 /// `Tcb.as_cr3` before the call (`execve` does, through
 /// `thread_init::set_pid_cr3`), so the core's free sees it (invariant
-/// I44).
-pub unsafe fn load_cr3_u64(want: u64) {
+/// I44). `ctx` is 0 or `SpaceCore::ctx_addr` of the space whose root is
+/// `want`, which that TCB or the caller keeps alive.
+pub unsafe fn load_cr3_u64(want: u64, ctx: usize) {
     per_cpu_init::with_current(|cpu| {
         // Relaxed: only this CPU stores its `as_cr3`; pairs with nothing.
         if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
@@ -625,20 +645,17 @@ pub unsafe fn load_cr3_u64(want: u64) {
         }
         #[cfg(target_arch = "aarch64")]
         // SAFETY: invariant I44: `want` is a user root (TTBR0) that stays
-        // allocated while loaded (this fn's contract,
-        // `addr_space_init::load_cr3_u64`).
+        // allocated while loaded, and `ctx` is 0 or its live space's context
+        // (this fn's contract, `addr_space_init::load_cr3_u64`).
         unsafe {
-            crate::arch::aarch64::cpu::write_ttbr0(want);
-            // `msr ttbr0_el1` does not flush, unlike an x86 CR3 write;
-            // `switch_cr3_for` already pairs its write with this local
-            // ASID-0 flush.
-            crate::arch::aarch64::cpu::tlbi_asid0_local();
+            crate::arch::aarch64::asid::load_ttbr0(cpu.cpu_id, want, ctx);
         }
         #[cfg(not(target_arch = "aarch64"))]
         // SAFETY: invariant I44: `want` is a user PML4 that stays
         // allocated while loaded (this fn's contract,
         // `addr_space_init::load_cr3_u64`).
         unsafe {
+            let _ = ctx;
             Arch::set_root(PhysAddr(want));
         }
         // Release: pairs with the Acquire load in `root_holder`.
@@ -651,12 +668,12 @@ pub fn load_kernel_cr3() {
     // SAFETY: the empty user root comes from `paging_init::install`,
     // which published it and nothing frees; no TCB need name it.
     unsafe {
-        load_cr3_u64(paging_init::empty_user_root());
+        load_cr3_u64(paging_init::empty_user_root(), 0);
     }
     #[cfg(not(target_arch = "aarch64"))]
     // SAFETY: the kernel root comes from `paging_init::install`, which
     // published it and nothing frees; no TCB need name it.
     unsafe {
-        load_cr3_u64(paging_init::kernel_cr3());
+        load_cr3_u64(paging_init::kernel_cr3(), 0);
     }
 }

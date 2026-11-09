@@ -651,7 +651,7 @@ pub(crate) fn current_migrate_if1() -> Outcome {
         let id = h.id();
         ids[i] = id;
         let pid = PID_MAX.saturating_add(1).saturating_add(i as u32);
-        thread_init::set_pid_cr3(id, pid, 0);
+        thread_init::set_pid_cr3(id, pid, 0, 0);
         MIGRATE_TCB[i].store(thread_init::tcb_ptr(id), Ordering::Release);
         MIGRATE_PID[i].store(pid, Ordering::Release);
         MIGRATE_RESULT[i].store(MIG_RUNNING, Ordering::Release);
@@ -670,7 +670,7 @@ pub(crate) fn current_migrate_if1() -> Outcome {
         )
     };
     for id in ids {
-        thread_init::set_pid_cr3(id, 0, 0);
+        thread_init::set_pid_cr3(id, 0, 0, 0);
     }
     MIGRATE_EXIT.store(true, Ordering::Release);
     let joined = sleep_until(|| ids.iter().all(|&id| thread_init::exited(id)), 2_000);

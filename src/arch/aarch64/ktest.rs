@@ -1050,7 +1050,7 @@ pub(crate) fn test_el0_uaccess() -> Outcome {
         return Outcome::Fail("map");
     }
     // SAFETY: `space.root` is a user TTBR0 `create` built; established here.
-    unsafe { crate::addr_space_init::load_cr3_u64(space.root().as_u64()) };
+    unsafe { crate::addr_space_init::load_cr3_u64(space.root().as_u64(), space.ctx_addr()) };
     let src = *b"pan-ok";
     let mut dst = [0u8; 6];
     let to = crate::arch::aarch64::uaccess::with_window(|| {
@@ -1357,10 +1357,10 @@ pub(crate) const TESTS: &[Test] = &[
         crate::arch::aarch64::ktest_asid::test_ap_ttbr0_empty,
     ),
     test(
-        "asid_4bit",
-        crate::arch::aarch64::ktest_asid::test_asid_4bit,
+        "asid_procs_4bit",
+        crate::arch::aarch64::ktest_asid::test_asid_procs_4bit,
     )
-    .deadline(60_000),
+    .deadline(180_000),
     test("tlb_shootdown_remote", test_tlb_shootdown_remote),
     test("per_cpu_identity", test_per_cpu_identity),
     test("percpu_ticks_advance", test_percpu_ticks_advance),

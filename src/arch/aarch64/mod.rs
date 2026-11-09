@@ -1,5 +1,6 @@
 //! The aarch64 port: its kernel half (DESIGN §1.3).
 
+pub mod asid;
 pub(crate) mod boot;
 #[cfg(feature = "kernel_tests")]
 #[allow(

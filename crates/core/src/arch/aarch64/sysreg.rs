@@ -275,6 +275,22 @@ mod tests {
         assert!(!asid16_from_mmfr0(0));
     }
 
+    /// ROADMAP §11.2: `TCR_EL1.A1` clear, so TTBR0 carries the ASID and one
+    /// write changes root and ASID together; `TCR_EL1.AS` set exactly when
+    /// the CPU reports 16-bit ASIDs, which is when `asid::width` picks 16.
+    #[test]
+    fn tcr_asid_fields() {
+        const A1: u64 = 1 << 22;
+        const AS: u64 = 1 << 36;
+        for mmfr0 in [0u64, 2 << 4] {
+            let asid16 = asid16_from_mmfr0(mmfr0);
+            let tcr = tcr_el1(asid16);
+            assert_eq!(tcr & A1, 0);
+            assert_eq!(tcr & AS != 0, asid16);
+            assert_eq!(crate::mm::asid::width(asid16, None) == 16, asid16);
+        }
+    }
+
     #[test]
     fn counter_bits_follow_the_regime() {
         // CNTKCTL_EL1, and CNTHCTL_EL2 when HCR_EL2.E2H is 1.

@@ -443,7 +443,7 @@ pub(crate) fn teardown_live_root_asserts() -> Outcome {
         PARK.release();
         return Outcome::Fail("parked thread did not block");
     }
-    thread_init::set_pid_cr3(id, 0, root);
+    thread_init::set_pid_cr3(id, 0, root, 0);
     let keep = ManuallyDrop::new(space);
     let nest0 = per_cpu_init::irq_nest();
     let if0 = crate::arch::current::interrupts_enabled();
@@ -457,7 +457,7 @@ pub(crate) fn teardown_live_root_asserts() -> Outcome {
         drop(last);
     });
     crate::ktest::restore_irq_nest(nest0);
-    thread_init::set_pid_cr3(id, 0, 0);
+    thread_init::set_pid_cr3(id, 0, 0, 0);
     PARK.release();
     let died = wait_ms(
         || matches!(thread_init::try_state(id), None | Some(ThreadState::Dead)),

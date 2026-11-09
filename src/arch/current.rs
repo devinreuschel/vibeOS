@@ -9,6 +9,14 @@ pub type Arch = super::x86_64::Arch;
 pub type Arch = super::aarch64::Arch;
 
 #[cfg(target_arch = "aarch64")]
+pub use super::aarch64::asid::SpaceCtx;
+/// A user space's per-port context, kept in `addr_space_init::SpaceCore`
+/// and named by `Tcb.as_ctx`: the ASID word on aarch64, nothing on x86_64
+/// until PCID (ROADMAP §18.3).
+#[cfg(target_arch = "x86_64")]
+pub use super::x86_64::mmu::SpaceCtx;
+
+#[cfg(target_arch = "aarch64")]
 pub use super::aarch64::mmu::enable_nx;
 /// The page-table port items that are not `PageTable` methods.
 #[cfg(target_arch = "x86_64")]

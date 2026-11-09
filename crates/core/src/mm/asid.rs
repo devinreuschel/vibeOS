@@ -6,6 +6,11 @@
 //! new generation, exchanges each CPU's `active_asid` for 0, reserves
 //! what it held, and marks every CPU flush-pending. ASID 0 is reserved.
 //! Where `2^bits - 1` does not exceed the CPU count, ASIDs are off.
+//!
+//! An address space's word is one [`AtomicU64`] that every CPU running it
+//! shares: [`switch`] reads it for the fast path and, under the allocator
+//! lock, reads it again and stores what it allocates, so two CPUs that
+//! switch into one space at once give it one ASID.
 
 use crate::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::kalloc::TryBox;
@@ -17,6 +22,21 @@ pub type AsidWord = u64;
 
 /// Why ASIDs are off: usable numbers do not exceed the CPU count.
 pub const DISABLED_REASON: &str = "usable ASIDs do not exceed possible CPUs";
+
+/// The `kernel_tests` cap (ROADMAP §11.2): 15 usable ASIDs, so a few dozen
+/// processes force rollovers.
+pub const TEST_CAP_BITS: u32 = 4;
+
+/// The allocator's width: 16 where `ID_AA64MMFR0_EL1.ASIDBits` reports
+/// 16-bit ASIDs (and `TCR_EL1.AS` is set to match), else 8, then at most
+/// `cap` when a cap is given.
+pub const fn width(asid16: bool, cap: Option<u32>) -> u32 {
+    let hw = if asid16 { 16 } else { 8 };
+    match cap {
+        Some(c) if c < hw => c,
+        _ => hw,
+    }
+}
 
 /// 16-bit ASIDs need 1024 words. Loom models use 2-bit ASIDs only.
 #[cfg(not(loom))]
@@ -163,16 +183,27 @@ impl AsidAlloc {
             && self.current(word)
     }
 
-    /// Slow path under the allocator lock. Allocates or keeps `word` if
-    /// it is still free or reserved in the current generation.
-    pub fn switch_locked(&self, cpu: u32, word: AsidWord) -> AsidWord {
-        self.with_lock(|| self.switch_locked_inner(cpu, word))
-    }
-
-    fn switch_locked_inner(&self, cpu: u32, word: AsidWord) -> AsidWord {
+    /// Slow path under the allocator lock: reads the space's word again,
+    /// keeps its ASID if it is current, reserved, or still free in the
+    /// current generation, else allocates one, and stores the result in
+    /// both the word and this CPU's `active_asid`.
+    pub fn switch_locked(&self, cpu: u32, space: &AtomicU64) -> AsidWord {
         if cpu >= self.ncpus {
             return 0;
         }
+        self.with_lock(|| {
+            // Relaxed: pairs with nothing; every store of a space's word is
+            // under the allocator lock, which orders this load.
+            let word = space.load(Ordering::Relaxed);
+            let out = self.switch_locked_inner(cpu, word);
+            // Relaxed: pairs with nothing; under the allocator lock, as the
+            // load above, and the fast path's CAS on `active` orders its reader.
+            space.store(out, Ordering::Relaxed);
+            out
+        })
+    }
+
+    fn switch_locked_inner(&self, cpu: u32, word: AsidWord) -> AsidWord {
         let keep = self.asid_of(word);
         let out = if self.current(word) && keep != 0 {
             self.set_used(keep);
@@ -180,6 +211,12 @@ impl AsidAlloc {
         } else if let Some(a) = self.keep_reserved(word) {
             self.set_used(a);
             self.pack(a)
+        } else if word != 0 && keep != 0 && !self.is_used(keep) {
+            // Linux's `new_context`: an old number nobody holds in this
+            // generation stays with its space. Every CPU that may still map
+            // it to another space is flush-pending.
+            self.set_used(keep);
+            self.pack(keep)
         } else {
             self.alloc_fresh()
         };
@@ -300,22 +337,39 @@ impl AsidAlloc {
             .unwrap_or(0)
     }
 
+    /// The first clear bit at or after `next`, wrapping, never 0. Scans a
+    /// word at a time, so a 16-bit space costs at most 1,024 loads under
+    /// the lock's IF=0 stretch (DESIGN §2.9 rule 2).
     fn find_free(&self) -> Option<u32> {
         let max = 1u32 << self.bits;
         // Relaxed: the allocator lock is held; pairs with nothing.
-        let start = self.next.load(Ordering::Relaxed).max(1);
-        let mut a = start;
-        for _ in 1..max {
-            if a >= max {
-                a = 1;
+        let start = self.next.load(Ordering::Relaxed).clamp(1, max - 1);
+        let hit = self
+            .first_clear(start, max)
+            .or_else(|| self.first_clear(1, start))?;
+        let n = if hit + 1 >= max { 1 } else { hit + 1 };
+        // Relaxed: the allocator lock is held; pairs with nothing.
+        self.next.store(n, Ordering::Relaxed);
+        Some(hit)
+    }
+
+    /// The first clear bit in `[from, to)`.
+    fn first_clear(&self, from: u32, to: u32) -> Option<u32> {
+        let mut a = from;
+        while a < to {
+            let w = (a / 64) as usize;
+            let b = a % 64;
+            // Relaxed: the allocator lock is held; pairs with nothing.
+            let word = self
+                .used
+                .get(w)
+                .map_or(u64::MAX, |x| x.load(Ordering::Relaxed));
+            let free = !word & (u64::MAX << b);
+            if free != 0 {
+                let hit = (w as u32) * 64 + free.trailing_zeros();
+                return (hit < to).then_some(hit);
             }
-            if !self.is_used(a) {
-                let n = if a + 1 >= max { 1 } else { a + 1 };
-                // Relaxed: the allocator lock is held; pairs with nothing.
-                self.next.store(n, Ordering::Relaxed);
-                return Some(a);
-            }
-            a += 1;
+            a = (w as u32 + 1) * 64;
         }
         None
     }
@@ -368,14 +422,19 @@ impl AsidAlloc {
     }
 }
 
-/// A switch: try the fast path, then the lock.
-pub fn switch(alloc: &AsidAlloc, cpu: u32, word: &mut AsidWord) -> AsidWord {
-    if alloc.switch_fast(cpu, *word) {
-        return *word;
+/// A switch of `cpu` into the space whose word is `space`: the fast path,
+/// then the lock. Returns the word to load, generation and ASID; 0 only
+/// for a `cpu` the allocator has no slot for. The caller then runs
+/// [`AsidAlloc::take_flush`], and the local flush when it reports one,
+/// before it loads the ASID.
+pub fn switch(alloc: &AsidAlloc, cpu: u32, space: &AtomicU64) -> AsidWord {
+    // Relaxed: pairs with nothing; a stale word fails `current` or the CAS
+    // on `active`, and the slow path reads it again under the lock.
+    let w = space.load(Ordering::Relaxed);
+    if alloc.switch_fast(cpu, w) {
+        return w;
     }
-    let n = alloc.switch_locked(cpu, *word);
-    *word = n;
-    n
+    alloc.switch_locked(cpu, space)
 }
 
 #[cfg(test)]
@@ -387,7 +446,19 @@ mod tests {
         assert!(AsidAlloc::new(2, 3).is_none());
         assert!(AsidAlloc::new(1, 1).is_none());
         assert!(AsidAlloc::new(2, 2).is_some());
+        // The 4-bit test cap has 15 usable ASIDs: off from 15 CPUs.
+        assert!(AsidAlloc::new(TEST_CAP_BITS, 15).is_none());
+        assert!(AsidAlloc::new(TEST_CAP_BITS, 14).is_some());
         assert!(!DISABLED_REASON.is_empty());
+    }
+
+    #[test]
+    fn width_follows_mmfr0_and_cap() {
+        assert_eq!(width(true, None), 16);
+        assert_eq!(width(false, None), 8);
+        assert_eq!(width(true, Some(TEST_CAP_BITS)), 4);
+        assert_eq!(width(false, Some(TEST_CAP_BITS)), 4);
+        assert_eq!(width(false, Some(12)), 8);
     }
 
     #[test]
@@ -401,11 +472,48 @@ mod tests {
     #[test]
     fn asid_zero_never_allocated() {
         let a = AsidAlloc::new(2, 2).unwrap();
-        let mut w = 0;
         for _ in 0..8 {
-            let g = switch(&a, 0, &mut w);
+            let w = AtomicU64::new(0);
+            let g = switch(&a, 0, &w);
             assert_ne!(a.asid_of(g), 0);
+            assert_eq!(w.load(Ordering::Relaxed), g);
         }
+    }
+
+    /// A 16-bit allocator hands out every number once, in order, before its
+    /// first rollover.
+    #[test]
+    fn sixteen_bit_hands_out_every_number() {
+        let a = AsidAlloc::try_boxed(16, 4).unwrap();
+        let g0 = a.generation();
+        for want in 1..(1u32 << 16) {
+            let w = AtomicU64::new(0);
+            let got = switch(&a, 0, &w);
+            assert_eq!(a.asid_of(got), want);
+            assert_eq!(a.gen_of(got), g0);
+        }
+        let w = AtomicU64::new(0);
+        let got = switch(&a, 0, &w);
+        assert_ne!(a.gen_of(got), g0, "the 65,536th space rolls over");
+        assert!(a.take_flush(0));
+        assert!(a.take_flush(3));
+    }
+
+    /// Two CPUs switching into one space give it one ASID, through the
+    /// shared word, across a rollover too.
+    #[test]
+    fn shared_space_one_asid() {
+        let a = AsidAlloc::new(2, 2).unwrap();
+        let s = AtomicU64::new(0);
+        let w0 = switch(&a, 0, &s);
+        let w1 = switch(&a, 1, &s);
+        assert_eq!(w0, w1);
+        a.with_lock(|| a.rollover());
+        let n0 = switch(&a, 0, &s);
+        let n1 = switch(&a, 1, &s);
+        assert_eq!(a.asid_of(n0), a.asid_of(w0), "reserved number kept");
+        assert_eq!(n0, n1);
+        assert!(a.current(n1));
     }
 
     /// A CPU idle across two rollovers reads 0 in its `active` slot at the
@@ -413,75 +521,124 @@ mod tests {
     #[test]
     fn idle_cpu_keeps_reservation_across_rollovers() {
         let a = AsidAlloc::new(2, 2).unwrap();
-        let mut s1 = 0;
-        let w1 = switch(&a, 1, &mut s1);
+        let s1 = AtomicU64::new(0);
+        let w1 = switch(&a, 1, &s1);
         a.with_lock(|| a.rollover());
         assert_eq!(a.active(1), 0);
         a.with_lock(|| a.rollover());
         assert_eq!(a.reserved[1].load(Ordering::Relaxed), w1);
         assert!(a.is_used(a.asid_of(w1)));
-        let kept = switch(&a, 1, &mut s1);
+        let kept = switch(&a, 1, &s1);
         assert_eq!(a.asid_of(kept), a.asid_of(w1));
     }
 
     #[test]
     fn rollover_preserves_running() {
         let a = AsidAlloc::new(2, 2).unwrap();
-        let mut s0 = 0;
-        let mut s1 = 0;
-        let w0 = switch(&a, 0, &mut s0);
-        let w1 = switch(&a, 1, &mut s1);
+        let s0 = AtomicU64::new(0);
+        let s1 = AtomicU64::new(0);
+        let w0 = switch(&a, 0, &s0);
+        let w1 = switch(&a, 1, &s1);
         assert_ne!(a.asid_of(w0), a.asid_of(w1));
-        // Exhaust the one remaining ASID, then rollover.
-        let mut s2 = 0;
-        let _ = switch(&a, 0, &mut s2);
-        let mut s3 = 0;
-        let w3 = switch(&a, 0, &mut s3);
-        assert!(a.flush_pending(0) || a.flush_pending(1) || a.generation() != a.gen_of(w0));
+        // The one remaining ASID, then a rollover.
+        let s2 = AtomicU64::new(0);
+        let _ = switch(&a, 0, &s2);
+        let s3 = AtomicU64::new(0);
+        let w3 = switch(&a, 0, &s3);
+        assert_ne!(a.gen_of(w3), a.gen_of(w0));
+        assert!(a.flush_pending(0) && a.flush_pending(1));
         let n1 = a.asid_of(w1);
+        assert_ne!(a.asid_of(w3), n1, "cpu 1's running ASID was reserved");
         a.take_flush(1);
-        let again = switch(&a, 1, &mut s1);
+        let again = switch(&a, 1, &s1);
         assert_eq!(a.asid_of(again), n1);
         assert_ne!(a.gen_of(again), a.gen_of(w1));
-        let _ = w3;
     }
 
-    /// 2-bit ASIDs, 2 CPUs, many spaces: one ASID never names two
-    /// spaces on one CPU since that CPU's last flush.
-    #[test]
-    fn thousands_of_rollovers_no_alias() {
+    /// A small xorshift, so the schedule is the same on every run.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % n as u64) as usize
+        }
+    }
+
+    const SPACES: usize = 9;
+    const NONE: usize = usize::MAX;
+
+    /// What one simulated CPU's TLB may hold: for each ASID, the space it
+    /// has named on this CPU since the CPU's last flush.
+    struct Tlb([usize; 4]);
+
+    impl Tlb {
+        /// Record `asid` naming `space`, or return the other space it named.
+        fn load(&mut self, asid: u32, space: usize) -> Result<(), usize> {
+            let slot = &mut self.0[asid as usize];
+            if *slot != NONE && *slot != space {
+                return Err(*slot);
+            }
+            *slot = space;
+            Ok(())
+        }
+    }
+
+    /// 2-bit ASIDs, 2 CPUs, nine spaces, each of which may run on either
+    /// CPU or on both at once. Each CPU flushes only where the kernel does:
+    /// after a switch whose `take_flush` reports one, before the load.
+    /// Returns the rollovers, or the first failure of either rule: one ASID
+    /// names one space on a CPU between its flushes (invariant I39), and a
+    /// space that is loaded runs under its word's ASID on every CPU, so a
+    /// broadcast `tlbi` by that ASID reaches each of them.
+    fn run_no_alias(seed: u64, steps: usize) -> Result<u64, String> {
         let a = AsidAlloc::new(2, 2).unwrap();
-        let mut words = [0u64; 64];
-        let mut seen0: [(u32, usize); 4] = [(0, usize::MAX); 4];
-        let mut seen1 = seen0;
-        let mut gen0 = a.generation();
-        let mut gen1 = gen0;
-        for i in 0..4000 {
-            let cpu = (i % 2) as u32;
-            let slot = i % words.len();
-            if a.flush_pending(cpu) {
-                a.take_flush(cpu);
-                if cpu == 0 {
-                    seen0 = [(0, usize::MAX); 4];
-                    gen0 = a.generation();
-                } else {
-                    seen1 = [(0, usize::MAX); 4];
-                    gen1 = a.generation();
+        let words: [AtomicU64; SPACES] = core::array::from_fn(|_| AtomicU64::new(0));
+        let mut tlb = [Tlb([NONE; 4]), Tlb([NONE; 4])];
+        let mut loaded: [Option<(usize, u32)>; 2] = [None, None];
+        let mut rng = Rng(seed);
+        let g0 = a.generation();
+        for step in 0..steps {
+            let cpu = rng.next(2);
+            let space = rng.next(SPACES);
+            let w = switch(&a, cpu as u32, &words[space]);
+            if a.take_flush(cpu as u32) {
+                tlb[cpu] = Tlb([NONE; 4]);
+            }
+            let asid = a.asid_of(w);
+            if asid == 0 {
+                return Err(format!("step {step}: cpu {cpu} got word {w:#x}"));
+            }
+            if let Err(other) = tlb[cpu].load(asid, space) {
+                return Err(format!(
+                    "step {step}: asid {asid} named spaces {other} and {space} on cpu {cpu}"
+                ));
+            }
+            loaded[cpu] = Some((space, asid));
+            for (c, l) in loaded.iter().enumerate() {
+                let Some((s, n)) = *l else { continue };
+                let now = a.asid_of(words[s].load(Ordering::Relaxed));
+                if now != n {
+                    return Err(format!(
+                        "step {step}: space {s} runs on cpu {c} as asid {n}, its word says {now}"
+                    ));
                 }
             }
-            let w = switch(&a, cpu, &mut words[slot]);
-            let asid = a.asid_of(w) as usize;
-            assert!(asid < 4 && asid != 0);
-            let seen = if cpu == 0 { &mut seen0 } else { &mut seen1 };
-            let cur_gen = if cpu == 0 { gen0 } else { gen1 };
-            if a.gen_of(w) == cur_gen && seen[asid].1 != usize::MAX && seen[asid].1 != slot {
-                panic!(
-                    "asid {asid} named spaces {} and {slot} on cpu {cpu}",
-                    seen[asid].1
-                );
-            }
-            seen[asid] = (a.asid_of(w), slot);
         }
+        Ok((a.generation() - g0) >> a.bits())
+    }
+
+    #[test]
+    fn thousands_of_rollovers_no_alias() {
+        let mut rollovers = 0;
+        for seed in 1..=8u64 {
+            match run_no_alias(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), 4_000) {
+                Ok(n) => rollovers += n,
+                Err(e) => panic!("seed {seed}: {e}"),
+            }
+        }
+        assert!(rollovers >= 2_000, "only {rollovers} rollovers");
     }
 }
 
@@ -504,13 +661,13 @@ mod loom_models {
         };
         check(v, bound, || {
             let alloc = Arc::new(AsidAlloc::new(2, 2).unwrap());
-            let mut w = 0u64;
-            let first = switch(&alloc, 0, &mut w);
+            let w = AtomicU64::new(0);
+            let first = switch(&alloc, 0, &w);
             let a = alloc.clone();
             let t = thread::spawn(move || {
                 a.force_rollover();
-                let mut other = 0u64;
-                let n = switch(&a, 1, &mut other);
+                let other = AtomicU64::new(0);
+                let n = switch(&a, 1, &other);
                 assert_ne!(
                     a.asid_of(n),
                     a.asid_of(first),
