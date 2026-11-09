@@ -12,21 +12,26 @@
 //! `struct elf_prstatus` as Linux's `include/uapi/linux/elfcore.h` declares
 //! it, whose `pr_reg` (at byte 112) is x86-64's `struct user_regs_struct`
 //! from `arch/x86/include/asm/user_64.h`, the layout QEMU's
-//! `target/i386/arch_dump.c` writes; the Chrome trace-event format is
+//! `target/i386/arch_dump.c` writes, or AArch64's `struct user_pt_regs`
+//! (`regs[31]`, `sp`, `pc`, `pstate`) from
+//! `arch/arm64/include/uapi/asm/ptrace.h`, the layout QEMU's
+//! `target/arm/arch_dump.c` writes; the Chrome trace-event format is
 //! Google's "Trace Event Format" document.
 //!
 //! No panic and no allocation: every byte comes from a core or an ELF,
 //! which are untrusted (AGENTS.md rule 4). Physical reads go through
 //! [`PhysMem`] (the ACPI walker's trait, AGENTS.md rule 10), and the page
-//! walk through the port's `PageTable` format, so nothing here names an
-//! architecture's registers.
+//! walk through the port's pure page-table format ([`walk::CoreFormat`]),
+//! so the only registers named here are the two `NT_PRSTATUS` layouts.
 
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use core::fmt;
 
 use crate::log::vmcoreinfo;
-use crate::proc::elf::{EHDR_SIZE, ELFCLASS64, ELFDATA2LSB, EM_X86_64, PHDR_SIZE, PT_LOAD};
+use crate::proc::elf::{
+    EHDR_SIZE, ELFCLASS64, ELFDATA2LSB, EM_AARCH64, EM_X86_64, PHDR_SIZE, PT_LOAD,
+};
 
 pub use crate::acpi::PhysMem;
 
@@ -66,8 +71,31 @@ pub const NT_PRSTATUS: u32 = 1;
 const ELFCLASS32: u8 = 1;
 const SHDR_SIZE: usize = 64;
 const SYM_SIZE: usize = 24;
-/// The canonical kernel half: VAs a frame pointer may name.
-const KERNEL_HALF: u64 = 0xFFFF_8000_0000_0000;
+
+/// The machine an ELF's `e_machine` names: the two ports a core can come
+/// from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Machine {
+    X86_64,
+    Aarch64,
+}
+
+impl Machine {
+    pub const fn from_em(em: u16) -> Option<Machine> {
+        match em {
+            EM_X86_64 => Some(Machine::X86_64),
+            EM_AARCH64 => Some(Machine::Aarch64),
+            _ => None,
+        }
+    }
+
+    pub const fn em(self) -> u16 {
+        match self {
+            Machine::X86_64 => EM_X86_64,
+            Machine::Aarch64 => EM_AARCH64,
+        }
+    }
+}
 
 /// Why the tool refuses a core or an ELF, or cannot decode a table. Each
 /// has one message ([`VmError::as_str`]); the binary adds the values.
@@ -81,6 +109,7 @@ pub enum VmError {
     NotCore,
     NotExec,
     WrongMachine,
+    MachineMismatch,
     Truncated,
     NoVmcoreinfo,
     NoBuildId,
@@ -111,7 +140,8 @@ impl VmError {
             VmError::NotElf64Le => "not an ELF64 little-endian file",
             VmError::NotCore => "not an ELF core (e_type is not ET_CORE)",
             VmError::NotExec => "not a kernel ELF (no program or section headers)",
-            VmError::WrongMachine => "not an x86-64 ELF",
+            VmError::WrongMachine => "not an x86-64 or AArch64 ELF",
+            VmError::MachineMismatch => "the core and the ELF are for different machines",
             VmError::Truncated => "truncated ELF",
             VmError::NoVmcoreinfo => "no VMCOREINFO note",
             VmError::NoBuildId => "no build-id note in ELF",
@@ -146,6 +176,7 @@ impl From<VmError> for crate::kerror::KError {
             | VmError::NotCore
             | VmError::NotExec
             | VmError::WrongMachine
+            | VmError::MachineMismatch
             | VmError::Truncated
             | VmError::NoVmcoreinfo
             | VmError::NoBuildId
@@ -211,6 +242,7 @@ fn offset(off: usize) -> u64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ehdr {
     pub kind: u16,
+    pub machine: Machine,
     pub phoff: u64,
     pub phnum: u16,
     pub shoff: u64,
@@ -218,7 +250,8 @@ pub struct Ehdr {
     pub shstrndx: u16,
 }
 
-/// The ELF header of an x86-64 ELF64 little-endian file, of any type.
+/// The ELF header of an x86-64 or AArch64 ELF64 little-endian file, of any
+/// type.
 pub fn ehdr(b: &[u8]) -> Result<Ehdr, VmError> {
     let ident = bytes_at(b, 0, 16).map_err(|_| VmError::NotElf)?;
     if ident.get(..4) != Some(&[0x7F, b'E', b'L', b'F'][..]) {
@@ -232,13 +265,12 @@ pub fn ehdr(b: &[u8]) -> Result<Ehdr, VmError> {
     if b.len() < EHDR_SIZE {
         return Err(VmError::Truncated);
     }
-    if le16(b, 18)? != EM_X86_64 {
-        return Err(VmError::WrongMachine);
-    }
+    let machine = Machine::from_em(le16(b, 18)?).ok_or(VmError::WrongMachine)?;
     let phentsize = le16(b, 0x36)?;
     let shentsize = le16(b, 0x3A)?;
     let h = Ehdr {
         kind: le16(b, 16)?,
+        machine,
         phoff: le64(b, 0x20)?,
         phnum: le16(b, 0x38)?,
         shoff: le64(b, 0x28)?,
@@ -373,36 +405,46 @@ impl<'a> Iterator for Notes<'a> {
     }
 }
 
-/// x86-64 registers from one `NT_PRSTATUS` note.
+/// A CPU's registers from one `NT_PRSTATUS` note, as both ports' frame
+/// walks read them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PrRegs {
     /// `pr_pid`: QEMU writes the vCPU's index plus one.
     pub pid: u32,
-    pub rip: u64,
-    pub rsp: u64,
-    pub rbp: u64,
-    pub rflags: u64,
+    /// `rip`, or AArch64's `pc`.
+    pub pc: u64,
+    /// `rsp`, or `sp`.
+    pub sp: u64,
+    /// The frame pointer: `rbp`, or `x29`.
+    pub fp: u64,
+    /// `eflags`, or `pstate`.
+    pub flags: u64,
 }
 
-/// `pr_reg`'s offset in `struct elf_prstatus` and its `user_regs_struct`
-/// slots (`r15, r14, r13, r12, rbp, rbx, r11, r10, r9, r8, rax, rcx, rdx,
-/// rsi, rdi, orig_rax, rip, cs, eflags, rsp, ss, …`).
+/// `pr_pid`'s and `pr_reg`'s offsets in `struct elf_prstatus`, which both
+/// ports share, and each port's `pr_reg` slots: x86-64's
+/// `user_regs_struct` (`r15, r14, r13, r12, rbp, rbx, r11, r10, r9, r8,
+/// rax, rcx, rdx, rsi, rdi, orig_rax, rip, cs, eflags, rsp, ss, …`) and
+/// AArch64's `user_pt_regs` (`x0` to `x30`, `sp`, `pc`, `pstate`).
 const PR_PID: u64 = 32;
 const PR_REG: u64 = 112;
-const REG_RBP: u64 = 4;
-const REG_RIP: u64 = 16;
-const REG_RFLAGS: u64 = 18;
-const REG_RSP: u64 = 19;
+/// `(pc, sp, fp, flags)` slots.
+const X86_SLOTS: [u64; 4] = [16, 19, 4, 18];
+const A64_SLOTS: [u64; 4] = [32, 31, 29, 33];
 
-/// The registers of an `NT_PRSTATUS` descriptor.
-pub fn prstatus_regs(desc: &[u8]) -> Result<PrRegs, VmError> {
+/// The registers of an `NT_PRSTATUS` descriptor a `machine` core holds.
+pub fn prstatus_regs(desc: &[u8], machine: Machine) -> Result<PrRegs, VmError> {
     let reg = |slot: u64| le64(desc, PR_REG.saturating_add(slot.saturating_mul(8)));
+    let [pc, sp, fp, flags] = match machine {
+        Machine::X86_64 => X86_SLOTS,
+        Machine::Aarch64 => A64_SLOTS,
+    };
     Ok(PrRegs {
         pid: le32(desc, PR_PID)?,
-        rip: reg(REG_RIP)?,
-        rsp: reg(REG_RSP)?,
-        rbp: reg(REG_RBP)?,
-        rflags: reg(REG_RFLAGS)?,
+        pc: reg(pc)?,
+        sp: reg(sp)?,
+        fp: reg(fp)?,
+        flags: reg(flags)?,
     })
 }
 // ------------------------------------------------------------- VMCOREINFO

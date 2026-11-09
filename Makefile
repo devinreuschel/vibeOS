@@ -165,7 +165,10 @@ endif
 $(eval $(call KERNEL_VARIANT,ktest,--features kernel_tests,$(ISO_KTEST)))
 ifeq ($(ARCH),x86_64)
 $(eval $(call KERNEL_VARIANT,vibefs-crash,--features vibefs_crash,$(ISO_VIBEFS_CRASH)))
+endif
+# hang: the forensics tier's hang (ROADMAP §10.7), on both ports (§11.7).
 $(eval $(call KERNEL_VARIANT,hang,--features hang_test,$(ISO_HANG)))
+ifeq ($(ARCH),x86_64)
 $(eval $(call KERNEL_VARIANT,irqoff,--features irqoff,$(ISO_IRQOFF)))
 $(eval $(call KERNEL_VARIANT,ktest-irqoff,--features kernel_tests --features irqoff,$(ISO_KTEST_IRQOFF)))
 endif
@@ -571,9 +574,11 @@ vmcore: $(VMCORE)
 # drops, and holds paths relative to $(CURDIR). The named ELFs go too: a failed
 # run's guest core keeps the ELF behind its ISO (ROADMAP §10.7).
 ifeq ($(ARCH),aarch64)
-# The ISOs aarch64 per-push tiers run (ROADMAP §11.7): e2e + ktest shards.
-PREBUILT_FILES = $(ISO) $(ISO_KTEST) \
+# The ISOs aarch64 per-push tiers run (ROADMAP §11.7): e2e, ktest shards and
+# the forensics tier's hang.
+PREBUILT_FILES = $(ISO) $(ISO_KTEST) $(ISO_HANG) \
 	$(BUILD_OUT)/kernels/vibeos-default.elf $(BUILD_OUT)/kernels/vibeos-ktest.elf \
+	$(BUILD_OUT)/kernels/vibeos-hang.elf \
 	$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT) $(VMCORE)
 else
 PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_PANIC_NEST) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) $(ISO_INIT_FAULT) $(ISO_NOSH) \
@@ -668,7 +673,9 @@ test-qmp: $(ISO)
 # -smp 4, its core 5 s after the armed marker, and the core tool's report,
 # trace export and virtual core; the BUILD-ID refusal, a #GP core, and a
 # 9 GiB guest's core through the pipe. Its cores stay in build/forensics/.
-test-forensics: $(ISO_HANG) $(ISO_GP) $(VMCORE)
+# ARCH=aarch64 (ROADMAP §11.7) runs it on `virt`, refusing the hang core with
+# the production ELF, and has no #GP case, as it has no gp_test build.
+test-forensics: $(ISO_HANG) $(if $(filter x86_64,$(ARCH)),$(ISO_GP),$(KERNEL_ELF)) $(VMCORE)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_HANG) VIBEOS_VMCORE=$(VMCORE) python3 tests/harness/run_forensics.py
 
 # The in-guest tiers (DESIGN §8.2). Each variant's target runs the whole
@@ -806,7 +813,7 @@ test-gic-fallback-9: $(ISO_KTEST)
 
 # aarch64 per-push ladder (ROADMAP §11.7). x86-only e2e (PIT, #GP, #MC,
 # 9 GiB, LAPIC fallback, vibefs-crash) stays on `make test`.
-test-aarch64: test-e2e test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-7 test-kernel-8 test-kernel-9 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-kernel-smp4-6 test-kernel-smp4-7 test-kernel-smp4-8 test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6 test-gic-fallback-7 test-gic-fallback-8 test-gic-fallback-9
+test-aarch64: test-e2e test-forensics test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-7 test-kernel-8 test-kernel-9 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-kernel-smp4-6 test-kernel-smp4-7 test-kernel-smp4-8 test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6 test-gic-fallback-7 test-gic-fallback-8 test-gic-fallback-9
 
 .PHONY: litmus
 litmus:

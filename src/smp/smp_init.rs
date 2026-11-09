@@ -533,6 +533,7 @@ fn report_tsc_warp() {
         invariant: time_init::tsc_invariant(),
         warp_measured: runs > 0,
         max_skew: time_init::tsc_max_skew(),
+        uniform: false,
     });
 }
 
@@ -720,6 +721,7 @@ pub unsafe fn init() {
     #[cfg(target_arch = "aarch64")]
     {
         init_aarch64();
+        crate::log::trace_init::publish_cntvct_clock();
         crate::marker!(marker::SMP_DONE);
     }
     #[cfg(target_arch = "x86_64")]

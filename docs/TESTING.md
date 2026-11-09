@@ -926,6 +926,10 @@ The launcher first writes `build/debug/symbols.gdb`, which loads the kernel ELF
 (`build/kernels/vibeos-default.elf`) with `file` and each initrd program in the Makefile's
 `DEBUG_USER_ELFS` with `add-symbol-file <elf> -o 0`. From the repository root, in a second terminal,
 `gdb -x scripts/vibeos.gdb` (Homebrew's `x86_64-elf-gdb` on macOS) sources that file and connects.
+`make debug ARCH=aarch64` does the same for `virt` with the aarch64 ELFs under `build/aarch64/`;
+symbols.gdb starts with the architecture of ARCH (`set architecture aarch64`), and the gdb is
+`gdb-multiarch` on an x86_64 Linux host (plain `gdb` on an arm64 one) and Homebrew's
+`aarch64-elf-gdb` on macOS.
 The kernel is not in memory when QEMU starts, so set a hardware breakpoint (`hbreak _start`) and
 `continue`; a software `break` would be written into memory Limine later overwrites. Today's user
 ELFs carry no symbols, so gdb warns that they add none.
@@ -962,6 +966,11 @@ core with the `gp` ELF exits 3), boots the `gp` ISO declared `expect=panic` and 
 `gp_test_fault < gp_test_trip < boot_rest`), and boots the `hang` ISO at `-m 9G`, whose core goes
 through the pipe and the tool streaming from `zstd -dc`: the same `sig:` line, and at least 9 GiB
 in its `core:` line. Each check is a `forensics_<case>` row of its results file.
+`make test-forensics ARCH=aarch64` (in `make test-aarch64`, ROADMAP §11.7) runs the same `hang`,
+refusal and 9 GiB cases on `virt`: the tool reads the core's AArch64 `NT_PRSTATUS` (`pc`, `sp`,
+`x29`), walks the TTBR1 table VMCOREINFO names, writes an `EM_AARCH64` virtual core, and converts the
+`CNTVCT_EL0` trace with the recorded `CNTFRQ_EL0`, ordered globally; the refusal uses the production
+ELF, and there is no `gp` case, since `gp_test` is an x86_64 build.
 `make test-e2e` is enough when only boot output or QEMU wiring changed. `make test` is the gate before
 a PR. `make test-ps2` is the focused #66 sendkey boot; `make test-e2e` already runs it, so `make test`
 does not boot it twice.
@@ -1051,7 +1060,11 @@ wall time in a local TCG run at `d494350c` (4 CPUs) with this split, after the 8
 reached a 61 s median; `forensics`'s and `vibefs-crash-plants`'s are a local TCG run's (`vibefs-crash-plants`:
 two planted rounds and a control round), until a `ci` run measures them. The in-guest shards'
 figures are each `make` target's wall time in a local TCG run at `63dffb5` with this split (4 CPUs,
-one QEMU at a time), until a `ci` run measures them:
+one QEMU at a time), until a `ci` run measures them. The aarch64 `forensics` figure is an estimate, not a
+measurement: a local Apple Silicon TCG run on a loaded host took about 15 s for the hang case and 28 s
+for the 9 GiB one, and the first `ci` median on `ubuntu-26.04-arm` replaces it. If that median lands
+near 60 s, the 9 GiB case moves to a target of its own, by the rule above that splits a target over
+60 s:
 
 | Arch | Tier | Targets | QEMU s |
 |---|---|---|---|
@@ -1079,6 +1092,7 @@ one QEMU at a time), until a `ci` run measures them:
 | x86_64 | vibefs-crash-plants | `test-vibefs-crash-plants` | 15 |
 | x86_64 | forensics | `test-forensics` | 60 |
 | aarch64 | e2e-1 | `test-e2e` | 40 |
+| aarch64 | forensics | `test-forensics` | 60 |
 | aarch64 | kernel-1 | `test-kernel-1` | 40 |
 | aarch64 | kernel-2 | `test-kernel-2` | 40 |
 | aarch64 | kernel-3 | `test-kernel-3` | 40 |

@@ -9,7 +9,9 @@
 //! ordering. `--virt` writes the virtually addressed core `gdb` opens with
 //! the ELF; `--trace` writes every CPU's flight-recorder ring as one Chrome
 //! trace-event JSON timeline. The decoding is `vibeos::log::vmcore`'s; the
-//! formats are TESTING.md §8.3's.
+//! formats are TESTING.md §8.3's. The core's `e_machine` picks the port: an
+//! x86_64 core walks the PML4 VMCOREINFO names, an aarch64 one the TTBR1
+//! table (ROADMAP §11.7), and the kernel ELF must be for the same machine.
 //!
 //! The core goes into a sparse store of its non-zero 4 KiB pages, read in
 //! file order, so a 9 GiB guest's core fits. Exits 0, 1 on an error, 2 on
@@ -27,14 +29,13 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::process::ExitCode;
 
-use vibeos::arch::stub::Arch;
 use vibeos::log::trace::{self, RECORDS_PER_CPU, RecordData};
 use vibeos::log::vmcore::sig::{pick_cpu, write_signature};
-use vibeos::log::vmcore::tables::{CpuView, state_name};
-use vibeos::log::vmcore::walk::{self, Kernel};
+use vibeos::log::vmcore::tables::{CpuView, ThreadView, state_name};
+use vibeos::log::vmcore::walk::{self, Aarch64Ttbr1, CoreFormat, Kernel, X86_64};
 use vibeos::log::vmcore::{
-    BT_MAX, KernelElf, LOG_TAIL, NT_PRSTATUS, Notes, PAGE, PT_NOTE, PhysMem, PrRegs, Roots,
-    STT_FUNC, VmError, Vmcoreinfo, check_build_id, core_header, prstatus_regs,
+    BT_MAX, KernelElf, LOG_TAIL, Machine, NT_PRSTATUS, Notes, PAGE, PT_NOTE, PhysMem, PrRegs,
+    Roots, STT_FUNC, VmError, Vmcoreinfo, check_build_id, core_header, prstatus_regs,
 };
 use vibeos::proc::elf::{EHDR_SIZE, PHDR_SIZE, PT_LOAD};
 use vibeos::symtab::{self, Entry};
@@ -107,9 +108,10 @@ struct Seg {
 }
 
 /// A physical core as its non-zero 4 KiB pages, its segments and its note
-/// segments' bytes.
+/// segments' bytes, and the machine its header names.
 #[derive(Default)]
 struct Store {
+    machine: Option<Machine>,
     pages: HashMap<u64, Box<[u8; PAGE as usize]>>,
     segs: Vec<Seg>,
     notes: Vec<Vec<u8>>,
@@ -238,7 +240,10 @@ fn load_core<R: Read>(src: &mut Source<R>) -> Result<Store, Fail> {
         )));
     }
     segs.sort_by_key(|p| p.offset);
-    let mut store = Store::default();
+    let mut store = Store {
+        machine: Some(h.machine),
+        ..Store::default()
+    };
     let mut buf = vec![0u8; 1 << 20];
     for p in segs {
         src.goto(p.offset)?;
@@ -363,16 +368,17 @@ fn parse_args(args: &[String]) -> Result<Opts, Fail> {
     })
 }
 
-/// Each CPU's registers from its `NT_PRSTATUS`: QEMU writes one per vCPU,
-/// `pr_pid` the vCPU's index plus one, which is the APIC id under QEMU's
-/// default topology.
-fn prstatus(store: &Store) -> Vec<PrRegs> {
+/// Each CPU's registers from its `NT_PRSTATUS`, in `machine`'s layout:
+/// QEMU writes one per vCPU, `pr_pid` the vCPU's index plus one, which is
+/// the APIC id under QEMU's default x86_64 topology and the MPIDR's Aff0 on
+/// `virt`.
+fn prstatus(store: &Store, machine: Machine) -> Vec<PrRegs> {
     store
         .notes
         .iter()
         .flat_map(|n| Notes::new(n))
         .filter(|n| n.name == b"CORE" && n.kind == NT_PRSTATUS)
-        .filter_map(|n| prstatus_regs(n.desc).ok())
+        .filter_map(|n| prstatus_regs(n.desc, machine).ok())
         .collect()
 }
 
@@ -385,10 +391,10 @@ fn start_regs(c: &CpuView, i: usize, regs: &[PrRegs]) -> Option<(u64, u64, u64, 
     regs.iter()
         .find(|r| r.pid.checked_sub(1) == Some(c.apic_id))
         .or_else(|| regs.get(i))
-        .map(|r| (r.rip, r.rsp, r.rbp, "prstatus"))
+        .map(|r| (r.pc, r.sp, r.fp, "prstatus"))
 }
 
-fn tid_of(k: &Kernel<'_, Store, Arch>, tcb: u64) -> String {
+fn tid_of<A: CoreFormat>(k: &Kernel<'_, Store, A>, tcb: u64) -> String {
     if tcb == 0 {
         return "none".into();
     }
@@ -396,13 +402,58 @@ fn tid_of(k: &Kernel<'_, Store, Arch>, tcb: u64) -> String {
         .map_or_else(|_| "?".into(), |t| t.id.to_string())
 }
 
+/// A thread's saved context, named in its port's registers (DESIGN §7.5:
+/// aarch64 keeps x19 to x24 in the first six words, DAIF in the flags
+/// word, and x25 to x29 in `extra`).
+fn thread_regs(t: &ThreadView, machine: Machine) -> String {
+    match machine {
+        Machine::X86_64 => format!(
+            "rip=0x{:x} rsp=0x{:x} rbp=0x{:x} rbx=0x{:x} r12=0x{:x} r13=0x{:x} r14=0x{:x} r15=0x{:x} rflags=0x{:x}",
+            t.rip, t.rsp, t.rbp, t.rbx, t.r12, t.r13, t.r14, t.r15, t.rflags
+        ),
+        Machine::Aarch64 => {
+            let x = t.extra;
+            format!(
+                "pc=0x{:x} sp=0x{:x} x29=0x{:x} x19=0x{:x} x20=0x{:x} x21=0x{:x} x22=0x{:x} x23=0x{:x} x24=0x{:x} x25=0x{:x} x26=0x{:x} x27=0x{:x} x28=0x{:x} daif=0x{:x}",
+                t.rip,
+                t.rsp,
+                t.frame_pointer(machine),
+                t.rbx,
+                t.rbp,
+                t.r12,
+                t.r13,
+                t.r14,
+                t.r15,
+                x[0],
+                x[1],
+                x[2],
+                x[3],
+                t.rflags
+            )
+        }
+    }
+}
+
 /// What `report` produced: the text, and the files it wrote.
 struct Output {
     text: String,
 }
 
+/// The report, in the format of the core's machine.
 fn report(store: &Store, elf_bytes: &[u8], opts: &Opts) -> Result<Output, Fail> {
+    match store.machine {
+        Some(Machine::X86_64) => report_in::<X86_64>(store, elf_bytes, opts),
+        Some(Machine::Aarch64) => report_in::<Aarch64Ttbr1>(store, elf_bytes, opts),
+        None => Err(Fail::Other("core: no ELF header read".into())),
+    }
+}
+
+fn report_in<A: CoreFormat>(store: &Store, elf_bytes: &[u8], opts: &Opts) -> Result<Output, Fail> {
+    let machine = A::MACHINE;
     let elf = KernelElf::parse(elf_bytes).map_err(|e| other("elf", e))?;
+    if elf.hdr.machine != machine {
+        return Err(Fail::Other(VmError::MachineMismatch.as_str().into()));
+    }
     let elf_id = elf.build_id().map_err(|e| Fail::Other(e.as_str().into()))?;
     let notes: Vec<_> = store.notes.iter().flat_map(|n| Notes::new(n)).collect();
     let vi = Vmcoreinfo::find(notes.iter().copied()).map_err(|_| Fail::NoNote)?;
@@ -414,10 +465,10 @@ fn report(store: &Store, elf_bytes: &[u8], opts: &Opts) -> Result<Output, Fail> 
         });
     }
     let roots: Roots = vi.roots().map_err(|e| other("VMCOREINFO", e))?;
-    let k: Kernel<'_, Store, Arch> =
+    let k: Kernel<'_, Store, A> =
         Kernel::new(store, roots.pgt_root, roots.pgt_levels).map_err(|e| other("core", e))?;
     let syms = Symbols::new(&elf)?;
-    let regs = prstatus(store);
+    let regs = prstatus(store, machine);
     let in_text = |a: u64| elf.in_text(a);
 
     // Each CPU and its backtrace.
@@ -539,20 +590,12 @@ fn report(store: &Store, elf_bytes: &[u8], opts: &Opts) -> Result<Output, Fail> 
                 };
                 put!(
                     out,
-                    "thread {} {}{arg} cpu {} pid {} rip=0x{:x} rsp=0x{:x} rbp=0x{:x} rbx=0x{:x} r12=0x{:x} r13=0x{:x} r14=0x{:x} r15=0x{:x} rflags=0x{:x}",
+                    "thread {} {}{arg} cpu {} pid {} {}",
                     t.id,
                     state_name(t.state),
                     t.cpu,
                     t.pid,
-                    t.rip,
-                    t.rsp,
-                    t.rbp,
-                    t.rbx,
-                    t.r12,
-                    t.r13,
-                    t.r14,
-                    t.r15,
-                    t.rflags
+                    thread_regs(&t, machine)
                 );
             }
             Err(e) => {
@@ -698,7 +741,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vibeos::log::vmcore::synth::{SymDef, Synth, kernel_elf};
+    use vibeos::log::vmcore::synth::{SymDef, Synth, kernel_elf, kernel_elf_for};
     use vibeos::log::vmcoreinfo::Info;
 
     const KBASE: u64 = 0xFFFF_FFFF_8000_0000;
@@ -782,13 +825,24 @@ mod tests {
 
     /// A core of one CPU spinning in `hold` < `arm` < `boot_rest`, and its ELF.
     fn hang_core(id: &[u8]) -> (Vec<u8>, Vec<u8>) {
-        let mut s = Synth::new(&[(0, 16 << 20)]);
-        s.map(KBASE, 0x20_0000, 0x20_0000, 0);
+        hang_core_for(Machine::X86_64, id)
+    }
+
+    /// [`hang_core`] for `machine`: RAM at 0 on x86_64, at `virt`'s
+    /// 0x4000_0000 on aarch64, whose root is a TTBR1 table and whose
+    /// `NT_PRSTATUS` is AArch64's.
+    fn hang_core_for(machine: Machine, id: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let ram = match machine {
+            Machine::X86_64 => 0,
+            Machine::Aarch64 => 0x4000_0000,
+        };
+        let mut s = Synth::new_for(machine, &[(ram, 16 << 20)]);
+        s.map(KBASE, ram + 0x20_0000, 0x20_0000, 0);
         // Text at KBASE; a stack at KBASE + 0x10_0000: rbp -> [next, ret].
         let stack = KBASE + 0x10_0000;
         let f0 = stack + 0x100;
         let f1 = stack + 0x140;
-        let pa = |va: u64| va - KBASE + 0x20_0000;
+        let pa = |va: u64| va - KBASE + ram + 0x20_0000;
         s.write_phys(pa(f0), &f1.to_le_bytes());
         s.write_phys(pa(f0) + 8, &(KBASE + 0x48).to_le_bytes());
         s.write_phys(pa(f1), &0u64.to_le_bytes());
@@ -852,7 +906,10 @@ mod tests {
                 kind: STT_FUNC,
             },
         ];
-        (s.build(), kernel_elf(&ID, KBASE, &[0xCC; 0x100], &syms))
+        (
+            s.build(),
+            kernel_elf_for(machine, &ID, KBASE, &[0xCC; 0x100], &syms),
+        )
     }
 
     fn opts() -> Opts {
@@ -933,6 +990,53 @@ mod tests {
         assert_eq!(
             (f.code(), f.message()),
             (1, "vmcore: no build-id note in ELF".to_string())
+        );
+    }
+
+    /// The aarch64 hang core reads as the x86_64 one does (ROADMAP §11.7):
+    /// the same signature, CPU block and frames, through its TTBR1 table
+    /// and AArch64 registers, with the threads named in aarch64's
+    /// registers; a core and an ELF for different machines are refused.
+    #[test]
+    fn aarch64_report_matches_x86() {
+        let (core, elf) = hang_core_for(Machine::Aarch64, &ID);
+        let st = from_bytes(&core, false).unwrap();
+        assert_eq!(st.machine, Some(Machine::Aarch64));
+        let out = report(&st, &elf, &opts()).unwrap().text;
+        let (x86_core, x86_elf) = hang_core(&ID);
+        let x86_st = from_bytes(&x86_core, false).unwrap();
+        let x86 = report(&x86_st, &x86_elf, &opts()).unwrap().text;
+        let lines: Vec<&str> = out.lines().collect();
+        let x86_lines: Vec<&str> = x86.lines().collect();
+        assert_eq!(lines[0], x86_lines[0], "{out}");
+        assert!(
+            lines[1].starts_with("core: 16777216 RAM in 1 segments"),
+            "{out}"
+        );
+        let cpu = lines.iter().position(|l| l.starts_with("cpu 0 ")).unwrap();
+        let x86_cpu = x86_lines
+            .iter()
+            .position(|l| l.starts_with("cpu 0 "))
+            .unwrap();
+        assert_eq!(
+            lines[cpu..cpu + 4],
+            x86_lines[x86_cpu..x86_cpu + 4],
+            "{out}"
+        );
+        let th = lines
+            .iter()
+            .find(|l| l.starts_with("thread 5 running"))
+            .unwrap();
+        assert!(th.contains(" pc=0x0 sp=0x0 x29=0x0 x19=0x0"), "{th}");
+        assert!(th.ends_with(" daif=0x0"), "{th}");
+        // Machines crossed: an aarch64 core with the x86_64 ELF.
+        let f = report(&st, &x86_elf, &opts()).err().unwrap();
+        assert_eq!(
+            (f.code(), f.message()),
+            (
+                1,
+                "vmcore: the core and the ELF are for different machines".to_string()
+            )
         );
     }
 

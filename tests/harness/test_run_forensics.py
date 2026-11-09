@@ -21,6 +21,7 @@ from tests.harness.run_forensics import (
     check_gp_sig,
     check_report,
     check_virt,
+    hang_markers,
     normalize,
     panic_line,
     trace_order,
@@ -167,6 +168,22 @@ class GiveUp(unittest.TestCase):
                 capture=lambda q, out: out / "core.zst",
             )
         self.assertIn("missing 'hang_test_armed'", str(cm.exception))
+
+
+class Markers(unittest.TestCase):
+    def test_hang_markers_per_arch(self) -> None:
+        # ROADMAP §11.7: the aarch64 hang's contract is virt's boot through
+        # its `cntvct` clocksource line, then the armed marker last.
+        for arch in ("x86_64", "aarch64"):
+            self.assertEqual(hang_markers(4, arch)[-1].name, "hang_test_armed", arch)
+        self.assertTrue(
+            any(
+                m.matches(k("vibeOS: time: clocksource cntvct")) for m in hang_markers(4, "aarch64")
+            )
+        )
+        a64 = {m.name for m in hang_markers(4, "aarch64")}
+        self.assertNotIn("paging_cr3_ok", a64)
+        self.assertIn("paging_cr3_ok", {m.name for m in hang_markers(4)})
 
 
 class Checks(unittest.TestCase):
