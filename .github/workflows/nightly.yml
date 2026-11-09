@@ -422,10 +422,13 @@ jobs:
     # boots no QEMU.
     env:
       # herd7 for `make litmus` (ROADMAP §11.7), pinned: opam builds this
-      # herdtools7 release on this OCaml and checks the release tarball
-      # against the md5 and sha512 its opam package records. Bump both here.
+      # herdtools7 release on this OCaml from the opam-repository commit
+      # below, so its dependencies (dune, menhir, zarith) do not float, and
+      # checks each tarball against the hashes that commit records. Bump
+      # the three together, to a commit that has both versions.
       HERDTOOLS7_VERSION: "7.58"
       OCAML_VERSION: "5.2.1"
+      OPAM_REPO_SHA: b5f18ad2f65d3f07b33af323a8a659e6473a506b
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -451,20 +454,29 @@ jobs:
         run: ./setup.sh --kani && make models
 
       # herd7 at the pinned herdtools7 (ROADMAP §11.7): `make litmus` beside
-      # `make models`. The opam switch is cached under the pinned versions.
+      # `make models`. opam itself and zarith's GMP depext come from apt, since
+      # `opam -y` need not run apt for a depext. The opam switch is cached
+      # under the runner image, opam's version, and the pins.
+      - name: install opam
+        id: opam
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y opam libgmp-dev pkg-config
+          v=$(opam --version)
+          echo "key=opam-$ImageOS-$ImageVersion-$v-ocaml-$OCAML_VERSION-herdtools7-$HERDTOOLS7_VERSION-$OPAM_REPO_SHA" >> "$GITHUB_OUTPUT"
+
       - name: cache opam
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.opam
-          key: ${{ runner.os }}-opam-ocaml-${{ env.OCAML_VERSION }}-herdtools7-${{ env.HERDTOOLS7_VERSION }}
+          key: ${{ steps.opam.outputs.key }}
 
       - name: install herd7
         run: |
-          sudo apt-get update
-          sudo apt-get install -y opam
           herd="$HOME/.opam/herd/bin/herd7"
           if [ ! -x "$herd" ]; then
-            opam init -y --bare --disable-sandboxing
+            opam init -y --bare --disable-sandboxing default \
+              "git+https://github.com/ocaml/opam-repository.git#$OPAM_REPO_SHA"
             opam switch create herd "ocaml-base-compiler.$OCAML_VERSION" -y
             opam install -y --switch herd "herdtools7.$HERDTOOLS7_VERSION"
           fi
