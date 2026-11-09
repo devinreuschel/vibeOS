@@ -123,6 +123,25 @@ class Modules(unittest.TestCase):
                 self.assertEqual(nesting.probe(root, "qemu-x"), "svm")
             pq.assert_called_once_with("qemu-x")
 
+    def test_missing_qemu_is_a_harness_error(self) -> None:
+        before = set(Path(tempfile.gettempdir()).glob("vibeos-nest-*"))
+        with tempfile.TemporaryDirectory() as d:
+            missing = str(Path(d) / "no-such-qemu")
+            with self.assertRaises(HarnessError) as cm:
+                nesting.probe_qemu(missing)
+        self.assertIn("cannot start", str(cm.exception))
+        self.assertEqual(set(Path(tempfile.gettempdir()).glob("vibeos-nest-*")), before,
+                         "the temporary directory is removed")
+        with tempfile.TemporaryDirectory() as d:
+            root = self.sysfs(Path(d) / "sys", {"kvm_intel": "Y"})
+            with (
+                mock.patch.object(nesting, "SYS_MODULE", root),
+                mock.patch.object(nesting, "qemu_system", return_value=missing),
+                mock.patch("sys.stderr"),
+            ):
+                self.assertEqual(nesting.main(["--out", str(Path(d) / "n.json")]), 1)
+            self.assertFalse((Path(d) / "n.json").exists())
+
     def test_argv_is_halted_host_cpu_under_kvm(self) -> None:
         argv = nesting.qemu_argv("qemu-system-x86_64", "/s/q.sock")
         self.assertIn("-S", argv)

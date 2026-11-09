@@ -100,8 +100,12 @@ def probe_qemu(binary: str) -> str:
     """Start `binary` halted, read its vCPU (`read_vcpu`), then quit it."""
     tmp = tempfile.mkdtemp(prefix="vibeos-nest-")
     sock = str(Path(tmp) / "qmp.sock")
-    proc = subprocess.Popen(qemu_argv(binary, sock), stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        proc = subprocess.Popen(qemu_argv(binary, sock), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    except OSError as e:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise HarnessError(f"nesting: cannot start {binary}: {e}") from e
     try:
         try:
             qmp = QmpClient.connect(sock)
@@ -130,9 +134,9 @@ def probe_qemu(binary: str) -> str:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def probe(sys_module: Path = SYS_MODULE, binary: str | None = None) -> str:
+def probe(sys_module: Path | None = None, binary: str | None = None) -> str:
     """`none` with no vendor module's nesting on, else the vCPU's answer."""
-    if not nested_modules(sys_module):
+    if not nested_modules(SYS_MODULE if sys_module is None else sys_module):
         return NONE
     return probe_qemu(binary or qemu_system("x86_64"))
 

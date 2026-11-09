@@ -1230,6 +1230,21 @@ fn wo_wait(g: u64, start: u64) -> bool {
     true
 }
 
+/// Wait until the worker has finished the last generation issued, bounded
+/// by the test's deadline; false when the deadline came first.
+fn wo_drain() -> bool {
+    // Relaxed: the coordinator, this thread, is `WO_GO`'s only writer.
+    let last = WO_GO.load(Ordering::Relaxed);
+    // Acquire: pairs with the worker's Release of `WO_DONE`.
+    while last != 0 && WO_DONE.load(Ordering::Acquire) != last {
+        if crate::ktest::deadline_within(5_000) == Some(true) {
+            return false;
+        }
+        thread_init::yield_now();
+    }
+    true
+}
+
 /// One shape's generations follow `base`, the last one issued before it, so
 /// no generation repeats across shapes.
 fn wo_mp(base: u64) -> (u64, u64) {
@@ -1298,12 +1313,26 @@ pub(crate) fn test_weak_order_probe() -> Outcome {
     WO_STOP.store(0, Ordering::Relaxed);
     let _worker = spawn_thread_on("wo_probe", wo_worker, 1);
     let (mp_n, mp_w) = wo_mp(0);
-    // Message passing issued at most generation `mp_n + 1` (one the worker
-    // may still be finishing when its budget ran out).
-    let (lb_n, lb_w) = wo_lb(mp_n.saturating_add(1));
+    // A generation the worker was still running when message passing's
+    // budget ran out would store into the next shape's locations: let it
+    // finish before load buffering resets them.
+    let drained = wo_drain();
+    let (lb_n, lb_w) = if drained {
+        // Message passing issued at most generation `mp_n + 1`.
+        wo_lb(mp_n.saturating_add(1))
+    } else {
+        (0, 0)
+    };
+    // The same before the stop, so no generation outlives the counts. A
+    // drain the deadline cuts short is no failure: the box fails the test
+    // only on a shape with no iteration, which an undrained message passing
+    // gives load buffering.
+    let stopped = wo_drain();
     // Release: pairs with the worker's Acquire of `WO_STOP`.
     WO_STOP.store(1, Ordering::Release);
-    crate::ktest_info!("mp iters={mp_n} weak={mp_w} lb iters={lb_n} weak={lb_w}");
+    crate::ktest_info!(
+        "mp iters={mp_n} weak={mp_w} lb iters={lb_n} weak={lb_w} drained={drained} stopped={stopped}"
+    );
     if mp_n == 0 || lb_n == 0 {
         return crate::fail_fmt!("mp {mp_n} lb {lb_n}");
     }

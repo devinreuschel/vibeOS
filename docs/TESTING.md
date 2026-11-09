@@ -1259,11 +1259,13 @@ change in the maintainer's tree reaches no record, and writes one JSON record pe
 pass or fail: `schema`, `event: "dev-host"`, `commit`, `head_sha`, the fixed `host: "dev-host"`,
 `mac_model` (`sysctl -n hw.model`), `macos` (`sw_vers`), `qemu` (the first `--version` line of each
 `qemu-system-*` on `PATH`), `phase`, `line` (the key), `command`, `numbers` (`seconds`, `runs`,
-`passes` and any `numbers` section of the run's results files), `result`, `started`, `finished`, and
+`passes` and any `numbers` section of the run's results files, which win over those three for a
+single run), `result`, `started`, `finished`, and
 `results`, the `build/results/*.json` files the run wrote, which `check_ticks.py` reads. From Phase
 11 it also runs each `tests/gates/common.toml` entry, keyed by its name, in a loop for 30 minutes
 (`gate.COMMON_LOOP_S`), each run from an empty `build/results/`, stopping at the first failed run:
-the record adds `loop_seconds`, holds every run's results files, and fails when any run failed, and
+the record adds `loop_seconds`, whose loop counts win over the results files' numbers, holds every
+run's results files, and fails when any run failed, and
 `make gate` passes the entry only on a record whose loop covered the 30 minutes with `passes` equal
 to `runs` (ROADMAP §11.7). Every string is scrubbed
 first (the worktree becomes `<checkout>`, the temporary directory `<tmp>`, the home directory

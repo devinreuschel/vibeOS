@@ -274,7 +274,8 @@ class TestResults(unittest.TestCase):
     def test_weak_order_counts_recorded_even_on_fail(self) -> None:
         """ROADMAP §11.7: `weak_order_probe`'s info line becomes a
         `weak_order` row, kept when the boot fails, and reaches the summary."""
-        info = "vibeOS: ktest: info weak_order_probe: mp iters=10000000 weak=7 lb iters={} weak=0"
+        info = ("vibeOS: ktest: info weak_order_probe: mp iters=10000000 weak=7 "
+                "lb iters={} weak=0 drained=true stopped=true")
 
         def boot(lb: int, verdict: str) -> RunResult:
             return RunResult(

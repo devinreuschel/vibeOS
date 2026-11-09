@@ -570,6 +570,26 @@ class RecordLoop(unittest.TestCase):
                 logs = [log for cmd, log in runner.calls if cmd.startswith("make test")]
                 self.assertEqual(logs, [f"record-2-{k}.log" for k in range(1, n["runs"] + 1)])
 
+    def test_numbers_precedence(self) -> None:
+        from tests.harness.test_gate_records import FakeHost
+
+        results = [{"numbers": {"seconds": 7, "runs": 9, "passes": 9, "loom_models": 12}}]
+
+        def numbers(loop_s: int) -> dict[str, Any]:
+            rec = gate.build_record(host=FakeHost(), commit=C, head_sha=C, phase=11, key="k",
+                                    command="make x", ok=True, started=0.0, finished=1900.0,
+                                    results=results, runs=4, passes=4, loop_s=loop_s)
+            n = rec["numbers"]
+            assert isinstance(n, dict)
+            return n
+
+        # a single run: its results files win, as before the loop
+        self.assertEqual(numbers(0), {"seconds": 7, "runs": 9, "passes": 9, "loom_models": 12})
+        # a looped entry: the loop's counts win
+        self.assertEqual(numbers(gate.COMMON_LOOP_S),
+                         {"seconds": 1900.0, "runs": 4, "passes": 4, "loom_models": 12,
+                          "loop_seconds": gate.COMMON_LOOP_S})
+
     def test_gate_needs_a_looped_record(self) -> None:
         e = Entry("record", "make test-smp-stress ARCH=aarch64", "", "", False)
 

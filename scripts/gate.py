@@ -740,16 +740,19 @@ def build_record(
 ) -> dict[str, Any]:
     """A dev-host record (ROADMAP §10.9, C-HISTORY): `numbers` holds
     `seconds`, `runs` and `passes`, `loop_seconds` for a looped entry
-    (ROADMAP §11.7), and every `numbers` section of the runs' results files."""
-    numbers: dict[str, Any] = {}
-    for r in results:
-        extra = r.get("numbers")
-        if isinstance(extra, dict):
-            numbers.update(extra)
-    numbers.update({"seconds": round(finished - started, 1), "runs": runs,
-                    "passes": (runs if ok else 0) if passes is None else passes})
+    (ROADMAP §11.7), and every `numbers` section of the runs' results files.
+    A single run's results files win over `seconds`, `runs` and `passes`, as
+    before; a looped entry's loop counts win, since `make gate` reads them."""
+    own: dict[str, Any] = {"seconds": round(finished - started, 1), "runs": runs,
+                           "passes": (runs if ok else 0) if passes is None else passes}
     if loop_s:
-        numbers["loop_seconds"] = loop_s
+        own["loop_seconds"] = loop_s
+    extra: dict[str, Any] = {}
+    for r in results:
+        sec = r.get("numbers")
+        if isinstance(sec, dict):
+            extra.update(sec)
+    numbers = {**extra, **own} if loop_s else {**own, **extra}
     return {
         "schema": ci_history.SCHEMA,
         "event": ci_history.DEV_HOST,
