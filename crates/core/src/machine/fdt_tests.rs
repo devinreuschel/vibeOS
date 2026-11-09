@@ -455,6 +455,58 @@ fn psci_without_a_known_method_enables_nothing() {
     }
 }
 
+/// `method = "smc"` names the SMC conduit, as at EL2 and under EL3
+/// firmware; `"hvc"` names HVC.
+#[test]
+fn psci_method_names_the_conduit() {
+    use crate::arch::aarch64::psci::{Conduit, conduit};
+    for (method, hvc, want) in [
+        (&b"smc\0"[..], false, Conduit::Smc),
+        (&b"hvc\0"[..], true, Conduit::Hvc),
+    ] {
+        let mut t = root_2_2();
+        t.begin("psci");
+        t.prop("compatible", b"arm,psci-1.0\0");
+        t.prop("method", method);
+        t.end();
+        t.end();
+        let d = parse(&t.finish()).unwrap();
+        assert_eq!(d.enable, EnableMethod::Psci { hvc });
+        assert_eq!(d.psci, Some(EnableMethod::Psci { hvc }));
+        assert_eq!(conduit(d.psci), Some(want));
+    }
+}
+
+/// A timer node's `clock-frequency` reaches `TimerDesc`, for firmware that
+/// programs `CNTFRQ_EL0` wrongly; QEMU's `virt` gives none.
+#[test]
+fn timer_clock_frequency_is_parsed() {
+    let mut t = root_2_2();
+    t.begin("timer");
+    t.prop("compatible", b"arm,armv8-timer\0");
+    t.prop("interrupts", &be(&[1, 13, 4, 1, 14, 4, 1, 11, 4, 1, 10, 4]));
+    t.prop("clock-frequency", &be(&[19_200_000]));
+    t.end();
+    t.end();
+    match parse(&t.finish()).unwrap().arm_timer() {
+        Some(TimerDesc::ArmGeneric {
+            nirq,
+            clock_frequency,
+            ..
+        }) => {
+            assert_eq!(nirq, 4);
+            assert_eq!(clock_frequency, Some(19_200_000));
+        }
+        other => panic!("timer {other:?}"),
+    }
+    match parse(VIRT_CUR).unwrap().arm_timer() {
+        Some(TimerDesc::ArmGeneric {
+            clock_frequency, ..
+        }) => assert_eq!(clock_frequency, None),
+        other => panic!("timer {other:?}"),
+    }
+}
+
 #[test]
 fn reserved_memory_at_address_has_reserved_children() {
     // A child of `reserved-memory@…` is a reservation, as one of `reserved-memory`.

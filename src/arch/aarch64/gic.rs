@@ -90,6 +90,28 @@ pub fn chip() -> Option<&'static dyn IrqChip> {
     CHIP_DYN.try_get().copied()
 }
 
+/// The priority byte the GIC holds for `intid`: this CPU's redistributor
+/// for an SGI or PPI on GICv3, the distributor otherwise (IHI 0069,
+/// IHI 0048). `None` before `init` or for an LPI or special INTID.
+#[cfg(feature = "kernel_tests")]
+pub fn priority_readback(intid: u32) -> Option<u8> {
+    let g = gic()?;
+    if !(gic::is_sgi(intid) || gic::is_ppi(intid) || gic::is_spi(intid)) {
+        return None;
+    }
+    let (base, off) = if g.kind == Kind::V3 && intid < 32 {
+        (this_redist(g)?, GICR_IPRIORITYR)
+    } else {
+        (g.dist, GICD_IPRIORITYR)
+    };
+    let word = u64::from(intid & !3);
+    // SAFETY: `base` is the mapped GICD, or this CPU's mapped GICR frame,
+    // and `off + word` is inside its IPRIORITYR array for a valid
+    // INTID; established by `arch::aarch64::gic::init`.
+    let v = unsafe { mmio32(base, off.wrapping_add(word)) };
+    u8::try_from((v >> ((intid & 3) * 8)) & 0xFF).ok()
+}
+
 fn map_mmio(r: PhysRange) -> Option<u64> {
     let size = r.size.max(0x1000);
     // SAFETY: `r` is a GIC MMIO range from MachineDesc; established by

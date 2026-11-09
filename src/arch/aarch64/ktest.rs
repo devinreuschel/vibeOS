@@ -54,11 +54,14 @@ pub(crate) fn test_kstack_overflow() -> Outcome {
     };
     let overflow = crate::arch::aarch64::cpu::overflow_sp();
     let lo = overflow.saturating_sub(DEFAULT_STACK_PAGES as u64 * PAGE_SIZE_4K);
-    if c.far == poison && c.handler_rsp >= lo && c.handler_rsp <= overflow {
+    let kind_ok = c.stack_overflow && vibeos::arch::aarch64::trap::is_el1_abort(c.esr);
+    if kind_ok && c.far == poison && c.handler_rsp >= lo && c.handler_rsp <= overflow {
         Outcome::Ok
     } else {
         crate::marker!(
-            "vibeOS: ktest:   far={:#x} want={:#x} rsp={:#x} lo={:#x} hi={:#x}",
+            "vibeOS: ktest:   overflow={} esr={:#x} far={:#x} want={:#x} rsp={:#x} lo={:#x} hi={:#x}",
+            c.stack_overflow,
+            c.esr,
             c.far,
             poison,
             c.handler_rsp,
@@ -1347,6 +1350,10 @@ pub(crate) const TESTS: &[Test] = &[
     ),
     test("el1_x16_survives_irq", test_el1_x16_survives_irq),
     test("gic_present", test_gic_present),
+    test(
+        "gic_priorities",
+        crate::arch::aarch64::ktest_gic::test_gic_priorities,
+    ),
     test("now_ns_cntvct", test_now_ns_cntvct),
     test("its_doorbell", test_its_doorbell),
     test("idle_wfi", test_idle_wfi),
