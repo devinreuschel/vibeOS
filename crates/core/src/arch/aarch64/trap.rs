@@ -214,6 +214,18 @@ impl UserFrame {
 /// result in `x0`. `svc #0` is four bytes.
 pub struct Abi;
 
+// The generated convention names only `x0` to `x30`, so no register read
+// through `UserFrame::reg` falls back to 0 (SYSCALL.md §1.1).
+const _: () = {
+    use syscall_table::aarch64::{ARG_REGS, NR_REG, RET_REG};
+    assert!(NR_REG < 31 && RET_REG < 31);
+    let mut i = 0;
+    while i < ARG_REGS.len() {
+        assert!(ARG_REGS[i] < 31);
+        i += 1;
+    }
+};
+
 impl SyscallAbi for Abi {
     type Frame = UserFrame;
 

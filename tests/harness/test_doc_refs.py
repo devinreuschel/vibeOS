@@ -80,6 +80,8 @@ def design_set() -> dict[str, str]:
         "|---|---|---|---|---|---|---|\n| I1 | Rule | `x` | §2.5 | none | documented | Yes |\n"
     )
     files[ROADMAP] = "# Roadmap\n\n## Phase 10: Hardening\n\n### 10.3 Documentation\n\n- [ ] box\n"
+    files["docs/SMP.md"] += "\n## 7.3 AP trampoline\n\nThe stub, in order: runs `wfi`.\n"
+    files["src/arch/aarch64/secondary.rs"] = 'global_asm!(\n    "    wfi",\n);\n'
     return files
 
 
@@ -677,6 +679,43 @@ class TestStubDoc(unittest.TestCase):
             ["src/arch/aarch64/secondary.rs: s3_0_c9_c9_0 has no name in "
              "doc_refs.SYSREG_ENCODINGS"],
         )
+
+    def test_several_instructions_in_one_string(self) -> None:
+        stub = STUB_RS.replace('"    wfi",', '"    msr cntvoff_el2, xzr; wfi",')
+        self.assertEqual(stub_steps(stub)[0][-2:], ["CNTVOFF_EL2", "wfi"])
+        stub = STUB_RS.replace('"    wfi",', '"    dmb ish\\n    wfi",')
+        self.assertEqual(stub_steps(stub)[0][-2:], ["dmb ish", "wfi"])
+
+    def test_cache_and_return_instructions_are_steps(self) -> None:
+        stub = STUB_RS.replace(
+            '    "    wfi",\n',
+            '    "    wfi",\n    "    dc cvac, x1",\n    "    ic iallu",\n'
+            '    "    at s1e1r, x2",\n    "    dmb ishld",\n    "    eret",\n',
+        )
+        self.assertEqual(stub_steps(stub)[0][-6:],
+                         ["wfi", "dc cvac", "ic iallu", "at s1e1r", "dmb ishld", "eret"])
+        errors = check_stub_doc(SMP_MD, stub)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("ends before step 12, `dc cvac`", errors[0])
+        doc = SMP_MD.replace("then `wfi`.", "then `wfi`, `dc cvac`, `ic iallu`, `at s1e1r`,\n"
+                             "`dmb ishld`, and `eret`.")
+        self.assertEqual(check_stub_doc(doc, stub), [])
+
+    def test_check_tree_needs_both_stub_files(self) -> None:
+        for gone in ("docs/SMP.md", "src/arch/aarch64/secondary.rs"):
+            files = design_set()
+            del files[gone]
+            errors = [e for e in check_tree(files) if "aarch64 stub check" in e]
+            self.assertEqual(
+                errors, [f"{gone}: missing; the aarch64 stub check reads it with its pair"]
+            )
+
+    def test_check_tree_runs_the_stub_check(self) -> None:
+        files = design_set()
+        files["src/arch/aarch64/secondary.rs"] = 'global_asm!(\n    "    isb",\n);\n'
+        errors = check_tree(files)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("names `wfi` as step 1", errors[0])
 
     def test_no_paragraph(self) -> None:
         errors = check_stub_doc(SMP_MD.replace("The stub, in order:", "The stub:"), STUB_RS)

@@ -201,10 +201,11 @@ WFI.
 
 `ap_entry_aarch64` then masks IRQs, notes `CTR_EL0`, sets PAN, clears `TPIDRRO_EL0`, installs the
 per-CPU base and the idle thread as `current`, loads `VBAR`, writes the empty user root to TTBR0
-again (`syscall_init::init_ap`), releases the debug OS Lock, prints the exception-level marker,
-enables this core's GIC interface and arms its timer, and claims the bring-up handshake; a core
-that lost it parks. The winner marks itself online, prints `sched: cpu<n> ready`, publishes
-`ready`, unmasks IRQs, and enters `idle_loop`.
+again (`syscall_init::init_ap`), releases the debug OS Lock, and prints the exception-level
+marker. It enables this core's GIC interface (`apic_init::enable_ap`), and a core with no
+redistributor parks there, before `ready`, so the boot CPU times it out; then it arms its timer
+and claims the bring-up handshake, and a core that lost it parks. The winner marks itself online,
+prints `sched: cpu<n> ready`, publishes `ready`, unmasks IRQs, and enters `idle_loop`.
 
 ## 7.4 AP bring-up sequence
 

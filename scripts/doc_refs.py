@@ -27,8 +27,9 @@ script checks, over every tracked file outside the dated records (EXCLUDE):
   twice, and every row's `aarch64` cell says what that step does on aarch64;
 - the aarch64 secondary stub: the steps SMP.md §7.3's `The stub, in order:` paragraph names in
   backticks are exactly the `global_asm!` stub's in src/arch/aarch64/secondary.rs, in its order:
-  each system register it reads or writes, each `tlbi` and `dsb`, and each `isb`, `stlr`, `smc`,
-  `hvc`, and `wfi` (STUB_DESCRIPTIVE lists the registers it may name that are no step).
+  each system register it reads or writes, each `tlbi`, `dsb`, `dmb`, `dc`, `ic`, and `at`, and
+  each `isb`, `stlr`, `smc`, `hvc`, `wfi`, and `eret` (STUB_DESCRIPTIVE lists the registers it
+  may name that are no step); a tree with one of the two files and not the other is an error.
 
 `--where x.y` prints the file and anchor that hold DESIGN §x.y.
 """
@@ -827,15 +828,16 @@ SYSREG_ENCODINGS = {
 STUB_DESCRIPTIVE = frozenset({"ID_AA64PFR0_EL1", "ID_AA64DFR0_EL1"})
 SYSREG_NAME = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_EL[0-3]")
 # Instructions that are a step by their mnemonic alone, and those that are one with their operand.
-STUB_BARE = frozenset({"isb", "stlr", "smc", "hvc", "wfi"})
-STUB_WITH_OPERAND = frozenset({"tlbi", "dsb"})
+STUB_BARE = frozenset({"isb", "stlr", "smc", "hvc", "wfi", "eret"})
+STUB_WITH_OPERAND = frozenset({"tlbi", "dsb", "dmb", "dc", "ic", "at"})
 ASM_STRING = re.compile(r'^\s*"([^"]*)",?\s*(?://.*)?$')
 
 
 def stub_steps(source: str) -> tuple[list[str], list[str]]:
     """The steps of the `global_asm!` stub in `source`, in order: each system register an `mrs`
-    reads or an `msr` writes, each `tlbi <op>` and `dsb <option>`, and each `isb`, `stlr`,
-    `smc`, `hvc`, and `wfi`; and the errors found."""
+    reads or an `msr` writes, each `tlbi`, `dsb`, `dmb`, `dc`, `ic`, and `at` with its operand,
+    and each `isb`, `stlr`, `smc`, `hvc`, `wfi`, and `eret`; and the errors found. A string that
+    holds several instructions, split by `;` or `\\n`, gives each its own step."""
     steps: list[str] = []
     errors: list[str] = []
     start = source.find("global_asm!(")
@@ -847,28 +849,34 @@ def stub_steps(source: str) -> tuple[list[str], list[str]]:
         m = ASM_STRING.match(line)
         if m is None:
             continue
-        ops = m.group(1).replace(",", " ").split()
-        if not ops:
-            continue
-        reg = ""
-        if ops[0] == "msr" and len(ops) > 1:
-            reg = ops[1]
-        elif ops[0] == "mrs" and len(ops) > 2:
-            reg = ops[2]
-        elif ops[0] in STUB_WITH_OPERAND and len(ops) > 1:
-            steps.append(f"{ops[0]} {ops[1].lower()}")
-        elif ops[0] in STUB_BARE:
-            steps.append(ops[0])
-        if not reg:
-            continue
-        name = reg.upper()
-        if name.startswith("S3_"):
-            if name not in SYSREG_ENCODINGS:
-                errors.append(f"{STUB}: {reg} has no name in doc_refs.SYSREG_ENCODINGS")
-                continue
-            name = SYSREG_ENCODINGS[name]
-        steps.append(name)
+        for insn in re.split(r";|\\n", m.group(1)):
+            errors.extend(_stub_insn(insn, steps))
     return steps, errors
+
+
+def _stub_insn(insn: str, steps: list[str]) -> list[str]:
+    """Append `insn`'s step, if it is one, to `steps`; the errors found."""
+    ops = insn.replace(",", " ").split()
+    if not ops:
+        return []
+    reg = ""
+    if ops[0] == "msr" and len(ops) > 1:
+        reg = ops[1]
+    elif ops[0] == "mrs" and len(ops) > 2:
+        reg = ops[2]
+    elif ops[0] in STUB_WITH_OPERAND and len(ops) > 1:
+        steps.append(f"{ops[0]} {ops[1].lower()}")
+    elif ops[0] in STUB_BARE:
+        steps.append(ops[0])
+    if not reg:
+        return []
+    name = reg.upper()
+    if name.startswith("S3_"):
+        if name not in SYSREG_ENCODINGS:
+            return [f"{STUB}: {reg} has no name in doc_refs.SYSREG_ENCODINGS"]
+        name = SYSREG_ENCODINGS[name]
+    steps.append(name)
+    return []
 
 
 def _stub_token(text: str) -> str | None:
@@ -952,8 +960,12 @@ def check_tree(files: Mapping[str, str]) -> list[str]:
         errors.extend(check_register(files[REGISTER], tree_names(files)))
     if BOOT in files and MARKERS in files:
         errors.extend(check_boot_order(files[BOOT], files[MARKERS]))
-    if SMP in files and STUB in files:
-        errors.extend(check_stub_doc(files[SMP], files[STUB]))
+    if SMP in files or STUB in files:
+        missing = [p for p in (SMP, STUB) if p not in files]
+        for path in missing:
+            errors.append(f"{path}: missing; the aarch64 stub check reads it with its pair")
+        if not missing:
+            errors.extend(check_stub_doc(files[SMP], files[STUB]))
     return sorted(errors)
 
 
