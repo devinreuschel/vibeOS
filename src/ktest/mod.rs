@@ -522,7 +522,6 @@ fn aarch64_x86_skip(name: &str) -> Option<&'static str> {
         | "stop_holds_signals_until_cont"
         | "signal_on_return"
         | "exit_work_ipi"
-        | "syscall_body_if_on"
         | "kill_line_whole"
         | "kalloc_nomem"
         | "syscall_rcx_canary"

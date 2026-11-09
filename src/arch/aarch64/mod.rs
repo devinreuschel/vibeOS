@@ -213,7 +213,8 @@ impl Barriers for Arch {
         compiler_fence(Ordering::Release);
     }
 
-    /// tests/litmus/log_ring.litmus
+    /// tests/litmus/virtio_avail.litmus (its reader's `DMB OSHLD` between
+    /// the index load and the descriptor load)
     #[inline]
     fn dma_rmb() {
         // Acquire: pairs with the Release fence in `dma_wmb`.
