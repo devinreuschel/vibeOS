@@ -1118,12 +1118,18 @@ fn init_aarch64() {
         }
         p = p.saturating_add(4096);
     }
-    let Some((ttbr0_id, ttbr0_empty, mut id_tables)) =
-        arch::aarch64::secondary::build_identity(&pas[..])
+    let Some((ttbr0_id, _, mut id_tables)) = arch::aarch64::secondary::build_identity(&pas[..])
     else {
         crate::klog!(vibeos::log::Level::Error, "vibeOS: smp: identity map");
         return;
     };
+    // The stub leaves TTBR0 at the permanent empty user root, the one every
+    // kernel thread runs on, not the identity build's own zero root.
+    let ttbr0_empty = crate::paging_init::empty_user_root();
+    if ttbr0_empty == 0 {
+        crate::klog!(vibeos::log::Level::Error, "vibeOS: smp: no empty TTBR0");
+        return;
+    }
     let mut n_id = 0usize;
     for &pa in id_tables.iter() {
         if pa != 0 {
@@ -1441,6 +1447,8 @@ extern "C" fn ap_entry_aarch64(cpu: *mut PerCpu) -> ! {
     // SAFETY: `cpu` is this AP's slot; the BSP's `with_cpu` ended before
     // CPU_ON (I43, I21, established at `smp_init::start_one_aarch64`).
     let cpu = unsafe { &mut *cpu };
+    #[cfg(feature = "kernel_tests")]
+    arch::aarch64::secondary::note_ap_entry_ttbr0(cpu.cpu_id);
     // SAFETY: this CPU's `PerCpu`, IRQs masked. established here.
     unsafe { per_cpu_init::install_gs(cpu) };
     // BSP published this CPU's idle TCB before CPU_ON; `SP_EL0` is this

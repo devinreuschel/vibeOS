@@ -471,6 +471,56 @@ fn id_mmfr() -> (u64, u64) {
     (mmfr0, mmfr1)
 }
 
+/// `TTBR0_EL1` each AP held on arrival at `ap_entry_aarch64`, as the
+/// secondary stub left it, before `syscall_init::init_ap` writes it again.
+#[cfg(feature = "kernel_tests")]
+static AP_ENTRY_TTBR0: [core::sync::atomic::AtomicU64; vibeos::acpi::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; vibeos::acpi::MAX_CPUS];
+/// APs whose stub entry address still translated on arrival.
+#[cfg(feature = "kernel_tests")]
+static AP_ENTRY_ID_LIVE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// APs that recorded [`AP_ENTRY_TTBR0`].
+#[cfg(feature = "kernel_tests")]
+static AP_ENTRY_SEEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Record what the stub left in TTBR0 and whether its identity address
+/// still translates (ROADMAP §11.4). IRQs masked.
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn note_ap_entry_ttbr0(cpu_id: u32) {
+    let ttbr0 = super::cpu::read_ttbr0();
+    let id_live = entry_pa().is_some_and(super::cpu::stage1_read_translates);
+    let (Some(slot), true) = (AP_ENTRY_TTBR0.get(cpu_id as usize), cpu_id < 64) else {
+        return;
+    };
+    // Relaxed: pairs with nothing; the Release `fetch_or` on `AP_ENTRY_SEEN` below publishes it.
+    slot.store(ttbr0, core::sync::atomic::Ordering::Relaxed);
+    if id_live {
+        // Relaxed: pairs with nothing; the Release `fetch_or` on `AP_ENTRY_SEEN` below publishes it.
+        AP_ENTRY_ID_LIVE.fetch_or(1u64 << cpu_id, core::sync::atomic::Ordering::Relaxed);
+    }
+    // Release: pairs with the Acquire load in `ap_entry_ttbr0`.
+    AP_ENTRY_SEEN.fetch_or(1u64 << cpu_id, core::sync::atomic::Ordering::Release);
+}
+
+/// `(TTBR0_EL1, stub entry translated)` as AP `cpu_id` arrived, or None
+/// when it recorded nothing.
+#[cfg(feature = "kernel_tests")]
+pub fn ap_entry_ttbr0(cpu_id: u32) -> Option<(u64, bool)> {
+    if cpu_id >= 64 {
+        return None;
+    }
+    // Acquire: pairs with the Release `fetch_or` in `note_ap_entry_ttbr0`.
+    if AP_ENTRY_SEEN.load(core::sync::atomic::Ordering::Acquire) & (1u64 << cpu_id) == 0 {
+        return None;
+    }
+    let slot = AP_ENTRY_TTBR0.get(cpu_id as usize)?;
+    // Relaxed: pairs with nothing; the Acquire load of `AP_ENTRY_SEEN` above orders it.
+    let ttbr0 = slot.load(core::sync::atomic::Ordering::Relaxed);
+    // Relaxed: pairs with nothing; the Acquire load of `AP_ENTRY_SEEN` above orders it.
+    let live = AP_ENTRY_ID_LIVE.load(core::sync::atomic::Ordering::Relaxed) & (1u64 << cpu_id) != 0;
+    Some((ttbr0, live))
+}
+
 /// `snapshot_sysregs` length. Slots 0..8 are the EL1 registers (their EL2
 /// forms under VHE). Slots 8.. are the EL2 controls, left zero unless
 /// entry was EL2 with VHE.

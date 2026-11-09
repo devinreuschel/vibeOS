@@ -330,6 +330,30 @@ pub fn read_ttbr0() -> u64 {
     v
 }
 
+/// Whether a stage-1 read of `va` translates in the kernel's regime (EL1&0,
+/// or EL2&0 under VHE): `AT S1E1R` (`AT S1E2R` under VHE), then
+/// `PAR_EL1.F`. Call with IRQs masked, so no handler's `AT` overwrites
+/// `PAR_EL1` between the two.
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(dead_code, reason = "in-guest ap_ttbr0_empty (kernel_tests)")
+)]
+pub fn stage1_read_translates(va: u64) -> bool {
+    let par: u64;
+    // SAFETY: `AT` only writes PAR_EL1, which nothing else in the kernel
+    // holds across an instruction; established here.
+    unsafe {
+        if el2_vhe() {
+            asm!("at s1e2r, {va}", "isb", "mrs {par}, par_el1", va = in(reg) va,
+                par = out(reg) par, options(nostack, preserves_flags));
+        } else {
+            asm!("at s1e1r, {va}", "isb", "mrs {par}, par_el1", va = in(reg) va,
+                par = out(reg) par, options(nostack, preserves_flags));
+        }
+    }
+    par & 1 == 0
+}
+
 /// Write the #202 computed EL0/EL1 environment registers whole.
 pub fn apply_computed_sysregs() {
     let sctlr = sysreg::sctlr_el1();
