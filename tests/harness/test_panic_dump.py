@@ -85,38 +85,44 @@ OVF_A64 = k(
 
 class TestCheckOverflow(unittest.TestCase):
     def test_good_dumps_pass(self) -> None:
-        panic_dump.check_overflow(OVF_X86)
-        panic_dump.check_overflow(OVF_A64)
+        panic_dump.check_overflow(OVF_X86, "x86_64")
+        panic_dump.check_overflow(OVF_A64, "aarch64")
 
     def test_no_overflow_line_fails(self) -> None:
         bad = [ln for ln in OVF_X86 if "stack overflow" not in ln]
         with self.assertRaisesRegex(HarnessError, "0 overflow lines"):
-            panic_dump.check_overflow(bad)
+            panic_dump.check_overflow(bad, "x86_64")
 
     def test_line_before_armed_fails(self) -> None:
         bad = [OVF_X86[0], OVF_X86[2], OVF_X86[1], *OVF_X86[3:]]
         with self.assertRaisesRegex(HarnessError, "after the armed line"):
-            panic_dump.check_overflow(bad)
+            panic_dump.check_overflow(bad, "x86_64")
 
     def test_far_outside_guard_fails(self) -> None:
         bad = [ln.replace("far=0xffffd000004a7d78", "far=0xffffd000004a8008") for ln in OVF_X86]
         with self.assertRaisesRegex(HarnessError, "outside the guard"):
-            panic_dump.check_overflow(bad)
+            panic_dump.check_overflow(bad, "x86_64")
 
     def test_other_thread_fails(self) -> None:
         bad = [ln.replace("sp=0xffffd000004a7d80 thread=0xffffc0000016abf0",
                           "sp=0xffffd000004a7d80 thread=0xffffc00000000001") for ln in OVF_X86]
         with self.assertRaisesRegex(HarnessError, "thread="):
-            panic_dump.check_overflow(bad)
+            panic_dump.check_overflow(bad, "x86_64")
 
     def test_esr_not_a_data_abort_fails(self) -> None:
         bad = [ln.replace("esr=0x96000047", "esr=0x2000000") for ln in OVF_A64]
         with self.assertRaisesRegex(HarnessError, "not a current-EL data abort"):
-            panic_dump.check_overflow(bad)
+            panic_dump.check_overflow(bad, "aarch64")
+
+    def test_esr_is_checked_for_the_named_arch(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "not a current-EL data abort"):
+            panic_dump.check_overflow(OVF_X86, "aarch64")
+        with self.assertRaisesRegex(HarnessError, "#DF's error code is 0"):
+            panic_dump.check_overflow(OVF_A64, "x86_64")
 
     def test_no_halt_fails(self) -> None:
         with self.assertRaisesRegex(HarnessError, "0 'vibeOS: panic: halted' lines"):
-            panic_dump.check_overflow(OVF_X86[:-1])
+            panic_dump.check_overflow(OVF_X86[:-1], "x86_64")
 
 
 class TestCheckNest(unittest.TestCase):

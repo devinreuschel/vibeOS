@@ -248,7 +248,7 @@ fn record(frame: &TrapFrame) {
         frame: frame.iret,
         handler_rsp: x86::read_rsp(),
         stack_overflow: frame.vector as u8 == vibeos::vectors::DF
-            && crate::arch::idt::df_is_stack_overflow(frame.cr2),
+            && crate::arch::idt::df_is_stack_overflow(frame.cr2, frame.iret.rsp),
     };
     last().with(|last| *last = caught);
 }

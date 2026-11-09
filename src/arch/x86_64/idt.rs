@@ -952,22 +952,33 @@ fn page_fault(frame: &mut TrapFrame) {
     crate::panic::exception_halt(b"#PF", &frame.iret, frame.user().rbp, Some(err), Some(cr2));
 }
 
-/// Whether a `#DF` with `cr2` is a kernel stack overflow: CR2 lies in the
-/// guard of the interrupted thread's stack (ROADMAP §11.3). [`double_fault`]
-/// prints the overflow line on it, and `catch` reports it as the kind.
-pub(crate) fn df_is_stack_overflow(cr2: u64) -> bool {
+/// Whether a `#DF` with `cr2` and interrupted RSP `rsp` is a kernel stack
+/// overflow (ROADMAP §11.3, DESIGN §4.5): CR2 lies in the guard of the
+/// interrupted thread's stack, and RSP lies in that guard or at most one
+/// page above it, where the push that faulted started. `#DF` does not set
+/// CR2, so CR2 alone may be left in a guard by an earlier, handled fault (a
+/// caught overflow, say); RSP is this fault's own. [`double_fault`] prints
+/// the overflow line on it, and `catch` reports it as the kind.
+pub(crate) fn df_is_stack_overflow(cr2: u64, rsp: u64) -> bool {
     let t = crate::arch::current_tcb();
     // SAFETY: `t` is this CPU's TCB or null, and a running thread's `stack`
     // is written only by `thread_init::spawn_inner` and
     // `thread_init::thread_exit`, neither of which runs for it while it
     // runs here; we only read it. established by `thread_init::switch_now`.
-    !t.is_null() && unsafe { (*t).stack.as_ref().is_some_and(|s| s.guard_contains(cr2)) }
+    let Some(st) = (unsafe { t.as_ref() }).and_then(|t| t.stack.as_ref()) else {
+        return false;
+    };
+    let near = st
+        .base()
+        .as_u64()
+        .saturating_add(vibeos::paging::PAGE_SIZE_4K);
+    st.guard_contains(cr2) && rsp >= st.guard().as_u64() && rsp <= near
 }
 
 fn double_fault(frame: &mut TrapFrame) {
     let cr2 = frame.cr2;
     let t = crate::arch::current_tcb();
-    if df_is_stack_overflow(cr2) {
+    if df_is_stack_overflow(cr2, frame.iret.rsp) {
         // The dump's first line, as aarch64's overflow entry prints it.
         let (err, rip, rsp) = (frame.error_code, frame.iret.rip, frame.iret.rsp);
         crate::panic::exception_halt_args(

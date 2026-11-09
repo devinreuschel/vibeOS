@@ -87,14 +87,14 @@ OVERFLOW_RE = re.compile(
 EC_DABT_CUR = 0x25
 
 
-def check_overflow(raw: Iterable[str]) -> None:
+def check_overflow(raw: Iterable[str], arch: str) -> None:
     """ROADMAP §11.3: after the armed line, which names the thread's guard
     `[guard, base)` and its TCB, one `stack overflow` line whose fault
     address and SP lie in that guard (the SP at most at `base`: on x86_64
     the `#DF` frame's RSP is the one before the push that faulted), whose
     thread is the armed one, with a nonzero ELR, and an ESR that names the
     fault (a current-EL data abort on aarch64, `#DF`'s zero error code on
-    x86_64); then one `halted`."""
+    x86_64, by `arch`); then one `halted`."""
     lines = frame.kernel_lines(raw)
     armed = [(i, m) for i, m in enumerate(OVERFLOW_ARMED_RE.match(t) for t in lines) if m]
     if len(armed) != 1:
@@ -118,7 +118,7 @@ def check_overflow(raw: Iterable[str]) -> None:
         raise HarnessError(f"kstack-overflow: thread={tid:#x}, armed {thread:#x}")
     if elr == 0:
         raise HarnessError("kstack-overflow: elr=0x0")
-    aarch64 = any(t.startswith("vibeOS: el:") or t.startswith("vibeOS: gic:") for t in lines)
+    aarch64 = arch == "aarch64"
     if aarch64 and (esr >> 26) & 0x3F != EC_DABT_CUR:
         raise HarnessError(f"kstack-overflow: esr={esr:#x} is not a current-EL data abort")
     if not aarch64 and esr != 0:
