@@ -588,7 +588,10 @@ unsafe fn push_cmds(its: u64, cmds: &[ItsCommand]) -> bool {
     true
 }
 
-/// Push one ITS command and wait for CREADR.
+/// Push one ITS command and wait for CREADR. Arm ARM DDI0487, "Memory barriers",
+/// the DSB: `dsb oshst` completes the command's
+/// stores, and their clean to PoC, before the Device write of `GITS_CWRITER`
+/// that hands them to the ITS; herd7 does not model Device memory.
 ///
 /// # Safety
 /// `its` is the mapped ITS, the command queue page is live, and the caller

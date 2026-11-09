@@ -1253,6 +1253,24 @@ class TestKtestProtocol(unittest.TestCase):
             check_ktest_output(lines, ISA_DEBUG_FAIL)
         self.assertIn("isa-debug-exit", str(cm.exception))
 
+    def test_wrong_exit_status_aarch64_names_psci(self) -> None:
+        """aarch64 passes by PSCI SYSTEM_OFF (status 0); the failure text
+        says so instead of naming x86's isa-debug-exit."""
+        from tests.harness.harness import PSCI_PASS, HarnessError, check_ktest_output
+
+        lines = [
+            K("vibeOS: ktest: begin 1"),
+            K("vibeOS: ktest: run x 10000"),
+            K("vibeOS: ktest: ok x (5 us)"),
+            K("vibeOS: ktest: end"),
+        ]
+        with self.assertRaises(HarnessError) as cm:
+            check_ktest_output(lines, 1, pass_status=PSCI_PASS)
+        msg = str(cm.exception)
+        self.assertIn("PSCI SYSTEM_OFF", msg)
+        self.assertIn("1, expected 0", msg)
+        self.assertNotIn("isa-debug-exit", msg)
+
     def test_counter_other_prefix(self) -> None:
         """`RunCounter` and `KtestDeadlines` count any protocol of the ktest
         form: here unframed `vibeOS: xtest:` lines, which the ktest parse

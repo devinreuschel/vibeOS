@@ -116,6 +116,8 @@ pub fn note_cache() {
 /// Make `[start, start+len)`, written through the data side, fetchable by
 /// every CPU. Runs `tlb::sync_range` over `CTR_EL0`'s line sizes; before
 /// [`note_cache`] it assumes the smallest lines and no IDC or DIC.
+/// Arm ARM DDI0487, "Synchronization and coherency issues between data and
+/// instruction accesses": herd7 does not model instruction fetch.
 ///
 /// # Safety
 /// `[start, start+len)` is mapped, readable memory.
@@ -231,6 +233,8 @@ pub fn read_tcr() -> u64 {
 }
 
 /// Run one op from a `tlb` sequence. The instruction text is `TlbOp::mnemonic`.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 fn exec_tlb(op: tlb::TlbOp, va_operand: u64) {
     // SAFETY: EL1 (VHE host) barrier and TLBI. The register operand is
     // `va_operand` (`tlb::tlbi_va_operand` for a VA form). established here.
@@ -265,36 +269,45 @@ fn run_tlb(ops: &[tlb::TlbOp], va_operand: u64) {
 }
 
 /// Broadcast TLB invalidate. Runs `tlb::ALL_INVAL`.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub fn tlbi_all() {
     run_tlb(&tlb::ALL_INVAL, 0);
 }
 
 /// Local ASID-0 invalidate after a TTBR0 write, which `write_ttbr0` ends
 /// with an `isb`. Runs `tlb::TTBR0_SWITCH`.
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub fn tlbi_asid0_local() {
     run_tlb(&tlb::TTBR0_SWITCH, 0);
 }
 
 /// Leaf TLB invalidate. Runs `tlb::LEAF_INVAL`. ASID 0: TTBR0 does not
 /// carry one yet (ROADMAP §11.2).
+/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
+/// completion of TLB maintenance instructions": herd7 does not model the TLB.
 pub fn tlbi_va(va: u64) {
     run_tlb(&tlb::LEAF_INVAL, tlb::tlbi_va_operand(va, 0));
 }
 
 /// Break-before-make maintenance after the invalid store. Runs
-/// `tlb::BBM_AFTER_INVALID`.
+/// `tlb::BBM_AFTER_INVALID`. Arm ARM DDI0487, "Using break-before-make when
+/// updating translation table entries": herd7 does not model the TLB.
 pub(crate) fn bbm_break(va: u64) {
     run_tlb(&tlb::BBM_AFTER_INVALID, tlb::tlbi_va_operand(va, 0));
 }
 
 /// Barriers after the new store of break-before-make. Runs
-/// `tlb::BBM_AFTER_MAKE`.
+/// `tlb::BBM_AFTER_MAKE`. Arm ARM DDI0487, "Using break-before-make when
+/// updating translation table entries": herd7 does not model the TLB.
 pub(crate) fn bbm_make() {
     run_tlb(&tlb::BBM_AFTER_MAKE, 0);
 }
 
 /// Publish a new table before the descriptor that links it. Runs
-/// `tlb::PUBLISH_TABLE`.
+/// `tlb::PUBLISH_TABLE`. Arm ARM DDI0487, "Ordering of memory accesses from
+/// translation table walks": herd7 does not model the walk.
 pub(crate) fn publish_table() {
     run_tlb(&tlb::PUBLISH_TABLE, 0);
 }
@@ -765,7 +778,9 @@ pub fn rflags() -> u64 {
     irq_flags()
 }
 
-/// Full-system barrier. Shared code names `mfence`.
+/// Full-system barrier. Shared code names `mfence`. Arm ARM DDI0487, "Memory barriers",
+/// the DSB: `dsb sy` completes every earlier
+/// access, Device included, which herd7 does not model.
 #[inline]
 #[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
 pub fn mfence() {

@@ -176,6 +176,9 @@ pub unsafe fn init() {
     }
 }
 
+/// GICv2 distributor and CPU interface. Arm ARM DDI0487, "Memory barriers", the DSB:
+/// the `dsb sy` completes the Device writes above before what follows;
+/// herd7 does not model Device memory.
 fn init_v2(g: &Gic) {
     // SAFETY: `g.dist` / `g.cpu_or_redist` are the mapped GICD/GICC. established here.
     unsafe {
@@ -419,7 +422,10 @@ unsafe fn program_sgi_ppi(rd: u64) {
 /// Program redistributor LPI tables; never clear EnableLPIs. Shared
 /// property table, per-CPU pending table. `false` when a table could not be
 /// allocated. A redistributor without physical LPIs has no tables to program,
-/// so that is `true` and nothing is written.
+/// so that is `true` and nothing is written. Arm ARM DDI0487, "Memory barriers",
+/// the DSB: the `dsb sy` completes the property
+/// table's stores before the redistributor, a non-coherent reader herd7
+/// does not model, is pointed at it.
 ///
 /// # Safety
 /// `g` is the live GIC; `rd` is this CPU's redistributor.
@@ -638,6 +644,11 @@ pub fn cpu_ok(hw_id: u64) -> Result<(), gic::SgiError> {
     Ok(())
 }
 
+/// Write `ICC_SGI1R_EL1`. Arm ARM DDI0487, "Synchronization requirements for
+/// AArch64 System registers" and "Memory barriers" (the DSB): a
+/// `dmb` does not order a System register write, so `dsb ishst` completes
+/// the stores the SGI publishes before the write, and `isb` makes the write
+/// take effect (DESIGN §7.6). herd7 does not model System registers.
 fn write_sgi1r(val: u64) {
     // SAFETY: DESIGN §7.6: dsb ishst; ICC_SGI1R; isb. established here.
     unsafe {
@@ -657,6 +668,9 @@ pub fn send_sgi(intid: u32) {
 }
 
 /// SGI to logical CPU `cpu` (its `PerCpuRemote.apic_id` is the MPIDR).
+/// On GICv2 the `GICD_SGIR` write is Device memory: Arm ARM DDI0487, "Memory barriers"
+/// (the DSB) orders the stores the SGI publishes before it, which herd7
+/// does not model. GICv3 goes through `write_sgi1r`.
 pub fn send_sgi_to(cpu: u32, intid: u32) {
     let Some(g) = gic() else {
         return;
@@ -690,6 +704,9 @@ pub fn send_sgi_to(cpu: u32, intid: u32) {
 }
 
 /// SGI to every other CPU (ICC_SGI1R IRM, or GICD_SGIR filter 01).
+/// On GICv2 the `GICD_SGIR` write is Device memory: Arm ARM DDI0487, "Memory barriers"
+/// (the DSB) orders the stores the SGI publishes before it, which herd7
+/// does not model. GICv3 goes through `write_sgi1r`.
 pub fn send_sgi_others(intid: u32) {
     let Some(g) = gic() else {
         return;
@@ -710,7 +727,9 @@ pub fn send_sgi_others(intid: u32) {
 /// Per-CPU redistributor / CPU interface on a secondary. `false` when this
 /// CPU has no redistributor frame or its LPI tables could not be allocated;
 /// the caller must park it before it reports ready, so the boot CPU sees a
-/// timed-out AP.
+/// timed-out AP. On GICv2, Arm ARM DDI0487, "Memory barriers", the DSB: the `dsb sy`
+/// completes the Device writes above before what follows; herd7 does not
+/// model Device memory.
 ///
 /// # Safety
 /// This CPU's GIC interface is unused; IRQs masked.

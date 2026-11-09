@@ -314,6 +314,7 @@ impl<const N: usize> Ring<N> {
 
     /// Append one record. The caller is this ring's CPU, with interrupts
     /// off, so pushes to one ring never overlap (DESIGN §2.2).
+    /// tests/litmus/log_ring.litmus
     pub fn push(&self, cpu: u32, ev: Event, tsc: u64, a: u64, b: u64) {
         if N == 0 {
             return;
@@ -349,6 +350,7 @@ impl<const N: usize> Ring<N> {
 
     /// A seqlock read of the slot for position `pos`: the record, or
     /// `None` when it is torn, stale or overwritten ([`valid_at`]).
+    /// tests/litmus/log_ring.litmus
     pub fn get(&self, pos: u64) -> Option<RecordData> {
         if N == 0 {
             return None;

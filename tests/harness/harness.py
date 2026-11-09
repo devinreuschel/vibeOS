@@ -2723,10 +2723,17 @@ def check_ktest_output(
         raise HarnessError(f"ktest FAIL: {fails[0]}")
     count.check_count()
     if exit_code != pass_status:
-        raise HarnessError(
-            f"isa-debug-exit status {exit_code}, expected {pass_status}"
-        )
+        raise HarnessError(f"{exit_verdict_name(pass_status)} {exit_code}, expected {pass_status}")
     return result
+
+
+def exit_verdict_name(pass_status: int) -> str:
+    """What sets QEMU's exit status on a boot whose pass is `pass_status`:
+    x86_64's `isa-debug-exit` write, or aarch64's PSCI `SYSTEM_OFF`, where a
+    panic's pvpanic event exits otherwise."""
+    if pass_status == PSCI_PASS:
+        return "QEMU exit status (PSCI SYSTEM_OFF passes, pvpanic fails)"
+    return "isa-debug-exit status"
 
 
 class KtestDeadlines:
