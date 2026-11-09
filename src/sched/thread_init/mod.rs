@@ -67,7 +67,7 @@ pub use user::{reset_user_segs, set_tls_base, set_user_segs};
 
 // The syscall layer's hooks (DESIGN §1.2), which `syscall_init::init_bsp`
 // sets before the scheduler runs a second thread.
-/// The hardware side of a context switch (FPU, RSP0, CR3):
+/// The hardware side of a context switch (FPU, RSP0, CR3, user TLS base):
 /// `syscall_init::on_switch`. Unset, a switch changes none of them.
 static SWITCH_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
@@ -88,6 +88,21 @@ unsafe fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
     // Acquire: pairs with the Release store in `set_switch_hooks`.
     let p = SWITCH_HOOK.load(Ordering::Acquire);
     if p.is_null() {
+        // Unset only before `syscall_init::init_bsp`, when no user thread
+        // exists: the hook is the one owner of the user TLS base and
+        // selectors (DESIGN §7.5), so a user thread switched without it
+        // would keep another thread's.
+        #[cfg(debug_assertions)]
+        {
+            // SAFETY: invariant I9: `old` and `new` are null or live TCBs,
+            // as this fn's `# Safety` states; established by
+            // `thread_init::switch_now`.
+            let (old, new) = unsafe { (old.as_ref(), new.as_ref()) };
+            debug_assert!(
+                old.is_none_or(|t| t.pid == 0) && new.is_none_or(|t| t.pid == 0),
+                "context switch of a user thread before the switch hook"
+            );
+        }
         return;
     }
     // SAFETY: invariant: a non-null `SWITCH_HOOK` holds an

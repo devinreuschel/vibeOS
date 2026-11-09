@@ -31,7 +31,12 @@ pub fn set_exit_work_hooks(pending: fn() -> bool, work: fn(&mut UserFrame)) {
 /// aarch64); while the current process has a kill or a stop pending,
 /// unmask as a syscall body runs, act on it (a kill does not return), mask
 /// again, and check again. Returns masked once a check finds none. `kind`
-/// is [`EXIT_SYSCALL`] or the x86_64 vector whose exit this is.
+/// is [`EXIT_SYSCALL`] or the x86_64 vector whose exit this is. aarch64's
+/// `vibeos_el0_exit` passes [`EXIT_SYSCALL`] for every EL0 exception's
+/// return, an IRQ's included, so there `kind` does not tell a syscall exit
+/// from another: `exit_check_hook` still keys on the frame's syscall number,
+/// which every non-`svc` entry saves as -1, and `exit_work_found` records
+/// [`EXIT_SYSCALL`] for any aarch64 exit.
 pub fn exit_work(kind: u64, frame: &mut UserFrame) {
     #[cfg(feature = "kernel_tests")]
     crate::proc::ktest::exit_seen(frame);

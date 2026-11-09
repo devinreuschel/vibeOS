@@ -106,14 +106,14 @@ fn sym_addr(sym: &u8) -> u64 {
 /// tables take theirs here.
 #[cfg(target_arch = "aarch64")]
 pub fn alloc_zeroed(order: u8) -> Option<u64> {
-    let bytes = PAGE_SIZE_4K.checked_shl(u32::from(order))?;
+    let bytes = usize::try_from(PAGE_SIZE_4K.checked_shl(u32::from(order))?).ok()?;
     let f = pmm_init::with_buddy(|b| b.alloc(order))?;
     let pa = f.into_entry();
     let va = hhdm_offset().wrapping_add(pa);
     // SAFETY: invariant I14: the block is buddy RAM this fn just took and
     // nothing else names, and the physmap maps every buddy frame writable
     // at `hhdm_offset()`; established by `paging_init::install`.
-    unsafe { core::ptr::write_bytes(va as *mut u8, 0, bytes as usize) };
+    unsafe { core::ptr::write_bytes(va as *mut u8, 0, bytes) };
     Some(pa)
 }
 

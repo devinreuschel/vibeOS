@@ -262,8 +262,10 @@ fn claim_its_dev(device_id: u32) -> Option<&'static ItsDev> {
 
 /// Return one page from `paging_init::alloc_zeroed(0)` that no table names.
 fn free_pages(pa: u64) {
-    // SAFETY: `pa` is the block `paging_init::alloc_zeroed(0)` returned, never published;
-    // the caller holds its only record. established here.
+    // SAFETY: `pa` is the order-0 block `paging_init::alloc_zeroed(0)`
+    // returned, so order 0 here pairs with it, the contract
+    // `pmm::Frames::from_entry` states; it was never published and the
+    // caller holds its only record. Established by `paging_init::alloc_zeroed`.
     let frame = unsafe { vibeos::pmm::Frames::from_entry(pa, 0) };
     crate::pmm_init::with_buddy(|b| b.free(frame));
 }
