@@ -64,6 +64,10 @@ const _: () = assert!(core::mem::offset_of!(TrapFrame, x) + 30 * 8 == 240);
 
 static FULL: AtomicBool = AtomicBool::new(false);
 static OVERFLOW: AtomicPtr<GuardedStack> = AtomicPtr::new(core::ptr::null_mut());
+/// SP when `init_full` pointed VBAR at the full table, for the in-guest
+/// check that it runs on the bootstrap thread's stack (ROADMAP §11.3).
+#[cfg(feature = "kernel_tests")]
+static FULL_SP: AtomicU64 = AtomicU64::new(0);
 
 /// Overflow stack top. The vector stub loads this before any store.
 #[unsafe(no_mangle)]
@@ -410,11 +414,22 @@ pub unsafe fn init_full() {
     if crate::per_cpu_init::is_live() {
         crate::per_cpu_init::with_current(|c| c.overflow_sp = top);
     }
+    // The registry thread's start orders this before `full_table_sp`.
+    #[cfg(feature = "kernel_tests")]
+    // Relaxed: pairs with nothing.
+    FULL_SP.store(cpu::stack_pointer(), Ordering::Relaxed);
     write_vbar(vibeos_vectors as *const () as u64);
     // Release: pairs with the Acquire load in `full_live`.
     FULL.store(true, Ordering::Release);
     cpu::clear_pstate_a();
     crate::marker!("vibeOS: vectors ok");
+}
+
+/// The SP `init_full` ran on when the full table went live; 0 before.
+#[cfg(feature = "kernel_tests")]
+pub fn full_table_sp() -> u64 {
+    // Relaxed: pairs with nothing (`FULL_SP`).
+    FULL_SP.load(Ordering::Relaxed)
 }
 
 #[expect(dead_code, reason = "boot-CPU S7; unused on this path")]

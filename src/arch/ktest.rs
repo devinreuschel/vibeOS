@@ -20,7 +20,6 @@ use crate::ipi_init;
 use crate::irq_init;
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
 use crate::ktest::{Outcome, Test, spawn_thread_on, spin_until_ns, test};
-use crate::kva_init;
 use crate::machine_init;
 use crate::per_cpu_init;
 use crate::proc_init;
@@ -304,34 +303,52 @@ pub(crate) fn test_gp_catch() -> Outcome {
     }
 }
 
+/// The running thread's stack guard as `(guard, base)`: the unmapped `S`
+/// bytes below its stack. None for a thread without a guarded stack.
+fn own_guard() -> Option<(u64, u64)> {
+    let t = crate::arch::current_tcb();
+    if t.is_null() {
+        return None;
+    }
+    // SAFETY: `t` is this CPU's running TCB, and its `stack` is written only
+    // by `thread_init::spawn_inner` and `thread_init::thread_exit`, neither
+    // of which runs for it while it runs here. established by
+    // `thread_init::switch_now`.
+    let st = unsafe { (*t).stack.as_ref()? };
+    Some((st.guard().as_u64(), st.base().as_u64()))
+}
+
+/// The registry thread overflows its own guarded stack, so the `#DF` sees
+/// the interrupted thread's guard, as a real overflow does, and `catch`
+/// reports the kind `double_fault` prints the overflow line for.
 pub(crate) fn test_kstack_overflow() -> Outcome {
-    let Ok(stack) = kva_init::alloc_guarded_stack(1) else {
-        return Outcome::Fail("guarded stack");
+    let Some((guard, base)) = own_guard() else {
+        return Outcome::Fail("registry thread has no guarded stack");
     };
-    let poison = stack.guard().as_u64() + 0x800;
+    let poison = guard + 0x800;
     let g = x86::InterruptGuard::enter();
-    // SAFETY: `poison` lies in `stack`'s unmapped guard page, so `ud2`
+    // SAFETY: `poison` lies in this thread's unmapped guard, so `ud2`
     // delivery faults, the fault's own push faults again, and `#DF` runs
-    // on its IST stack, where `catch` longjmps back with IRQs off (`g`);
+    // on its IST stack, where `catch` longjmps back to this frame, on the
+    // mapped stack, with IRQs off (`g`); nothing is written below `base`.
     // established here.
     let caught = arch::catch::catch(vectors::DF, || unsafe {
         vibeos_fault_on_bad_stack(poison);
     });
     drop(g);
     let Some(c) = caught else {
-        kva_init::free_stack(stack);
         return Outcome::Fail("did not reach df handler");
     };
     let (lo, hi) = ist_span(IstSlot::DoubleFault);
     // `ud2` with RSP in the guard delivers `#UD` onto the unmapped page,
     // so CR2 is the failed frame push, in the guard, not `poison` itself.
-    let in_guard = stack.guard_contains(c.cr2);
-    kva_init::free_stack(stack);
-    if in_guard && c.handler_rsp >= lo && c.handler_rsp < hi {
+    let in_guard = c.cr2 >= guard && c.cr2 < base;
+    if c.stack_overflow && in_guard && c.handler_rsp >= lo && c.handler_rsp < hi {
         Outcome::Ok
     } else {
         crate::marker!(
-            "vibeOS: ktest:   cr2={:#x} want-in-guard rsp={:#x} lo={:#x} hi={:#x}",
+            "vibeOS: ktest:   overflow={} cr2={:#x} want-in-guard rsp={:#x} lo={:#x} hi={:#x}",
+            c.stack_overflow,
             c.cr2,
             c.handler_rsp,
             lo,

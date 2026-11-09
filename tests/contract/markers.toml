@@ -21,7 +21,8 @@
 #   name     contract rows only: the name the harness reports the marker by.
 #   when     contract rows only, optional: terms that must all hold, from
 #            `hpet`, `pit`, `smp>1`, `gp_test`, `panic_test`,
-#            `panic_nest_test` and `panic_stop_test`, each
+#            `panic_nest_test`, `panic_stop_test`, `hang_test` and
+#            `kstack_overflow_test`, each
 #            optionally prefixed with `!`. Absent means every configuration.
 #   repeat   contract rows only, optional: `"per_ap"`. Consecutive per-AP
 #            rows form a group that repeats for each AP `i` in `1..N`, with
@@ -1416,7 +1417,8 @@ source = "user"
 section = "§9.8"
 order = 370
 name = "shell_ready"
-when = ["!gp_test", "!panic_test", "!panic_nest_test", "!panic_stop_test", "!hang_test"]
+when = ["!gp_test", "!panic_test", "!panic_nest_test", "!panic_stop_test", "!hang_test",
+        "!kstack_overflow_test"]
 
 # `/bin/tests`' lines.
 [[marker]]
@@ -1436,7 +1438,8 @@ source = "user"
 section = "§9.8"
 order = 330
 name = "user_tests_ok"
-when = ["!gp_test", "!panic_test", "!panic_nest_test", "!panic_stop_test", "!hang_test"]
+when = ["!gp_test", "!panic_test", "!panic_nest_test", "!panic_stop_test", "!hang_test",
+        "!kstack_overflow_test"]
 
 [[marker]]
 text = "user: tests fail"
@@ -1802,7 +1805,8 @@ source = "user"
 section = "§10.6"
 order = 320
 name = "init_fp_initial"
-when = ["!gp_test", "!panic_test", "!panic_nest_test", "!panic_stop_test", "!hang_test"]
+when = ["!gp_test", "!panic_test", "!panic_nest_test", "!panic_stop_test", "!hang_test",
+        "!kstack_overflow_test"]
 
 [[marker]]
 text = "init: fp initial wrong <text>"
@@ -1862,6 +1866,19 @@ section = "§10.7"
 order = 350
 name = "panic_stop_armed"
 when = ["panic_stop_test", "!panic_test"]
+
+# The kstack-overflow build's thread, before it recurses into its guard
+# (ROADMAP §11.3): `test-e2e-kstack-overflow` checks the overflow line's
+# `far`, `sp` and `thread` against these.
+[[marker]]
+text = "vibeOS: boot: kstack-overflow armed guard=<addr> base=<addr> thread=<addr>"
+kind = "contract"
+arch = "both"
+source = "kernel"
+section = "§11.3"
+order = 355
+name = "kstack_overflow_armed"
+when = ["kstack_overflow_test", "!panic_test"]
 
 # The hang_test build's hang (TESTING.md §8.3): once `smp: done` and the
 # clocksource line, one CPU holds a spinlock and every CPU spins with IF=0,

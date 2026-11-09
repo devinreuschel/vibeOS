@@ -528,6 +528,12 @@ def check_gic_version(lines: list[str], version: str) -> None:
 PANIC_VARIANTS = {
     "nest": ("panic-nest", panic_dump.check_nest),
     "stop": ("panic-stop", panic_dump.check_stop),
+    "overflow": ("kstack-overflow", panic_dump.check_overflow),
+}
+# The dump lines a variant's run must hold, where they differ from the
+# backtrace and `halted` every other variant's dump prints (ROADMAP §11.3).
+PANIC_VARIANT_NEEDLES: dict[str, tuple[str, ...]] = {
+    "overflow": ("vibeOS: panic: stack overflow far=", "vibeOS: panic: halted"),
 }
 
 
@@ -605,7 +611,9 @@ def main(argv: list[str] | None = None) -> int:
             machine=env.machine,
         )
         expect_panic = True
-        dump_needles = ("vibeOS: backtrace:", "vibeOS: panic: halted")
+        dump_needles = PANIC_VARIANT_NEEDLES.get(
+            panic_variant, ("vibeOS: backtrace:", "vibeOS: panic: halted")
+        )
     elif expect_panic:
         markers = halt_test_markers(arch=env.arch)
         dump_needles = (

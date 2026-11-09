@@ -49,6 +49,9 @@ pub struct Caught {
     pub cr2: u64,
     pub frame: InterruptFrame,
     pub handler_rsp: u64,
+    /// A `#DF` the `#DF` handler would report as a kernel stack overflow
+    /// (`idt::df_is_stack_overflow`), as aarch64's `Caught` reports it.
+    pub stack_overflow: bool,
 }
 
 const NO_CATCH: Caught = Caught {
@@ -63,6 +66,7 @@ const NO_CATCH: Caught = Caught {
         ss: 0,
     },
     handler_rsp: 0,
+    stack_overflow: false,
 };
 
 /// One `Caught` slot per CPU id.
@@ -243,6 +247,8 @@ fn record(frame: &TrapFrame) {
         cr2: frame.cr2,
         frame: frame.iret,
         handler_rsp: x86::read_rsp(),
+        stack_overflow: frame.vector as u8 == vibeos::vectors::DF
+            && crate::arch::idt::df_is_stack_overflow(frame.cr2),
     };
     last().with(|last| *last = caught);
 }

@@ -952,20 +952,35 @@ fn page_fault(frame: &mut TrapFrame) {
     crate::panic::exception_halt(b"#PF", &frame.iret, frame.user().rbp, Some(err), Some(cr2));
 }
 
+/// Whether a `#DF` with `cr2` is a kernel stack overflow: CR2 lies in the
+/// guard of the interrupted thread's stack (ROADMAP §11.3). [`double_fault`]
+/// prints the overflow line on it, and `catch` reports it as the kind.
+pub(crate) fn df_is_stack_overflow(cr2: u64) -> bool {
+    let t = crate::arch::current_tcb();
+    // SAFETY: `t` is this CPU's TCB or null, and a running thread's `stack`
+    // is written only by `thread_init::spawn_inner` and
+    // `thread_init::thread_exit`, neither of which runs for it while it
+    // runs here; we only read it. established by `thread_init::switch_now`.
+    !t.is_null() && unsafe { (*t).stack.as_ref().is_some_and(|s| s.guard_contains(cr2)) }
+}
+
 fn double_fault(frame: &mut TrapFrame) {
     let cr2 = frame.cr2;
     let t = crate::arch::current_tcb();
-    // SAFETY: `t` is this CPU's TCB or null; we only read `stack`; established here.
-    let in_guard =
-        !t.is_null() && unsafe { (*t).stack.as_ref().is_some_and(|s| s.guard_contains(cr2)) };
-    if in_guard {
-        crate::marker!(
-            "vibeOS: panic: stack overflow far={:#x} esr={:#x} elr={:#x} sp={:#x} thread={:#x}",
-            cr2,
-            frame.error_code,
-            frame.iret.rip,
-            frame.iret.rsp,
-            t as u64
+    if df_is_stack_overflow(cr2) {
+        // The dump's first line, as aarch64's overflow entry prints it.
+        let (err, rip, rsp) = (frame.error_code, frame.iret.rip, frame.iret.rsp);
+        crate::panic::exception_halt_args(
+            vibeos::irq::stop::CrashRegs {
+                rip,
+                rsp,
+                rbp: frame.user().rbp,
+                rflags: frame.iret.rflags,
+            },
+            format_args!(
+                "panic: stack overflow far={cr2:#x} esr={err:#x} elr={rip:#x} sp={rsp:#x} thread={:#x}",
+                t as u64
+            ),
         );
     }
     crate::panic::exception_halt(

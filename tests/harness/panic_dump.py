@@ -75,6 +75,59 @@ def check_early(raw: Iterable[str], arch: str) -> None:
     _once(lines, PANIC_DONE, "early-fault")
 
 
+OVERFLOW_ARMED_RE = re.compile(
+    r"^vibeOS: boot: kstack-overflow armed guard=0x([0-9a-f]+) base=0x([0-9a-f]+) "
+    r"thread=0x([0-9a-f]+)$"
+)
+OVERFLOW_RE = re.compile(
+    r"^vibeOS: panic: stack overflow far=0x([0-9a-f]+) esr=0x([0-9a-f]+) "
+    r"elr=0x([0-9a-f]+) sp=0x([0-9a-f]+) thread=0x([0-9a-f]+)$"
+)
+# ESR_EL1.EC of a data abort taken at EL1 without a change of level.
+EC_DABT_CUR = 0x25
+
+
+def check_overflow(raw: Iterable[str]) -> None:
+    """ROADMAP §11.3: after the armed line, which names the thread's guard
+    `[guard, base)` and its TCB, one `stack overflow` line whose fault
+    address and SP lie in that guard (the SP at most at `base`: on x86_64
+    the `#DF` frame's RSP is the one before the push that faulted), whose
+    thread is the armed one, with a nonzero ELR, and an ESR that names the
+    fault (a current-EL data abort on aarch64, `#DF`'s zero error code on
+    x86_64); then one `halted`."""
+    lines = frame.kernel_lines(raw)
+    armed = [(i, m) for i, m in enumerate(OVERFLOW_ARMED_RE.match(t) for t in lines) if m]
+    if len(armed) != 1:
+        raise HarnessError(f"kstack-overflow: {len(armed)} armed lines, expected one")
+    at, m = armed[0]
+    guard, base, thread = (int(g, 16) for g in m.groups())
+    if not 0 < guard < base:
+        raise HarnessError(f"kstack-overflow: armed guard {guard:#x}..{base:#x} is empty")
+    hits = [(i, o) for i, o in enumerate(OVERFLOW_RE.match(t) for t in lines) if o]
+    if len(hits) != 1 or hits[0][0] < at:
+        raise HarnessError(
+            f"kstack-overflow: {len(hits)} overflow lines, expected one after the armed line"
+        )
+    hit, o = hits[0]
+    far, esr, elr, sp, tid = (int(g, 16) for g in o.groups())
+    if not guard <= far < base:
+        raise HarnessError(f"kstack-overflow: far={far:#x} outside the guard {guard:#x}..{base:#x}")
+    if not guard <= sp <= base:
+        raise HarnessError(f"kstack-overflow: sp={sp:#x} outside the guard {guard:#x}..{base:#x}")
+    if tid != thread:
+        raise HarnessError(f"kstack-overflow: thread={tid:#x}, armed {thread:#x}")
+    if elr == 0:
+        raise HarnessError("kstack-overflow: elr=0x0")
+    aarch64 = any(t.startswith("vibeOS: el:") or t.startswith("vibeOS: gic:") for t in lines)
+    if aarch64 and (esr >> 26) & 0x3F != EC_DABT_CUR:
+        raise HarnessError(f"kstack-overflow: esr={esr:#x} is not a current-EL data abort")
+    if not aarch64 and esr != 0:
+        raise HarnessError(f"kstack-overflow: esr={esr:#x}, #DF's error code is 0")
+    _once(lines, PANIC_DONE, "kstack-overflow")
+    if lines.index(PANIC_DONE) < hit:
+        raise HarnessError("kstack-overflow: halted before the overflow line")
+
+
 def check_nest(raw: Iterable[str]) -> None:
     """F071: the `irq_nest` underflow's own message, dumped once."""
     lines = frame.kernel_lines(raw)

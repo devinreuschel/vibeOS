@@ -1345,6 +1345,10 @@ pub(crate) fn test_weak_order_probe() -> Outcome {
 pub(crate) const TESTS: &[Test] = &[
     test("kstack_overflow", test_kstack_overflow),
     test(
+        "stacks_16k",
+        crate::arch::aarch64::ktest_stacks::test_stacks_16k,
+    ),
+    test(
         "tpidrro_zero",
         crate::arch::aarch64::ktest_el0::test_tpidrro_zero,
     ),

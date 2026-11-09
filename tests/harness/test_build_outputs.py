@@ -23,6 +23,7 @@ VARIANTS = (
     "gp",
     "panic-nest",
     "panic-stop",
+    "kstack-overflow",
     "ktest",
     "vibefs-crash",
     "hang",
@@ -130,8 +131,8 @@ class NamedOutputsTest(unittest.TestCase):
 
     def test_aarch64_elides_x86_only_variants(self) -> None:
         # ROADMAP §11.7: aarch64 builds default, panic, panic-stop (§11.3), the
-        # §11.1 early-fault ISO, ktest and the forensics tier's hang; gp_test
-        # and the nest dump are x86.
+        # §11.1 early-fault ISO, the §11.3 kstack-overflow ISO, ktest and the
+        # forensics tier's hang; gp_test and the nest dump are x86.
         proc = subprocess.run(
             ["make", "-pRrq", "-f", "Makefile", "ARCH=aarch64", ":"],
             cwd=ROOT,
@@ -148,6 +149,7 @@ class NamedOutputsTest(unittest.TestCase):
                 "build/aarch64/kernels/vibeos-panic.elf",
                 "build/aarch64/kernels/vibeos-early-fault.elf",
                 "build/aarch64/kernels/vibeos-panic-stop.elf",
+                "build/aarch64/kernels/vibeos-kstack-overflow.elf",
                 "build/aarch64/kernels/vibeos-ktest.elf",
                 "build/aarch64/kernels/vibeos-hang.elf",
             ],

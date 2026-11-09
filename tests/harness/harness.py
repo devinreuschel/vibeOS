@@ -138,12 +138,14 @@ PANIC_EXIT_S = 10.0
 # The line that opens a dump, mirroring the headers `src/log/panic.rs` writes:
 # `panic` (the bare `PANIC_BANNER`), `begin_dump`'s `panic: reentered`,
 # `exception_vec`, `exception_halt` for each kind `src/arch/x86_64/idt.rs`
-# passes it, and `early_exception`'s one line, which is the whole of the early
-# handler's report. Anchored at the start, so a `vibeOS: logrec:` replay never
-# counts.
+# passes it, `early_exception`'s one line, which is the whole of the early
+# handler's report, and the kernel stack overflow line `exception_halt_args`
+# opens the dump with on both architectures (ROADMAP §11.3). Anchored at the
+# start, so a `vibeOS: logrec:` replay never counts.
 DUMP_BANNER_RE = re.compile(
     r"^vibeOS: (?:panic:(?: reentered)?$"
     r"|panic: early vec=0x"
+    r"|panic: stack overflow far=0x"
     r"|exception: vector \d+ rip=0x"
     r"|(?:#UD|nmi|#DB|#GP|#PF|#DF|#MC) rip=0x)"
 )
@@ -3103,7 +3105,7 @@ def boot_contract_markers(
 ) -> list[Marker]:
     """Live e2e contract. Pins the LAPIC timer mode and SMP AP count.
 
-    `panic_variant` (`nest` or `stop`) selects that panic-path build's contract,
+    `panic_variant` (`nest`, `stop` or `overflow`) selects that panic-path build's contract,
     which ends at its armed line (`VIBEOS_PANIC_VARIANT`, run_e2e). On aarch64,
     `machine` with `virtualization=on` pins `<el>` to `2 vhe` and `<timer>` to
     the EL2 timer that machine wires (`expected_el2`)."""
@@ -3122,6 +3124,7 @@ def boot_contract_markers(
         gp_test=gp,
         panic_nest_test=panic_variant == "nest",
         panic_stop_test=panic_variant == "stop",
+        kstack_overflow_test=panic_variant == "overflow",
         arch=arch,
         el=el,
         arm_timer=arm_timer,
