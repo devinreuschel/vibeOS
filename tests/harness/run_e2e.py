@@ -3,23 +3,30 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import os
 import re
 import subprocess
 import sys
+from collections.abc import Callable
+from dataclasses import replace
 
-from tests.harness import frame, panic_dump, results
+from tests.harness import frame, panic_dump, registry, results
 from tests.harness.harness import (
     BOOT_ALLOWANCE_S,
     MCE_MCG_STATUS,
     MCE_UC_STATUS,
+    ROWS,
     SERIAL_ONLINE,
     EnvConfig,
     HarnessError,
     QemuConfig,
+    apply_arch_cli,
     boot_contract_markers,
+    check_el2_boot,
     default_iso,
+    early_fault_markers,
     env_config,
     env_expect_panic,
     env_flag,
@@ -32,8 +39,10 @@ from tests.harness.harness import (
     run_qemu_and_check,
     run_qemu_console_input,
     run_qemu_inject_mce,
+    run_qemu_until_exit,
     serial_tail,
     virtio_blk_args,
+    virtualization_on,
 )
 from tests.harness.utest import UtestVerdict
 
@@ -47,12 +56,30 @@ PCI_GOLDEN = (
     "8086:100e",  # e1000 (QEMU default NIC)
 )
 
+# QEMU `virt` + the aarch64 e2e argv (virtio-net, virtio-input ×2, pvpanic,
+# virtio-scsi). IDs from the guest dump, not from QEMU source.
+PCI_GOLDEN_AARCH64 = (
+    "1b36:0008",  # Red Hat PCIe host bridge
+    "1af4:1000",  # virtio-net
+    "1af4:1052",  # virtio-input
+    "1b36:0011",  # pvpanic-pci
+    "1af4:1004",  # virtio-scsi
+)
 
-def _check_pci_qemu_set(raw: list[str]) -> None:
-    """lspci-adjacent boot dump must name the default QEMU `pc` devices."""
+
+def pci_golden(arch: str) -> tuple[str, ...]:
+    """The vendor:device IDs the e2e dump must name for `arch`."""
+    if arch == "aarch64":
+        return PCI_GOLDEN_AARCH64
+    return PCI_GOLDEN
+
+
+def _check_pci_qemu_set(raw: list[str], arch: str = "x86_64") -> None:
+    """lspci-adjacent boot dump must name the default QEMU devices for `arch`."""
+    golden = pci_golden(arch)
     lines = frame.kernel_lines(raw)
     blob = "\n".join(lines)
-    missing = [id_ for id_ in PCI_GOLDEN if id_ not in blob]
+    missing = [id_ for id_ in golden if id_ not in blob]
     if missing:
         raise HarnessError(f"pci dump missing {missing!r}")
     count_line = None
@@ -67,8 +94,8 @@ def _check_pci_qemu_set(raw: list[str]) -> None:
         n = int(n_s)
     except ValueError as e:
         raise HarnessError(f"pci count not an int: {count_line!r}") from e
-    if n < len(PCI_GOLDEN):
-        raise HarnessError(f"pci count {n} < golden {len(PCI_GOLDEN)}")
+    if n < len(golden):
+        raise HarnessError(f"pci count {n} < golden {len(golden)}")
 
 
 def check_first_kernel_line(lines: list[str]) -> None:
@@ -121,14 +148,36 @@ PMM_TOTAL_RE = re.compile(r"^vibeOS: pmm: (\d+) total, largest order (-?\d+)$")
 MEMINFO_TOTAL_RE = re.compile(r"^vibeOS: meminfo: total (\d+) frames, free (\d+), used (\d+)\b")
 MEMINFO_HEAP_RE = re.compile(r"^vibeOS: meminfo: heap used (\d+) B / capacity (\d+) B$")
 MEMINFO_PREFIX = "vibeOS: meminfo: "
+# `pmm: <n> total` counts 4 KiB frames (DESIGN §4.2).
+PMM_FRAME_BYTES = 4096
+# 8 GiB, the physmap cap ROADMAP §11.2 removed.
+EIGHT_GIB = 8 << 30
+# `make test-e2e-highmem` sets this. The buddy total must sit past the old cap.
+HIGHMEM_MEM = "9G"
 
 
-def check_meminfo(lines: list[str]) -> None:
+def check_highmem_pmm(pmm_total: int, mem: str) -> None:
+    """A 9 GiB guest's `pmm:` total includes RAM above 8 GiB (ROADMAP §11.2).
+
+    The old physmap cap left that RAM out of the buddy, so `pmm_total * 4096`
+    stayed at or under 8 GiB. `mem` is `VIBEOS_MEM`; any other size skips this.
+    """
+    if mem != HIGHMEM_MEM:
+        return
+    counted = pmm_total * PMM_FRAME_BYTES
+    if counted <= EIGHT_GIB:
+        raise HarnessError(
+            f"highmem: pmm total {pmm_total} frames ({counted} bytes) is not above 8 GiB"
+        )
+
+
+def check_meminfo(lines: list[str], mem: str = "") -> None:
     """`diag::meminfo`'s boot lines agree with the `pmm:` lines (ROADMAP §10.2).
 
     Each `meminfo:` line (grouped by its text up to the first digit) and each
     `pmm:` line appears once; the frame total equals pmm's; free is at most
     pmm's free count; used is total minus free; heap use is at most capacity.
+    When `mem` is `9G`, the frame total also sits above 8 GiB.
     """
     texts = [t for t in (kernel_text(ln) for ln in lines) if t is not None]
     groups: dict[str, int] = {}
@@ -161,6 +210,7 @@ def check_meminfo(lines: list[str]) -> None:
         raise HarnessError(f"meminfo: used {used} is not total {total} minus free {free}")
     if heap_used > heap_cap:
         raise HarnessError(f"meminfo: heap used {heap_used} B above capacity {heap_cap} B")
+    check_highmem_pmm(pmm_total, mem)
 
 
 def forged_user_lines(res: results.Results, lines: list[str]) -> None:
@@ -218,7 +268,9 @@ def _check_vda_untouched(env: EnvConfig) -> None:
             try:
                 result = run_qemu_and_check(
                     cfg,
-                    boot_contract_markers(cpu=env.cpu, smp=env.smp),
+                    boot_contract_markers(
+                        cpu=env.cpu, smp=env.smp, arch=env.arch, machine=env.machine
+                    ),
                     timeout_s=env.timeout,
                 )
             except HarnessError as e:
@@ -245,9 +297,11 @@ def _check_vda_untouched(env: EnvConfig) -> None:
 
 def _mce_main(env: EnvConfig) -> int:
     """Boot, inject an uncorrected machine check on CPU 0, expect dump and halt."""
-    results.Results(env.tier)
+    results.Results(env.tier, env.arch)
     cfg = env.qemu()
-    markers = boot_contract_markers(cpu=env.cpu, smp=env.smp)
+    markers = boot_contract_markers(
+        cpu=env.cpu, smp=env.smp, arch=env.arch, machine=env.machine
+    )
     cmd = mce_monitor_cmd(
         cpu=0, bank=1, status=MCE_UC_STATUS, mcg_status=MCE_MCG_STATUS
     )
@@ -348,12 +402,14 @@ def check_strace_lines(lines: list[str], expected_cmdline: str) -> tuple[str, st
 
 def _strace() -> int:
     env = env_config(default_iso="vibeos.iso", default_timeout=BOOT_ALLOWANCE_S)
-    res = results.Results(env.tier)
+    res = results.Results(env.tier, env.arch)
     if "vibeos.strace=1" not in env.cmdline.split():
         print("[e2e] FAIL: VIBEOS_CMDLINE must hold vibeos.strace=1", file=sys.stderr)
         return 1
     cfg = env.qemu()
-    markers = boot_contract_markers(cpu=env.cpu, smp=env.smp)
+    markers = boot_contract_markers(
+        cpu=env.cpu, smp=env.smp, arch=env.arch, machine=env.machine
+    )
     try:
         result = run_qemu_and_check(cfg, markers, timeout_s=env.timeout)
     except HarnessError as e:
@@ -385,11 +441,100 @@ def strace_main() -> int:
     return results.run_main(_strace)
 
 
+# The aarch64 ISA floor's refusal (ROADMAP §11.1): an Armv8.0 CPU, with
+# neither FEAT_LSE nor FEAT_PAN, under TCG, which the floor turns away.
+ISA_FLOOR_REFUSAL = "vibeOS: cpu: isa floor (lse+pan) missing"
+ISA_FLOOR_CPU = "cortex-a72"
+# How long the run reads on after the refusal before it kills QEMU: the
+# kernel halts there, so any later line (a second refusal, an exception)
+# would be a bug the check below names.
+ISA_FLOOR_SETTLE_S = 3.0
+
+
+def check_isa_floor_lines(lines: list[str]) -> None:
+    """The refusal is the run's only kernel line: the check runs before the
+    first log line, and the CPU halts after it."""
+    kl = frame.kernel_lines(lines)
+    if not kl or kl[0] != ISA_FLOOR_REFUSAL:
+        first = kl[0] if kl else "no kernel line"
+        raise HarnessError(
+            f"isa floor: first kernel line {first!r}, expected {ISA_FLOOR_REFUSAL!r}"
+        )
+    n = kl.count(ISA_FLOOR_REFUSAL)
+    if n != 1:
+        raise HarnessError(f"isa floor: {n} refusal lines, expected one")
+    if len(kl) != 1:
+        raise HarnessError(f"isa floor: kernel line after the refusal: {kl[1]!r}")
+
+
+def _isa_floor() -> int:
+    env = env_config(default_iso=default_iso(), default_timeout=BOOT_ALLOWANCE_S)
+    res = results.Results(env.tier, env.arch)
+    if env.arch != "aarch64":
+        print("[e2e] FAIL: the ISA floor test boots aarch64 only (ARCH=aarch64)", file=sys.stderr)
+        return 1
+    # TCG whatever VIBEOS_QEMU_ACCEL says: HVF and KVM run the host's CPU.
+    cfg = replace(env.qemu(), cpu=ISA_FLOOR_CPU, cpu_explicit=True, accel="tcg")
+    # Every aarch64 kernel failure line but the refusal fails the run, the
+    # early-exception line (`vibeOS: panic: early`) and `#UNDEF` among them.
+    sigs = tuple(
+        s for s in registry.signatures(ROWS, {frame.KERNEL}, "aarch64") if s != ISA_FLOOR_REFUSAL
+    )
+
+    # The run reads on for `ISA_FLOOR_SETTLE_S` after the refusal, then
+    # kills QEMU, so a line after it is seen; a failure line ends it.
+    def settle(line: str) -> float | None:
+        return ISA_FLOOR_SETTLE_S if kernel_text(line) == ISA_FLOOR_REFUSAL else None
+
+    try:
+        result = run_qemu_until_exit(
+            cfg, timeout_s=env.timeout, panic_signatures=sigs, kill_after=settle
+        )
+        check_isa_floor_lines(result.lines)
+    except HarnessError as e:
+        _record_missing(str(e))
+        res.add_boot(qemu_argv(cfg, None), cfg, None)
+        res.record("marker", "isa_floor_refusal", "failed")
+        print(f"[e2e] FAIL: {e}", file=sys.stderr)
+        return 1
+    res.record("marker", "isa_floor_refusal", "passed")
+    res.add_boot(qemu_argv(cfg, None), cfg, result.exit_code)
+    print(f"[e2e] ok: -cpu {ISA_FLOOR_CPU} refused: {ISA_FLOOR_REFUSAL!r}", file=sys.stderr)
+    print(
+        f"[e2e]   . the refusal is the only kernel line in {ISA_FLOOR_SETTLE_S} s after it;"
+        " no early exception",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def isa_floor_main() -> int:
+    """`make test-e2e-isa-floor`: boot the production ISO on an Armv8.0 CPU
+    and expect the ISA floor's refusal. No retry."""
+    return results.run_main(_isa_floor)
+
+
+def check_gic_version(lines: list[str], version: str) -> None:
+    """An aarch64 boot past GIC init printed `vibeOS: gic: v<version>`, the
+    GIC the harness asked QEMU for (`VIBEOS_GIC`), so a run meant for GICv2
+    cannot pass on GICv3."""
+    want = f"vibeOS: gic: v{version}"
+    got = [t for t in frame.kernel_lines(lines) if t in ("vibeOS: gic: v2", "vibeOS: gic: v3")]
+    if got != [want]:
+        raise HarnessError(f"gic: lines {got!r}, expected one {want!r}")
+
+
 # `VIBEOS_PANIC_VARIANT`: a panic-path build (ROADMAP §10.7), its ISO
 # variant, and the check its dump must pass.
-PANIC_VARIANTS = {
-    "nest": ("panic-nest", panic_dump.check_nest),
-    "stop": ("panic-stop", panic_dump.check_stop),
+PANIC_VARIANTS: dict[str, tuple[str, Callable[[list[str], str], None]]] = {
+    "nest": ("panic-nest", lambda lines, _arch: panic_dump.check_nest(lines)),
+    "stop": ("panic-stop", lambda lines, _arch: panic_dump.check_stop(lines)),
+    "overflow": ("kstack-overflow", panic_dump.check_overflow),
+}
+# The dump lines a variant's run must hold, where they differ from the
+# backtrace and `halted` every other variant's dump prints (ROADMAP §11.3).
+PANIC_VARIANT_NEEDLES: dict[str, tuple[str, ...]] = {
+    "overflow": ("vibeOS: panic: stack overflow far=", "vibeOS: panic: halted"),
 }
 
 
@@ -401,9 +546,17 @@ def _utest_verdict(env: EnvConfig, cfg: QemuConfig) -> UtestVerdict:
 
 # The frames the `#GP` backtrace lists, in this order (ROADMAP §10.7, F070).
 GP_FRAMES = ("gp_test_trip", "boot_rest")
+# The frames the panic-test backtrace lists, in this order (ROADMAP §10.7,
+# §11.7): the handler, `panic_fmt`, which the panic in `_start` calls, then
+# `_start` on the boot stack Limine handed it.
+PANIC_FRAMES = ("rust_begin_unwind", "panic_fmt", "_start")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--arch", choices=("x86_64", "aarch64"))
+    args = parser.parse_args([] if argv is None else argv)
+    apply_arch_cli(args.arch)
     panic_variant = env_str("VIBEOS_PANIC_VARIANT", "")
     if panic_variant and panic_variant not in PANIC_VARIANTS:
         print(
@@ -414,20 +567,26 @@ def main() -> int:
         return 1
     iso = default_iso(PANIC_VARIANTS[panic_variant][0]) if panic_variant else default_iso()
     env = env_config(default_iso=iso, default_timeout=BOOT_ALLOWANCE_S)
+    if os.environ.get("VIBEOS_GIC") and env.arch != "aarch64":
+        print("[e2e] FAIL: VIBEOS_GIC selects an aarch64 GIC (ARCH=aarch64)", file=sys.stderr)
+        return 1
     if env_flag("VIBEOS_MCE_TEST"):
         return _mce_main(env)
-    res = results.Results(env.tier)
+    res = results.Results(env.tier, env.arch)
     expect_panic = env_expect_panic()
     gp_test = env_flag("VIBEOS_GP_TEST")
+    early_fault = env_flag("VIBEOS_EARLY_FAULT")
     expect_pit = env_flag("VIBEOS_EXPECT_PIT")
 
     # The panic, `#GP` and panic-variant builds end on QMP `GUEST_PANICKED`,
     # which the kernel's pvpanic write raises after the dump (DESIGN §8.3).
-    expect = "panic" if expect_panic or gp_test or panic_variant else "none"
+    expect = "panic" if expect_panic or gp_test or panic_variant or early_fault else "none"
     cfg = env.qemu(hpet=not expect_pit, expect=expect)
     dump_needles: tuple[str | tuple[str, ...], ...] = ()
     if gp_test:
-        markers = boot_contract_markers(cpu=env.cpu, gp=True, smp=env.smp)
+        markers = boot_contract_markers(
+            cpu=env.cpu, gp=True, smp=env.smp, arch=env.arch, machine=env.machine
+        )
         expect_panic = True
         dump_needles = (
             "#GP",
@@ -439,12 +598,25 @@ def main() -> int:
             ("  0x", "boot_rest"),
             "vibeOS: panic: halted",
         )
-    elif panic_variant:
-        markers = boot_contract_markers(cpu=env.cpu, smp=env.smp, panic_variant=panic_variant)
+    elif early_fault:
+        # The early handler ends in `panic: halted` and, on x86_64, pvpanic.
+        markers = early_fault_markers(arch=env.arch)
         expect_panic = True
-        dump_needles = ("vibeOS: backtrace:", "vibeOS: panic: halted")
+        dump_needles = ("vibeOS: panic: early vec=", "vibeOS: panic: halted")
+    elif panic_variant:
+        markers = boot_contract_markers(
+            cpu=env.cpu,
+            smp=env.smp,
+            panic_variant=panic_variant,
+            arch=env.arch,
+            machine=env.machine,
+        )
+        expect_panic = True
+        dump_needles = PANIC_VARIANT_NEEDLES.get(
+            panic_variant, ("vibeOS: backtrace:", "vibeOS: panic: halted")
+        )
     elif expect_panic:
-        markers = halt_test_markers()
+        markers = halt_test_markers(arch=env.arch)
         dump_needles = (
             "vibeOS: panic: at",
             "intentional panic-test",
@@ -457,7 +629,11 @@ def main() -> int:
         )
     else:
         markers = boot_contract_markers(
-            cpu=env.cpu, hpet=not expect_pit, smp=env.smp
+            cpu=env.cpu,
+            hpet=not expect_pit,
+            smp=env.smp,
+            arch=env.arch,
+            machine=env.machine,
         )
     # The normal boot runs `/bin/tests` (DESIGN §8.2): its utest verdict.
     normal = expect == "none"
@@ -493,6 +669,16 @@ def main() -> int:
         print(f"[e2e] FAIL: {e}", file=sys.stderr)
         return 1
     print("[e2e]   . serial online is the first kernel line", file=sys.stderr)
+    # The panic-test build panics before GIC init and prints no GIC line.
+    if env.arch == "aarch64" and (panic_variant or not expect_panic):
+        try:
+            check_gic_version(result.lines, env.gic_version)
+        except HarnessError as e:
+            res.record("marker", "gic_version", "failed")
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        res.record("marker", "gic_version", "passed")
+        print(f"[e2e]   . gic: v{env.gic_version}", file=sys.stderr)
     if gp_test:
         # F070: the walk starts at the interrupted frame, so the function
         # `gp_test_fault` returns to comes first, then its caller. Boot's
@@ -507,9 +693,29 @@ def main() -> int:
             return 1
         res.record("marker", "gp_backtrace_order", "passed")
         print(f"[e2e]   . backtrace: {' then '.join(GP_FRAMES)}", file=sys.stderr)
+    if early_fault:
+        try:
+            panic_dump.check_early(result.lines, env.arch)
+        except HarnessError as e:
+            res.record("marker", "early_fault_line", "failed")
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        res.record("marker", "early_fault_line", "passed")
+        print("[e2e]   . early handler line ok", file=sys.stderr)
+    if expect_panic and not gp_test and not panic_variant and not early_fault:
+        # The walk follows the frame pointer from the handler through the
+        # recorded boot stack, the only known stack before the first thread.
+        try:
+            panic_dump.check_frames_in_order(result.lines, PANIC_FRAMES)
+        except HarnessError as e:
+            res.record("marker", "panic_backtrace_order", "failed")
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        res.record("marker", "panic_backtrace_order", "passed")
+        print(f"[e2e]   . backtrace: {' then '.join(PANIC_FRAMES)}", file=sys.stderr)
     if panic_variant:
         try:
-            PANIC_VARIANTS[panic_variant][1](result.lines)
+            PANIC_VARIANTS[panic_variant][1](result.lines, env.arch)
         except HarnessError as e:
             res.record("marker", f"panic_{panic_variant}_dump", "failed")
             print(f"[e2e] FAIL: {e}", file=sys.stderr)
@@ -518,11 +724,18 @@ def main() -> int:
         print(f"[e2e]   . panic-{panic_variant} dump ok", file=sys.stderr)
     if not expect_panic and not gp_test:
         try:
-            _check_pci_qemu_set(result.lines)
+            _check_pci_qemu_set(result.lines, env.arch)
         except HarnessError as e:
             print(f"[e2e] FAIL: {e}", file=sys.stderr)
             return 1
         print("[e2e]   . pci qemu set ok", file=sys.stderr)
+        try:
+            check_el2_boot(frame.kernel_lines(result.lines), env.machine, env.smp)
+        except HarnessError as e:
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        if virtualization_on(env.machine):
+            print("[e2e]   . el: 2 vhe on every cpu", file=sys.stderr)
         try:
             forged_user_lines(res, result.lines)
         except HarnessError as e:
@@ -530,11 +743,13 @@ def main() -> int:
             return 1
         print("[e2e]   . forged user lines unframed", file=sys.stderr)
         try:
-            check_meminfo(result.lines)
+            check_meminfo(result.lines, env.mem)
         except HarnessError as e:
             print(f"[e2e] FAIL: {e}", file=sys.stderr)
             return 1
         print("[e2e]   . meminfo ok", file=sys.stderr)
+        if env.mem == HIGHMEM_MEM:
+            print("[e2e]   . pmm total above 8 GiB", file=sys.stderr)
         try:
             utest = _utest_verdict(env, cfg)
             inp = run_qemu_console_input(cfg, timeout_s=env.timeout, utest=utest)
@@ -548,6 +763,7 @@ def main() -> int:
         res.add_boot(qemu_argv(cfg, None), cfg, inp.exit_code)
         try:
             check_first_kernel_line(inp.lines)
+            check_el2_boot(frame.kernel_lines(inp.lines), env.machine, env.smp)
         except HarnessError as e:
             print(f"[e2e] FAIL: console boot: {e}", file=sys.stderr)
             return 1
@@ -565,4 +781,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(results.run_main(main))
+    raise SystemExit(results.run_main(lambda: main(sys.argv[1:])))

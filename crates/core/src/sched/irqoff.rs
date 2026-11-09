@@ -183,19 +183,22 @@ impl Histogram {
     }
 
     pub fn record(&self, ns: u64) {
-        // Relaxed: counters; readers want totals, not an order.
+        // Relaxed: counters; readers want totals, not an order; pairs with nothing.
         match Self::index(ns) {
             None => self.under.fetch_add(1, Ordering::Relaxed),
             Some(BUCKETS) => self.over.fetch_add(1, Ordering::Relaxed),
             Some(i) => self.buckets[i].fetch_add(1, Ordering::Relaxed),
         };
+        // Relaxed: as the counters; pairs with nothing.
         self.max.fetch_max(ns, Ordering::Relaxed);
     }
 
     /// Samples recorded.
     pub fn count(&self) -> u64 {
+        // Relaxed: counters, read for a total; pairs with nothing.
         let mut n = u64::from(self.under.load(Ordering::Relaxed))
             + u64::from(self.over.load(Ordering::Relaxed));
+        // Relaxed: as above; pairs with nothing.
         for b in &self.buckets {
             n += u64::from(b.load(Ordering::Relaxed));
         }
@@ -204,6 +207,7 @@ impl Histogram {
 
     /// The largest sample.
     pub fn max(&self) -> u64 {
+        // Relaxed: a statistic; pairs with nothing.
         self.max.load(Ordering::Relaxed)
     }
 
@@ -217,10 +221,12 @@ impl Histogram {
         }
         let rank = (n * u64::from(permille.min(1000))).div_ceil(1000).max(1);
         let max = self.max();
+        // Relaxed: counters, read for a rank; pairs with nothing.
         let mut seen = u64::from(self.under.load(Ordering::Relaxed));
         if seen >= rank {
             return max.min((1 << LOW_SHIFT) - 1);
         }
+        // Relaxed: as above; pairs with nothing.
         for (i, b) in self.buckets.iter().enumerate() {
             seen += u64::from(b.load(Ordering::Relaxed));
             if seen >= rank {
@@ -293,15 +299,19 @@ impl SiteStats {
 
     /// Count one closed stretch; a `deliberate` one apart from the rest.
     pub fn record(&self, c: Closed, deliberate: bool) {
-        // Relaxed: counters; the reporter reads totals, not an order.
+        // Relaxed: counters; the reporter reads totals; pairs with nothing.
         if deliberate {
             self.deliberate.fetch_add(1, Ordering::Relaxed);
+            // Relaxed: as above; pairs with nothing.
             self.deliberate_max_ns.fetch_max(c.ns, Ordering::Relaxed);
             return;
         }
+        // Relaxed: as above; pairs with nothing.
         self.count.fetch_add(1, Ordering::Relaxed);
+        // Relaxed: as above; pairs with nothing.
         self.max_ns.fetch_max(c.ns, Ordering::Relaxed);
         self.hist.record(c.ns);
+        // Relaxed: as above; pairs with nothing.
         if c.over {
             self.over.fetch_add(1, Ordering::Relaxed);
         }
@@ -313,9 +323,10 @@ impl SiteStats {
         if reason.is_empty() {
             return;
         }
-        // AcqRel on success: only the one CAS that claims the pointer
-        // stores the length, and its Release store below publishes the
-        // pair to `reason`.
+        // AcqRel on success: pairs with nothing; only the one CAS that claims
+        // the pointer stores the length, and its Release store below
+        // publishes the pair to `reason`.
+        // Relaxed on failure: the pointer stays the winner's; pairs with nothing.
         if self
             .reason_ptr
             .compare_exchange(
@@ -326,6 +337,7 @@ impl SiteStats {
             )
             .is_ok()
         {
+            // Release: pairs with the Acquire load in `reason`.
             self.reason_len
                 .store(reason.len() as u64, Ordering::Release);
         }
@@ -339,6 +351,7 @@ impl SiteStats {
         if n == 0 {
             return "";
         }
+        // Relaxed: ordered by the Acquire load of `reason_len` above; pairs with nothing.
         let p = self.reason_ptr.load(Ordering::Relaxed);
         // SAFETY: invariant: a nonzero `reason_len` was stored once, by the
         // CAS winner that stored `reason_ptr`, both from one `&'static str`;
@@ -389,8 +402,9 @@ impl<const N: usize> SiteTable<N> {
                 return Some(slot);
             }
             if k == 0 {
-                // AcqRel: publishes the claim; a failed CAS reads the key
-                // another CPU claimed the slot with.
+                // AcqRel: pairs with the Acquire loads of `key` here and in
+                // `site`, publishing the claim.
+                // Acquire on failure: pairs with the claim of the CPU that won.
                 match slot
                     .key
                     .compare_exchange(0, key, Ordering::AcqRel, Ordering::Acquire)
@@ -401,7 +415,7 @@ impl<const N: usize> SiteTable<N> {
                 }
             }
         }
-        // Relaxed: a counter.
+        // Relaxed: a counter; pairs with nothing.
         self.dropped.fetch_add(1, Ordering::Relaxed);
         None
     }
@@ -413,7 +427,7 @@ impl<const N: usize> SiteTable<N> {
 
     /// Sites that found the table full.
     pub fn dropped(&self) -> u32 {
-        // Relaxed: a counter.
+        // Relaxed: a counter; pairs with nothing.
         self.dropped.load(Ordering::Relaxed)
     }
 }

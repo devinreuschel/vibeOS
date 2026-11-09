@@ -1,0 +1,10 @@
+X86 vibeos-seqlock-x86
+(* TSO orders the copy store before LOCK INC. No MFENCE. A stable new
+   seq with the old copy is forbidden, which is the barrier x86 elides. *)
+{
+}
+ P0                 | P1               ;
+ MOV [data],$1      | MOV EAX,[seq]   ;
+ LOCK INC [seq]     | MOV EBX,[data]  ;
+                    | MOV ECX,[seq]   ;
+exists (1:EAX=1 /\ 1:ECX=1 /\ 1:EBX=0)

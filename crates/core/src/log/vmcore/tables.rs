@@ -10,12 +10,11 @@
 use core::mem::{offset_of, size_of};
 
 use super::sig::{PanicLine, PanicText};
-use super::walk::Kernel;
+use super::walk::{CoreFormat, Kernel};
 use super::{LOG_TAIL, PhysMem, VmError, le64, offset};
 use crate::irq::stop::{CRASH_RBP, CRASH_RIP, CRASH_RSP, CRASH_WORDS, StopHow};
 use crate::log::trace::{self, ClockInfo, RECORD_SIZE, RECORDS_PER_CPU, RecordData};
 use crate::log::{KernelLogger, Level, MSG_CAP, RING_CAP, Record, Ring};
-use crate::paging::PageTable;
 use crate::per_cpu::{PerCpu, PerCpuRemote};
 use crate::sched::ReadyQueue;
 use crate::thread::{CpuContext, Tcb, ThreadState};
@@ -29,6 +28,34 @@ use crate::thread::{CpuContext, Tcb, ThreadState};
 // pins the size.
 const STATE_ARG: usize = 8;
 const _: () = assert!(size_of::<ThreadState>() == 24);
+
+const fn cpu_rbx() -> usize {
+    CpuContext::RBX
+}
+const fn cpu_rbp() -> usize {
+    CpuContext::RBP
+}
+const fn cpu_r12() -> usize {
+    CpuContext::R12
+}
+const fn cpu_r13() -> usize {
+    CpuContext::R13
+}
+const fn cpu_r14() -> usize {
+    CpuContext::R14
+}
+const fn cpu_r15() -> usize {
+    CpuContext::R15
+}
+const fn cpu_rflags() -> usize {
+    CpuContext::RFLAGS
+}
+const fn cpu_rsp() -> usize {
+    CpuContext::RSP
+}
+const fn cpu_rip() -> usize {
+    CpuContext::RIP
+}
 
 /// A TCB as the core holds it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -47,8 +74,24 @@ pub struct ThreadView {
     pub rflags: u64,
     pub rsp: u64,
     pub rip: u64,
+    /// `CpuContext.extra`: aarch64's `x25` to `x29`, unused on x86_64.
+    pub extra: [u64; 5],
     pub cpu: u32,
     pub pid: u32,
+}
+
+impl ThreadView {
+    /// The saved frame pointer a backtrace of the thread starts from:
+    /// `rbp`, or `x29` (`CpuContext::X29`, the last `extra` word).
+    pub fn frame_pointer(&self, machine: super::Machine) -> u64 {
+        match machine {
+            super::Machine::X86_64 => self.rbp,
+            super::Machine::Aarch64 => {
+                let [.., x29] = self.extra;
+                x29
+            }
+        }
+    }
 }
 
 /// `ThreadState`'s name for its tag (declaration order, docs/VMCOREINFO.md).
@@ -133,7 +176,7 @@ impl LogRec {
 type KRing = Ring<RING_CAP, MSG_CAP>;
 type KRecord = Record<MSG_CAP>;
 
-impl<'m, M: PhysMem, A: PageTable> Kernel<'m, M, A> {
+impl<'m, M: PhysMem, A: CoreFormat> Kernel<'m, M, A> {
     fn field(base: u64, index: u64, size: usize, off: usize) -> Result<u64, VmError> {
         index
             .checked_mul(offset(size))
@@ -199,15 +242,23 @@ impl<'m, M: PhysMem, A: PageTable> Kernel<'m, M, A> {
             id: self.u32_at(f(offset_of!(Tcb, id))?)?,
             state: self.u32_at(f(st)?)?,
             state_arg: self.u64_at(f(st.saturating_add(STATE_ARG))?)?,
-            rbx: self.u64_at(ctx(CpuContext::RBX)?)?,
-            rbp: self.u64_at(ctx(CpuContext::RBP)?)?,
-            r12: self.u64_at(ctx(CpuContext::R12)?)?,
-            r13: self.u64_at(ctx(CpuContext::R13)?)?,
-            r14: self.u64_at(ctx(CpuContext::R14)?)?,
-            r15: self.u64_at(ctx(CpuContext::R15)?)?,
-            rflags: self.u64_at(ctx(CpuContext::RFLAGS)?)?,
-            rsp: self.u64_at(ctx(CpuContext::RSP)?)?,
-            rip: self.u64_at(ctx(CpuContext::RIP)?)?,
+            rbx: self.u64_at(ctx(cpu_rbx())?)?,
+            rbp: self.u64_at(ctx(cpu_rbp())?)?,
+            r12: self.u64_at(ctx(cpu_r12())?)?,
+            r13: self.u64_at(ctx(cpu_r13())?)?,
+            r14: self.u64_at(ctx(cpu_r14())?)?,
+            r15: self.u64_at(ctx(cpu_r15())?)?,
+            rflags: self.u64_at(ctx(cpu_rflags())?)?,
+            rsp: self.u64_at(ctx(cpu_rsp())?)?,
+            rip: self.u64_at(ctx(cpu_rip())?)?,
+            extra: {
+                let mut x = [0u64; 5];
+                for (k, w) in x.iter_mut().enumerate() {
+                    *w =
+                        self.u64_at(ctx(CpuContext::EXTRA.saturating_add(k.saturating_mul(8)))?)?;
+                }
+                x
+            },
             cpu: self.u32_at(f(offset_of!(Tcb, cpu))?)?,
             pid: self.u32_at(f(offset_of!(Tcb, pid))?)?,
         })

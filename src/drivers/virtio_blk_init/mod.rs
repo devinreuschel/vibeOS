@@ -13,24 +13,25 @@ use vibeos::block::{
     BlockDevice, BlockError, Completion, DRAIN_BATCH, DeviceState, Op, Queue, Request,
 };
 use vibeos::dev::{DevRef, Device, Driver, IdMatch, Instance, ProbeError};
-use vibeos::dma::{self, DmaAlloc, DmaBuffer};
-use vibeos::irq::IrqError;
+use vibeos::dma::{DmaAlloc, DmaBuffer};
+use vibeos::irq::{IrqError, IrqId};
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::pci::{CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::virtio::{
-    self, COMMON_OFF_DF, COMMON_OFF_DFSEL, COMMON_OFF_DR, COMMON_OFF_DRSEL, COMMON_OFF_MSIX_CFG,
-    COMMON_OFF_NUM_QUEUES, COMMON_OFF_QDESC, COMMON_OFF_QDEVICE, COMMON_OFF_QDRIVER,
-    COMMON_OFF_QENABLE, COMMON_OFF_QMSIX, COMMON_OFF_QNOTIFY, COMMON_OFF_QSEL, COMMON_OFF_QSIZE,
-    COMMON_OFF_STATUS, DESC_F_WRITE, DEV_BLK_LEGACY, DEV_BLK_MODERN, DescBuf, F_EVENT_IDX,
-    MSI_NO_VECTOR, ModernCaps, PciCap, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK,
+    self, COMMON_OFF_MSIX_CFG, COMMON_OFF_NUM_QUEUES, COMMON_OFF_QDESC, COMMON_OFF_QDEVICE,
+    COMMON_OFF_QDRIVER, COMMON_OFF_QENABLE, COMMON_OFF_QMSIX, COMMON_OFF_QNOTIFY, COMMON_OFF_QSEL,
+    COMMON_OFF_QSIZE, COMMON_OFF_STATUS, DESC_F_WRITE, DEV_BLK_LEGACY, DEV_BLK_MODERN, DescBuf,
+    F_EVENT_IDX, MSI_NO_VECTOR, ModernCaps, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK,
     STATUS_FEATURES_OK, SplitLayout, VENDOR_ID, VirtioError, notify_addr,
 };
 use vibeos::virtio_blk::{
-    CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD,
-    F_FLUSH, F_MQ, F_RO, F_TOPOLOGY, MAX_DISKS, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT, disk_name,
-    exhausted_fails_device, logical_capacity, map_status, nq_from_config, pack_discard,
-    pack_header, pick_blk_size, pick_features, queue_size, refuse_read_only, sector_for_lba,
+    BOUNCE, CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY,
+    F_BLK_SIZE, F_DISCARD, F_FLUSH, F_MQ, F_RO, F_TOPOLOGY, MAX_DISKS, SECTOR, SLOT_DISCARD,
+    SLOT_META, SLOT_STATUS, T_DISCARD, T_FLUSH, T_IN, T_OUT, disk_name, exhausted_fails_device,
+    fit_config, hand_slot, logical_capacity, map_status, nq_from_config, pack_discard, pack_header,
+    pick_blk_size, pick_features, queue_size, refuse_read_only, sector_for_lba, slot_stride,
+    take_slot,
 };
 
 use crate::arch::{self, current::Arch};
@@ -42,7 +43,9 @@ use crate::pci_init;
 use crate::per_cpu_init;
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
-use crate::virtio_init;
+use crate::virtio_init::{
+    self, r8, r16, r32, r64, read_features, region, w8, w16, w64, write_features,
+};
 
 mod irq;
 mod issue;
@@ -51,8 +54,8 @@ mod vq;
 use irq::{blk_top, blk_work};
 #[cfg(feature = "kernel_tests")]
 pub use issue::submit;
-use issue::{Blk, N_SLOTS, SLOT_STRIDE};
-use vq::{FREE, MAX_QSIZE, MAX_VQ, Vq};
+use issue::{Blk, N_SLOTS};
+use vq::{DmaPlan, FREE, MAX_QSIZE, MAX_VQ, Vq};
 
 /// One bound virtio-blk function: what the driver keeps for it. The PCI
 /// registry slot of the device owns it as a `dev::Instance`; the block
@@ -91,7 +94,9 @@ pub(crate) struct VirtioBlk {
     flushes: AtomicU64,
     /// The common-config VA, which `needs_reset` reads; 0 before `setup`.
     common: AtomicU64,
-    /// The vectors the probe allocated, one per queue (or one for all),
+    /// virtio-mmio window: ISR ack is a write, status is 32-bit.
+    mmio: AtomicBool,
+    /// The IDT vectors the probe allocated, one per queue (or one for all),
     /// each as `QUEUE_VEC_LIVE | cpu << 8 | vector`; 0 for none.
     queue_vecs: [AtomicU64; MAX_VQ],
     /// Completions whose device status [`harvest`](Self::harvest) replaces
@@ -130,100 +135,12 @@ impl VirtioBlk {
             io_reqs: AtomicU64::new(0),
             flushes: AtomicU64::new(0),
             common: AtomicU64::new(0),
+            mmio: AtomicBool::new(false),
             queue_vecs: [const { AtomicU64::new(0) }; MAX_VQ],
             #[cfg(feature = "kernel_tests")]
             inject_unsupp: AtomicU32::new(0),
         }
     }
-}
-
-fn r8(va: u64, off: u16) -> u8 {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u8) }
-}
-
-fn w8(va: u64, off: u16, v: u8) {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u8, v) }
-}
-
-fn r16(va: u64, off: u16) -> u16 {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        u16::from_le(core::ptr::read_volatile(
-            (va.wrapping_add(off as u64)) as *const u16,
-        ))
-    }
-}
-
-fn w16(va: u64, off: u16, v: u16) {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u16, v.to_le());
-    }
-}
-
-fn r32(va: u64, off: u16) -> u32 {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        u32::from_le(core::ptr::read_volatile(
-            (va.wrapping_add(off as u64)) as *const u32,
-        ))
-    }
-}
-
-fn w32(va: u64, off: u16, v: u32) {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, v.to_le());
-    }
-}
-
-fn r64(va: u64, off: u16) -> u64 {
-    (r32(va, off) as u64) | ((r32(va, off + 4) as u64) << 32)
-}
-
-fn w64(va: u64, off: u16, v: u64) {
-    w32(va, off, v as u32);
-    w32(va, off + 4, (v >> 32) as u32);
-}
-
-/// The VA of capability `cap`'s region, inside a BAR the probe claimed
-/// and mapped (`dev_init::claim_mem_bars`).
-fn region(dev: &DevRef, cap: PciCap) -> Option<u64> {
-    let r = dev.resources.get(cap.bar as usize)?;
-    if (cap.offset as u64) >= r.size {
-        return None;
-    }
-    let va = dev_init::bar_va(dev, cap.bar)?;
-    Some(va.wrapping_add(cap.offset as u64))
-}
-
-fn read_features(common: u64) -> u64 {
-    w32(common, COMMON_OFF_DFSEL, 0);
-    let lo = r32(common, COMMON_OFF_DF) as u64;
-    w32(common, COMMON_OFF_DFSEL, 1);
-    let hi = r32(common, COMMON_OFF_DF) as u64;
-    lo | (hi << 32)
-}
-
-fn write_features(common: u64, feat: u64) {
-    w32(common, COMMON_OFF_DRSEL, 0);
-    w32(common, COMMON_OFF_DR, feat as u32);
-    w32(common, COMMON_OFF_DRSEL, 1);
-    w32(common, COMMON_OFF_DR, (feat >> 32) as u32);
 }
 
 /// The one unwind of a probe that fails once bus mastering is on, in
@@ -234,7 +151,7 @@ fn write_features(common: u64, feat: u64) {
 fn fail_probe(
     dev: &Device,
     common: u64,
-    vecs: &[u8],
+    vecs: &[IrqId],
     nvec: usize,
     slots: Option<DmaBuffer>,
     vqs: &mut [Option<Vq>; MAX_VQ],
@@ -287,7 +204,10 @@ fn setup(
     let common = region(dev, common_cap).ok_or(VirtioError::NoCaps)?;
     let notify_base = region(dev, notify_cap).ok_or(VirtioError::NoCaps)?;
     let isr = region(dev, isr_cap).ok_or(VirtioError::NoCaps)?;
+    // The config is read no further than its length covers: `fit_config`
+    // refuses a shorter one and drops the features whose fields it lacks.
     let cfg = region(dev, cfg_cap).ok_or(VirtioError::NoCaps)?;
+    let fit = fit_config(u64::MAX, cfg_cap.length).ok_or(VirtioError::NoCaps)?;
     // Memory decode before the first touch, with bus mastering off, which
     // firmware can leave on; bus mastering only once the reset completed
     // (DESIGN §12.3).
@@ -304,7 +224,7 @@ fn setup(
         COMMON_OFF_STATUS,
         STATUS_ACKNOWLEDGE | STATUS_DRIVER,
     );
-    let device_feat = read_features(common);
+    let device_feat = read_features(common) & fit;
     let feat = match pick_features(device_feat) {
         Ok(f) => f,
         Err(e) => {
@@ -324,7 +244,11 @@ fn setup(
     }
 
     let cap_512 = r64(cfg, CFG_CAPACITY);
-    let cfg_bs = r32(cfg, CFG_BLK_SIZE);
+    let cfg_bs = if feat & F_BLK_SIZE != 0 {
+        r32(cfg, CFG_BLK_SIZE)
+    } else {
+        0
+    };
     let Some(blk_size) = pick_blk_size(feat, cfg_bs) else {
         crate::klog!(
             vibeos::log::Level::Error,
@@ -343,27 +267,36 @@ fn setup(
         return Err(VirtioError::Failed);
     }
     if feat & F_TOPOLOGY != 0 {
+        // Release: pairs with nothing; only this thread's marker below reads it.
         blk.phys_exp.store(r8(cfg, CFG_TOPOLOGY), Ordering::Release);
+        // Release: pairs with nothing; nothing reads it yet.
         blk.align_off
             .store(r8(cfg, CFG_TOPOLOGY + 1), Ordering::Release);
+        // Release: pairs with nothing; nothing reads it yet.
         blk.min_io
             .store(r16(cfg, CFG_TOPOLOGY + 2), Ordering::Release);
+        // Release: pairs with nothing; only this thread's marker below reads it.
         blk.opt_io
             .store(r32(cfg, CFG_TOPOLOGY + 4), Ordering::Release);
     }
     if feat & F_DISCARD != 0 {
+        // Release: pairs with the Acquire load in `issue`.
         blk.max_discard
             .store(r32(cfg, CFG_MAX_DISCARD_SECTORS), Ordering::Release);
     }
-    let cfg_nq = r16(cfg, CFG_NUM_QUEUES);
+    let cfg_nq = if feat & F_MQ != 0 {
+        r16(cfg, CFG_NUM_QUEUES)
+    } else {
+        1
+    };
     let common_nq = r16(common, COMMON_OFF_NUM_QUEUES);
     let offered = nq_from_config(feat, cfg_nq, common_nq);
     let nq = offered.min(online_cpus()).min(MAX_VQ as u16).max(1) as usize;
 
     let table_size = msix_table_size(dev);
     let per_q_msix = table_size as usize >= nq;
-    let mut vecs = [0u8; MAX_VQ];
-    // The CPU each of `vecs` was allocated on; a vector is valid only there.
+    let mut vecs = [IrqId::NONE; MAX_VQ];
+    // The CPU each of `vecs` was allocated on; an IRQ is valid only there.
     let mut vcpus = [0u32; MAX_VQ];
     let mut nvec = 0usize;
 
@@ -373,26 +306,25 @@ fn setup(
 
     if !per_q_msix {
         let cpu = irq_init::threaded_cpu();
-        let Some(pc) = per_cpu_init::cpu(cpu) else {
-            fail_probe(dev, common, &[], 0, None, &mut vqs, None);
-            return Err(VirtioError::Failed);
-        };
-        let vec = match irq_init::allocate_vector(cpu) {
-            Ok(v) => v,
-            Err(_) => {
+        let irq = match irq_init::alloc_msi(dev, 1).ok().and_then(|s| s.get(0)) {
+            Some(i) => i,
+            None => {
                 fail_probe(dev, common, &[], 0, None, &mut vqs, None);
                 return Err(VirtioError::Failed);
             }
         };
-        vecs[0] = vec;
+        vecs[0] = irq;
         vcpus[0] = cpu;
         nvec = 1;
-        if irq_init::set_threaded(vec, Some(blk_top), blk_work, Some(inst.clone())).is_err() {
+        if irq_init::set_affinity(irq, cpu).is_err() {
             fail_probe(dev, common, &vecs, nvec, None, &mut vqs, None);
             return Err(VirtioError::Failed);
         }
-        if let Err(e) = irq_init::enable_msix(dev, 0, vec, pc.apic_id.load(Ordering::Relaxed) as u8)
-        {
+        if irq_init::set_threaded(irq, Some(blk_top), blk_work, Some(inst.clone())).is_err() {
+            fail_probe(dev, common, &vecs, nvec, None, &mut vqs, None);
+            return Err(VirtioError::Failed);
+        }
+        if let Err(e) = irq_init::enable_msix(dev, 0, irq) {
             fail_probe(dev, common, &vecs, nvec, None, &mut vqs, None);
             return match e {
                 IrqError::NoRoute => Err(VirtioError::NoCaps),
@@ -401,7 +333,17 @@ fn setup(
         }
     }
 
-    let Some(slots) = dma_init::alloc(DmaAlloc::dma32((N_SLOTS * SLOT_STRIDE) as u64)) else {
+    let plan = match DmaPlan::for_device(dev) {
+        Ok(p) => p,
+        Err(e) => {
+            fail_probe(dev, common, &vecs, nvec, None, &mut vqs, None);
+            return Err(e);
+        }
+    };
+    let Some(slots) = dma_init::alloc(DmaAlloc::dma32(
+        N_SLOTS.saturating_mul(plan.stride) as u64,
+        plan.coherent,
+    )) else {
         fail_probe(dev, common, &vecs, nvec, None, &mut vqs, None);
         return Err(VirtioError::Failed);
     };
@@ -410,6 +352,7 @@ fn setup(
     unsafe {
         core::ptr::write_bytes(slots.virt() as *mut u8, 0, slots.len() as usize);
     }
+    slots.sync_for_device::<Arch>();
 
     let mut q0sz = 0u16;
     let mut qi = 0usize;
@@ -422,32 +365,25 @@ fn setup(
             irq_init::threaded_cpu()
         };
         if per_q_msix {
-            let Some(pc) = per_cpu_init::cpu(cpu) else {
-                fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
-                return Err(VirtioError::Failed);
-            };
-            let vec = match irq_init::allocate_vector(cpu) {
-                Ok(v) => v,
-                Err(_) => {
+            let irq = match irq_init::alloc_msi(dev, 1).ok().and_then(|s| s.get(0)) {
+                Some(i) => i,
+                None => {
                     fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
                     return Err(VirtioError::Failed);
                 }
             };
-            vecs[nvec] = vec;
+            vecs[nvec] = irq;
             vcpus[nvec] = cpu;
             nvec += 1;
-            if irq_init::set_threaded(vec, Some(blk_top), blk_work, Some(inst.clone())).is_err() {
+            if irq_init::set_affinity(irq, cpu).is_err() {
                 fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
                 return Err(VirtioError::Failed);
             }
-            if irq_init::enable_msix(
-                dev,
-                qi as u16,
-                vec,
-                pc.apic_id.load(Ordering::Relaxed) as u8,
-            )
-            .is_err()
-            {
+            if irq_init::set_threaded(irq, Some(blk_top), blk_work, Some(inst.clone())).is_err() {
+                fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
+                return Err(VirtioError::Failed);
+            }
+            if irq_init::enable_msix(dev, qi as u16, irq).is_err() {
                 fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
                 return Err(VirtioError::Failed);
             }
@@ -463,11 +399,12 @@ fn setup(
         if qi == 0 {
             q0sz = qsz;
         }
-        let Some(layout) = SplitLayout::new(qsz) else {
+        let Some(layout) = SplitLayout::with_granule(qsz, plan.granule) else {
             fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
             return Err(VirtioError::BadQueue);
         };
-        let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64)) else {
+        let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64, plan.coherent))
+        else {
             fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
             return Err(VirtioError::Failed);
         };
@@ -479,9 +416,21 @@ fn setup(
         // least `layout.total` bytes, which stays allocated beside the queue
         // until the device is reset and it is freed; established by
         // `dma_init::alloc`.
-        let mut vq = unsafe {
+        let vq = unsafe {
             arch::current::SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0)
         };
+        let mut vq = match vq {
+            Ok(vq) => vq,
+            Err(e) => {
+                fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, Some(qdma));
+                return Err(e);
+            }
+        };
+        if let Err(e) = plan.apply(&mut vq) {
+            drop(vq);
+            fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, Some(qdma));
+            return Err(e);
+        }
         vq.init();
         qdma.sync_for_device::<Arch>();
         w64(
@@ -526,6 +475,7 @@ fn setup(
             vq,
             qdma,
             doorbell,
+            notify32: false,
             inflight: [FREE; MAX_QSIZE],
         });
         qi += 1;
@@ -542,12 +492,19 @@ fn setup(
     let st = r8(common, COMMON_OFF_STATUS);
     w8(common, COMMON_OFF_STATUS, st | STATUS_DRIVER_OK);
 
+    // Release: pairs with the Acquire load in `irq::blk_top`.
     blk.isr.store(isr, Ordering::Release);
+    // Release: pairs with the Acquire load in `needs_reset`.
     blk.common.store(common, Ordering::Release);
+    // Release: pairs with the Acquire loads in `build`, `features` and `read_only`.
     blk.features.store(feat, Ordering::Release);
+    // Release: pairs with the Acquire load in `logical_block_size`.
     blk.blk_size.store(blk_size, Ordering::Release);
+    // Release: pairs with the Acquire load in `capacity_sectors`.
     blk.cap.store(capacity, Ordering::Release);
+    // Release: pairs with the Acquire load in `num_queues`.
     blk.nq.store(nq as u8, Ordering::Release);
+    // Release: pairs with the Acquire load in `state`.
     blk.state
         .store(DeviceState::Ready.as_u8(), Ordering::Release);
 
@@ -556,6 +513,7 @@ fn setup(
         vqs,
         nq: nq as u8,
         slots,
+        stride: plan.stride,
         slot_used: [false; N_SLOTS],
         slot_req: [None; N_SLOTS],
         features: feat,
@@ -566,13 +524,18 @@ fn setup(
     let mut i = 0usize;
     while i < MAX_VQ {
         let v = if i < nvec {
-            QUEUE_VEC_LIVE | (u64::from(vcpus[i]) << 8) | u64::from(vecs[i])
+            match irq_init::vector(vecs[i]) {
+                Some(hw) => QUEUE_VEC_LIVE | (u64::from(vcpus[i]) << 8) | u64::from(hw),
+                None => 0,
+            }
         } else {
             0
         };
+        // Release: pairs with the Acquire load in `irq::queue_vector`.
         blk.queue_vecs[i].store(v, Ordering::Release);
         i += 1;
     }
+    // Release: pairs with the Acquire load in `live`; last, so it publishes the setup above.
     blk.live.store(true, Ordering::Release);
 
     // The registration prints the `block: <name>` marker. A failure leaves
@@ -586,6 +549,325 @@ fn setup(
         );
     }
     let mq = if feat & F_MQ != 0 { "mq" } else { "sq" };
+    // Acquire: pairs with nothing; the topology stores above are this thread's own.
+    crate::marker!(
+        "vibeOS: virtio: blk {} {} qsz={q0sz} nq={nq} {mq} feat={:#x} bs={blk_size} topo={}/{} discard={}",
+        blk.name(),
+        dev.addr,
+        feat,
+        blk.phys_exp.load(Ordering::Acquire),
+        blk.opt_io.load(Ordering::Acquire),
+        feat & F_DISCARD != 0
+    );
+    Ok(())
+}
+
+fn fail_mmio(
+    base: u64,
+    vecs: &[IrqId],
+    nvec: usize,
+    slots: Option<DmaBuffer>,
+    vqs: &mut [Option<Vq>; MAX_VQ],
+    cur: Option<DmaBuffer>,
+) {
+    // No bus master bit on mmio: a reset that times out leaves the device
+    // free to DMA, so its memory is kept (DESIGN §12.3).
+    let stopped = if crate::virtio_mmio_init::reset(base) {
+        virtio_init::Stopped::Reset
+    } else {
+        virtio_init::Stopped::Stuck
+    };
+    for &v in vecs.iter().take(nvec) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
+        )]
+        let _ = irq_init::free_vector(v);
+    }
+    let mut kept = 0usize;
+    for b in slots
+        .into_iter()
+        .chain(vqs.iter_mut().filter_map(|v| v.take().map(|v| v.qdma)))
+        .chain(cur)
+    {
+        kept = kept.saturating_add(virtio_init::release(stopped, b));
+    }
+    if stopped == virtio_init::Stopped::Stuck {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "vibeOS: virtio: mmio {base:#x} reset timeout, {kept} frames kept"
+        );
+    }
+}
+
+fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), VirtioError> {
+    let base = dev_init::bar_va(dev, 0).ok_or(VirtioError::NoCaps)?;
+    if !crate::virtio_mmio_init::ident_ok(base)
+        || crate::virtio_mmio_init::device_id(base) != vibeos::virtio::ID_BLOCK
+    {
+        return Err(VirtioError::NoCaps);
+    }
+    if !crate::virtio_mmio_init::reset(base) {
+        return Err(VirtioError::Failed);
+    }
+    let mut vqs: [Option<Vq>; MAX_VQ] = [const { None }; MAX_VQ];
+    crate::virtio_mmio_init::set_status(base, STATUS_ACKNOWLEDGE);
+    crate::virtio_mmio_init::set_status(base, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
+    // The config is read no further than the DT window covers, as the PCI
+    // path bounds it by the device-config capability's length.
+    let window = dev.resources.first().map_or(0, |r| r.size);
+    let cfg_len = window
+        .checked_sub(u64::from(vibeos::virtio::MMIO_OFF_CONFIG))
+        .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX));
+    let Some(device_feat) = fit_config(crate::virtio_mmio_init::read_features(base), cfg_len)
+    else {
+        fail_mmio(base, &[], 0, None, &mut vqs, None);
+        return Err(VirtioError::NoCaps);
+    };
+    let feat = match pick_features(device_feat) {
+        Ok(f) => f,
+        Err(e) => {
+            fail_mmio(base, &[], 0, None, &mut vqs, None);
+            return Err(e);
+        }
+    };
+    crate::virtio_mmio_init::write_features(base, feat);
+    crate::virtio_mmio_init::set_status(
+        base,
+        STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK,
+    );
+    if crate::virtio_mmio_init::status(base) & STATUS_FEATURES_OK == 0 {
+        fail_mmio(base, &[], 0, None, &mut vqs, None);
+        return Err(VirtioError::Features);
+    }
+
+    let cfg = crate::virtio_mmio_init::config_va(base);
+    let cap_512 = r64(cfg, CFG_CAPACITY);
+    let cfg_bs = if feat & F_BLK_SIZE != 0 {
+        r32(cfg, CFG_BLK_SIZE)
+    } else {
+        0
+    };
+    let Some(blk_size) = pick_blk_size(feat, cfg_bs) else {
+        fail_mmio(base, &[], 0, None, &mut vqs, None);
+        return Err(VirtioError::Failed);
+    };
+    let Some(capacity) = logical_capacity(cap_512, blk_size) else {
+        fail_mmio(base, &[], 0, None, &mut vqs, None);
+        return Err(VirtioError::Failed);
+    };
+    if capacity == 0 {
+        fail_mmio(base, &[], 0, None, &mut vqs, None);
+        return Err(VirtioError::Failed);
+    }
+    if feat & F_TOPOLOGY != 0 {
+        // Release: pairs with nothing; only this thread's marker below reads it.
+        blk.phys_exp.store(r8(cfg, CFG_TOPOLOGY), Ordering::Release);
+        // Release: pairs with nothing; nothing reads it yet.
+        blk.align_off
+            .store(r8(cfg, CFG_TOPOLOGY + 1), Ordering::Release);
+        // Release: pairs with nothing; nothing reads it yet.
+        blk.min_io
+            .store(r16(cfg, CFG_TOPOLOGY + 2), Ordering::Release);
+        // Release: pairs with nothing; only this thread's marker below reads it.
+        blk.opt_io
+            .store(r32(cfg, CFG_TOPOLOGY + 4), Ordering::Release);
+    }
+    if feat & F_DISCARD != 0 {
+        // Release: pairs with the Acquire load in `issue`.
+        blk.max_discard
+            .store(r32(cfg, CFG_MAX_DISCARD_SECTORS), Ordering::Release);
+    }
+    let cfg_nq = if feat & F_MQ != 0 {
+        r16(cfg, CFG_NUM_QUEUES)
+    } else {
+        1
+    };
+    let offered = nq_from_config(feat, cfg_nq, MAX_VQ as u16);
+    let nq = offered.min(online_cpus()).min(MAX_VQ as u16).max(1) as usize;
+
+    let mut vecs = [IrqId::NONE; MAX_VQ];
+    let mut vcpus = [0u32; MAX_VQ];
+    let Some(spec) = crate::virtio_mmio_init::irq_spec(dev) else {
+        fail_mmio(base, &[], 0, None, &mut vqs, None);
+        return Err(VirtioError::Failed);
+    };
+    let cpu = irq_init::threaded_cpu();
+    #[cfg(target_arch = "aarch64")]
+    if let vibeos::irq::IrqSpecifier::Gic { intid } = spec {
+        crate::arch::aarch64::gic::set_spi_edge(intid, dev.intid_edge);
+    }
+    let irq = match irq_init::map_wired(spec) {
+        Ok(i) => i,
+        Err(_) => {
+            fail_mmio(base, &[], 0, None, &mut vqs, None);
+            return Err(VirtioError::Failed);
+        }
+    };
+    vecs[0] = irq;
+    vcpus[0] = cpu;
+    let nvec = 1;
+    if irq_init::set_affinity(irq, cpu).is_err() {
+        fail_mmio(base, &vecs, nvec, None, &mut vqs, None);
+        return Err(VirtioError::Failed);
+    }
+    if irq_init::set_threaded(irq, Some(blk_top), blk_work, Some(inst.clone())).is_err() {
+        fail_mmio(base, &vecs, nvec, None, &mut vqs, None);
+        return Err(VirtioError::Failed);
+    }
+
+    let plan = match DmaPlan::for_device(dev) {
+        Ok(p) => p,
+        Err(e) => {
+            fail_mmio(base, &vecs, nvec, None, &mut vqs, None);
+            return Err(e);
+        }
+    };
+    let Some(slots) = dma_init::alloc(DmaAlloc::dma32(
+        N_SLOTS.saturating_mul(plan.stride) as u64,
+        plan.coherent,
+    )) else {
+        fail_mmio(base, &vecs, nvec, None, &mut vqs, None);
+        return Err(VirtioError::Failed);
+    };
+    // SAFETY: `slots` was just allocated; established by `dma_init::alloc`.
+    unsafe {
+        core::ptr::write_bytes(slots.virt() as *mut u8, 0, slots.len() as usize);
+    }
+    slots.sync_for_device::<Arch>();
+
+    let mut q0sz = 0u16;
+    let mut qi = 0usize;
+    let doorbell = crate::virtio_mmio_init::notify_va(base);
+    while qi < nq {
+        crate::virtio_mmio_init::select_queue(base, qi as u16);
+        let hw_qs = crate::virtio_mmio_init::queue_max(base);
+        let Ok(qsz) = queue_size(hw_qs, MAX_QSIZE as u16) else {
+            fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, None);
+            return Err(VirtioError::BadQueue);
+        };
+        crate::virtio_mmio_init::set_queue_num(base, qsz);
+        if qi == 0 {
+            q0sz = qsz;
+        }
+        let Some(layout) = SplitLayout::with_granule(qsz, plan.granule) else {
+            fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, None);
+            return Err(VirtioError::BadQueue);
+        };
+        let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64, plan.coherent))
+        else {
+            fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, None);
+            return Err(VirtioError::Failed);
+        };
+        // SAFETY: as for `slots`; established by `dma_init::alloc`.
+        unsafe {
+            core::ptr::write_bytes(qdma.virt() as *mut u8, 0, qdma.len() as usize);
+        }
+        // SAFETY: invariant I53: `qdma` is a page-aligned DMA buffer of at
+        // least `layout.total` bytes; established by `dma_init::alloc`.
+        let vq = unsafe {
+            arch::current::SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0)
+        };
+        let mut vq = match vq {
+            Ok(vq) => vq,
+            Err(e) => {
+                fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, Some(qdma));
+                return Err(e);
+            }
+        };
+        if let Err(e) = plan.apply(&mut vq) {
+            drop(vq);
+            fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, Some(qdma));
+            return Err(e);
+        }
+        vq.init();
+        qdma.sync_for_device::<Arch>();
+        crate::virtio_mmio_init::set_queue_addrs(
+            base,
+            qdma.device().as_u64() + layout.desc_off as u64,
+            qdma.device().as_u64() + layout.avail_off as u64,
+            qdma.device().as_u64() + layout.used_off as u64,
+        );
+        crate::virtio_mmio_init::set_queue_ready(base, true);
+        if !crate::virtio_mmio_init::queue_ready(base) {
+            fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, Some(qdma));
+            return Err(VirtioError::BadQueue);
+        }
+        vqs[qi] = Some(Vq {
+            vq,
+            qdma,
+            doorbell,
+            notify32: true,
+            inflight: [FREE; MAX_QSIZE],
+        });
+        qi += 1;
+    }
+
+    let Ok(uninit) = TryBox::<Blk>::try_new_uninit() else {
+        fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, None);
+        return Err(VirtioError::NoMemory);
+    };
+    let st = crate::virtio_mmio_init::status(base);
+    crate::virtio_mmio_init::set_status(base, st | STATUS_DRIVER_OK);
+
+    // Release: pairs with the Acquire load in `irq::blk_top`.
+    blk.isr
+        .store(crate::virtio_mmio_init::isr_va(base), Ordering::Release);
+    // Release: pairs with the Acquire load in `needs_reset`.
+    blk.common.store(base, Ordering::Release);
+    // Release: pairs with the Acquire loads in `is_mmio` and `needs_reset`.
+    blk.mmio.store(true, Ordering::Release);
+    // Release: pairs with the Acquire loads in `build`, `features` and `read_only`.
+    blk.features.store(feat, Ordering::Release);
+    // Release: pairs with the Acquire load in `logical_block_size`.
+    blk.blk_size.store(blk_size, Ordering::Release);
+    // Release: pairs with the Acquire load in `capacity_sectors`.
+    blk.cap.store(capacity, Ordering::Release);
+    // Release: pairs with the Acquire load in `num_queues`.
+    blk.nq.store(nq as u8, Ordering::Release);
+    // Release: pairs with the Acquire load in `state`.
+    blk.state
+        .store(DeviceState::Ready.as_u8(), Ordering::Release);
+
+    let boxed = uninit.write(Blk {
+        q: Queue::new(),
+        vqs,
+        nq: nq as u8,
+        slots,
+        stride: plan.stride,
+        slot_used: [false; N_SLOTS],
+        slot_req: [None; N_SLOTS],
+        features: feat,
+        blk_size,
+        running: false,
+    });
+    *blk.st.lock() = Some(boxed);
+    let mut i = 0usize;
+    while i < MAX_VQ {
+        let v = if i < nvec {
+            match irq_init::vector(vecs[i]) {
+                Some(hw) => QUEUE_VEC_LIVE | (u64::from(vcpus[i]) << 8) | u64::from(hw),
+                None => 0,
+            }
+        } else {
+            0
+        };
+        // Release: pairs with the Acquire load in `irq::queue_vector`.
+        blk.queue_vecs[i].store(v, Ordering::Release);
+        i += 1;
+    }
+    // Release: pairs with the Acquire load in `live`; last, so it publishes the setup above.
+    blk.live.store(true, Ordering::Release);
+    if let Err(e) = register(blk, inst) {
+        crate::klog!(
+            vibeos::log::Level::Error,
+            "vibeOS: blk: {} not registered: {}",
+            blk.name(),
+            e.as_str()
+        );
+    }
+    let mq = if feat & F_MQ != 0 { "mq" } else { "sq" };
+    // Acquire: pairs with nothing; the topology stores above are this thread's own.
     crate::marker!(
         "vibeOS: virtio: blk {} {} qsz={q0sz} nq={nq} {mq} feat={:#x} bs={blk_size} topo={}/{} discard={}",
         blk.name(),
@@ -622,6 +904,9 @@ impl Driver for BlkDriver {
     /// queue vector gets a reference to it; on a failure it holds no queue
     /// state and every DMA buffer was freed by `setup`.
     fn probe(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
+        if crate::virtio_mmio_init::is_mmio(dev) {
+            return self.probe_mmio(dev);
+        }
         let caps = virtio::read_modern_caps(&mut pci_init::HwCfg, dev.addr);
         if !caps.is_complete() || caps.device.is_none() {
             crate::marker!("vibeOS: virtio: blk missing modern caps");
@@ -649,6 +934,30 @@ impl Driver for BlkDriver {
     /// 7; ROADMAP §20.9), so it keeps its BARs' claims and mappings: they
     /// stay reserved, and live for the device it leaves running.
     fn remove(&self, _dev: &DevRef) {}
+}
+
+impl BlkDriver {
+    fn probe_mmio(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
+        let mut name = [0u8; 4];
+        let Some(name) = free_name(&mut name) else {
+            return Err(ProbeError::Busy);
+        };
+        dev_init::claim_mem_bars(dev)?;
+        let inst = vibeos::dev::instance(VirtioBlk::new(dev.clone(), name))?;
+        let blk = inst.downcast_ref::<VirtioBlk>().ok_or(ProbeError::Failed)?;
+        match setup_mmio(blk, &inst, dev) {
+            Ok(()) => Ok(Some(inst)),
+            Err(VirtioError::NoMemory) => {
+                dev_init::release_bars(dev);
+                Err(ProbeError::NoMemory)
+            }
+            Err(e) => {
+                crate::marker!("vibeOS: virtio: blk probe {}", e.as_str());
+                dev_init::release_bars(dev);
+                Err(ProbeError::Failed)
+            }
+        }
+    }
 }
 
 /// The rest of [`BlkDriver::probe`], once `dev`'s BARs are claimed and
@@ -691,26 +1000,41 @@ impl VirtioBlk {
     }
 
     pub fn live(&self) -> bool {
+        // Acquire: pairs with the Release store at the end of `setup`.
         self.live.load(Ordering::Acquire)
     }
 
+    #[cfg_attr(
+        not(feature = "kernel_tests"),
+        expect(dead_code, reason = "in-guest virtio-mmio F047 test")
+    )]
+    pub fn is_mmio(&self) -> bool {
+        // Acquire: pairs with the Release store in `setup_mmio`.
+        self.mmio.load(Ordering::Acquire)
+    }
+
     pub fn state(&self) -> DeviceState {
+        // Acquire: pairs with the Release stores in `setup` and `fail_rest`.
         DeviceState::from_u8(self.state.load(Ordering::Acquire))
     }
 
     pub fn logical_block_size(&self) -> u32 {
+        // Acquire: pairs with the Release store in `setup`.
         self.blk_size.load(Ordering::Acquire)
     }
 
     pub fn capacity_sectors(&self) -> u64 {
+        // Acquire: pairs with the Release store in `setup`.
         self.cap.load(Ordering::Acquire)
     }
 
     pub fn num_queues(&self) -> u8 {
+        // Acquire: pairs with the Release store in `setup`.
         self.nq.load(Ordering::Acquire)
     }
 
     pub fn io_reqs(&self) -> u64 {
+        // Relaxed: a count; pairs with nothing.
         self.io_reqs.load(Ordering::Relaxed)
     }
 
@@ -718,6 +1042,7 @@ impl VirtioBlk {
     /// `S_UNSUPP` (test-only).
     #[cfg(feature = "kernel_tests")]
     pub fn inject_unsupp(&self, n: u32) {
+        // Release: pairs with the AcqRel update in `injected`.
         self.inject_unsupp.store(n, Ordering::Release);
     }
 
@@ -776,6 +1101,7 @@ impl VirtioBlk {
             }
         }
         // After the range checks, so a bad range is still `Inval`.
+        // Acquire: pairs with the Release store in `setup`.
         refuse_read_only(self.features.load(Ordering::Acquire), op)?;
         Ok(req)
     }
@@ -904,11 +1230,20 @@ impl VirtioBlk {
 )]
 impl VirtioBlk {
     /// The PCI function this instance drives.
+    #[cfg_attr(
+        all(target_arch = "aarch64", not(feature = "kernel_tests")),
+        expect(dead_code, reason = "boot-CPU S7; unused on this path")
+    )]
     pub fn dev(&self) -> &DevRef {
         &self.dev
     }
 
+    #[cfg_attr(
+        all(target_arch = "aarch64", not(feature = "kernel_tests")),
+        expect(dead_code, reason = "boot-CPU S7; unused on this path")
+    )]
     pub fn features(&self) -> u64 {
+        // Acquire: pairs with the Release store in `setup`.
         self.features.load(Ordering::Acquire)
     }
 
@@ -926,22 +1261,50 @@ impl VirtioBlk {
 
     /// Runs of this disk's top half.
     pub fn top_hits(&self) -> u32 {
+        // Acquire: pairs with the SeqCst add in `irq::blk_top`.
         self.top_hits.load(Ordering::Acquire)
     }
 
     /// Runs of this disk's bottom half.
     pub fn thread_hits(&self) -> u32 {
+        // Acquire: pairs with the SeqCst add in `irq::blk_work`.
         self.thread_hits.load(Ordering::Acquire)
     }
 
     /// Requests this disk's device completed.
     pub fn completions(&self) -> u32 {
+        // Acquire: pairs with the SeqCst add in `harvest`.
         self.completions.load(Ordering::Acquire)
+    }
+
+    /// Used-ring index the device last published on queue 0.
+    #[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+    pub fn used_idx0(&self) -> u16 {
+        let g = self.st.lock();
+        g.as_deref()
+            .and_then(|b| b.vqs.first().and_then(|v| v.as_ref()))
+            .map(|v| v.vq.used_idx())
+            .unwrap_or(0)
+    }
+
+    /// virtio-mmio InterruptStatus, or 0 on PCI.
+    #[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+    pub fn mmio_isr(&self) -> u32 {
+        if !self.is_mmio() {
+            return 0;
+        }
+        // Acquire: pairs with the Release store of `common` in `setup_mmio`.
+        let base = self.common.load(Ordering::Acquire);
+        if base == 0 {
+            return 0;
+        }
+        crate::virtio_mmio_init::isr_bits(base)
     }
 
     /// `Flush` requests dispatched, emulated-`Fua` ones and those finished
     /// locally without `F_FLUSH` included.
     pub fn flushes(&self) -> u64 {
+        // Relaxed: a count; pairs with nothing.
         self.flushes.load(Ordering::Relaxed)
     }
 
@@ -996,6 +1359,7 @@ impl BlockDevice for VblkDev {
         self.blk()?.discard(lba, nsectors)
     }
     fn read_only(&self) -> bool {
+        // Acquire: pairs with the Release store in `setup`.
         self.blk()
             .is_ok_and(|b| b.features.load(Ordering::Acquire) & F_RO != 0)
     }
@@ -1066,6 +1430,18 @@ pub(crate) fn with_disk<R>(name: &[u8], f: impl FnOnce(&VirtioBlk) -> R) -> Opti
     let mut f = Some(f);
     find_disk(|b| {
         if b.name().as_bytes() != name {
+            return None;
+        }
+        f.take().map(|f| f(b))
+    })
+}
+
+/// First live virtio-mmio disk, if any.
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub(crate) fn with_mmio_disk<R>(f: impl FnOnce(&VirtioBlk) -> R) -> Option<R> {
+    let mut f = Some(f);
+    find_disk(|b| {
+        if !b.is_mmio() || !b.live() {
             return None;
         }
         f.take().map(|f| f(b))

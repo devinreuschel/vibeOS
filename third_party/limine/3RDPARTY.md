@@ -19,18 +19,18 @@ that Limine is distributed under:
 A non-binding, informal summary of all projects Limine depends on, and the
 licenses used by said projects, in SPDX format, is as follows:
 
-- [cc-runtime](https://codeberg.org/OSDev/cc-runtime)
+- [cc-runtime](https://github.com/osdev0/cc-runtime)
 (Apache-2.0 WITH LLVM-exception) is used to provide runtime libgcc-like
 routines.
 
-- [0BSD Freestanding C Headers](https://codeberg.org/OSDev/freestnd-c-hdrs-0bsd)
+- [Freestanding C Headers](https://github.com/osdev0/freestanding-c-hdrs)
 (0BSD) provide GCC and Clang compatible freestanding C headers.
 
-- [Limine Boot Protocol](https://codeberg.org/Limine/limine-protocol)
+- [Limine Boot Protocol](https://github.com/Limine-Bootloader/limine-protocol)
 (0BSD) has the C/C++ header and the specification text of the Limine Boot
 Protocol.
 
-- [PicoEFI](https://codeberg.org/PicoEFI/PicoEFI) (multiple licenses, see list
+- [PicoEFI](https://github.com/PicoEFI/PicoEFI) (multiple licenses, see list
 below) provides headers and build-time support for UEFI.
     - BSD-2-Clause
     - BSD-2-Clause-Patent
@@ -49,17 +49,17 @@ below) provides headers and build-time support for UEFI.
     in case of installed copies, assuming the file has not been otherwise
     removed by the packager.
 
-- [tinf](https://github.com/jibsen/tinf) (Zlib) is used in early x86 BIOS
-stages for GZIP decompression of stage2.
-
-- [Flanterm](https://codeberg.org/Mintsuki/Flanterm) (BSD-2-Clause) is used for
+- [Flanterm](https://github.com/Mintsuki/Flanterm) (BSD-2-Clause) is used for
 text related screen drawing.
 
-- [stb_image](https://github.com/nothings/stb/blob/master/stb_image.h) (MIT) is
+- [stb_image (hardened)](https://github.com/Mintsuki/stbi-hardened) (MIT) is
 used for wallpaper image loading.
 
-- [libfdt](https://codeberg.org/OSDev/libfdt) (BSD-2-Clause) is used for
+- [libfdt](https://github.com/osdev0/libfdt) (BSD-2-Clause) is used for
 manipulating Flat Device Trees.
+
+- [pdgzip](https://github.com/iczelia/pdgzip) (0BSD) is used to provide the
+transparent gzip decompression layer for loaded files.
 
 Note that some of these projects, or parts of them, are provided under
 dual-licensing, in which case, in the above list, the only license mentioned is

@@ -1,0 +1,12 @@
+AArch64 vibeos-spin-mutex-relaxed
+{
+[locked]=1;
+0:X1=locked; 0:X2=data;
+1:X1=locked; 1:X2=data;
+}
+ P0              | P1              ;
+ MOV W0,#1       | MOV W4,#0       ;
+ STR W0,[X2]     | MOV W0,#1       ;
+ STRB WZR,[X1]   | CASB W4,W0,[X1] ;
+                 | LDR W6,[X2]     ;
+exists (1:X4=0 /\ 1:X6=0)

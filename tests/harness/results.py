@@ -24,7 +24,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from tests.harness.harness import QemuConfig, effective_accel_name
+from tests.harness.harness import QemuConfig, effective_accel_name, guest_cpu
 
 SCHEMA = 1
 REPO = Path(__file__).resolve().parents[2]
@@ -36,6 +36,15 @@ KTEST_PREFIX = "vibeOS: ktest: "
 KTEST_FAIL = "vibeOS: ktest: FAIL"
 
 _KTEST_LINE = re.compile(r"(ok|skip|FAIL) ([A-Za-z0-9_.-]+)")
+# `weak_order_probe`'s counts (ROADMAP §11.7): the `weak_order` section, one
+# row per boot that printed them, which the job summary and, through the
+# results artifact, the CI-history record carry.
+WEAK_ORDER = "weak_order"
+WEAK_ORDER_FIELDS = ("mp_iters", "mp_weak", "lb_iters", "lb_weak")
+_WEAK_ORDER_LINE = re.compile(
+    r"vibeOS: ktest: info weak_order_probe: "
+    r"mp iters=(\d+) weak=(\d+) lb iters=(\d+) weak=(\d+)"
+)
 _MISSING = re.compile(r"missing (?:marker )?['\"]([^'\"]*)['\"]")
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -112,7 +121,7 @@ class Results:
                 "argv": list(argv),
                 "smp": cfg.smp,
                 "accel": effective_accel_name(cfg),
-                "cpu": cfg.cpu,
+                "cpu": guest_cpu(cfg),
                 "mem": cfg.mem,
                 "exit": exit_code,
             }
@@ -236,6 +245,27 @@ def failure_line(message: str, lines: Iterable[str] = ()) -> str:
     return message.split("\n", 1)[0]
 
 
+def weak_order_rows(lines: Iterable[str]) -> list[dict[str, int]]:
+    """One `weak_order` row per `weak_order_probe` info line in `lines`."""
+    rows = []
+    for line in lines:
+        m = _WEAK_ORDER_LINE.search(line)
+        if m is not None:
+            rows.append(dict(zip(WEAK_ORDER_FIELDS, map(int, m.groups()), strict=True)))
+    return rows
+
+
+def _weak_order_table(rows: list[tuple[str, dict[str, Any]]]) -> str:
+    out = [
+        "\nWeak-order probe (ROADMAP §11.7):\n",
+        "| tier | MP iterations | MP weak | LB iterations | LB weak |",
+        "|---|---|---|---|---|",
+    ]
+    for tier, r in rows:
+        out.append(f"| `{tier}` | " + " | ".join(str(r.get(f)) for f in WEAK_ORDER_FIELDS) + " |")
+    return "\n".join(out) + "\n"
+
+
 def missing_marker(message: str) -> str | None:
     """The marker a harness error names as missing, if any."""
     m = _MISSING.search(message)
@@ -252,6 +282,7 @@ def summary(directory: Path | str) -> str:
         "|---|---|---|---|---|---|",
     ]
     retries: list[str] = []
+    weak: list[tuple[str, dict[str, Any]]] = []
     for p in files:
         try:
             d = json.loads(p.read_text(encoding="utf-8"))
@@ -270,9 +301,14 @@ def summary(directory: Path | str) -> str:
         for r in rs:
             tier = str(d.get("tier", p.stem))
             retries.append(_retry_line(tier, str(r.get("label")), str(r.get("failure_line", ""))))
+        rows = d.get(WEAK_ORDER)
+        if isinstance(rows, list):
+            weak += [(str(d.get("tier", p.stem)), w) for w in rows if isinstance(w, dict)]
     text = "\n".join(out) + "\n"
     if retries:
         text += "\nRetries:\n\n" + "\n".join(retries) + "\n"
+    if weak:
+        text += _weak_order_table(weak)
     return text
 
 

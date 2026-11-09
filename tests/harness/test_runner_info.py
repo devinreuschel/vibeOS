@@ -100,6 +100,41 @@ class Summary(unittest.TestCase):
         self.assertIn("| not checked |", ri.summary({"cpu_model": "x", "invtsc": None}))
 
 
+class Nesting(unittest.TestCase):
+    """ROADMAP §11.7: the KVM leg's runner record names the probed nesting."""
+
+    def write(self, d: Path, body: object) -> Path:
+        p = d / "nesting.json"
+        p.write_text(json.dumps(body), encoding="utf-8")
+        return p
+
+    def test_each_value(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            for v in ("vmx", "svm", "none"):
+                p = self.write(Path(d), {"schema": 1, "nesting": v})
+                self.assertEqual(ri.probed_nesting(p), v)
+
+    def test_missing_or_bad_is_none(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(ri.probed_nesting(Path(d) / "absent.json"))
+            bodies: list[object] = [{"schema": 2, "nesting": "vmx"},
+                                    {"schema": 1, "nesting": "kvm"}, []]
+            for body in bodies:
+                self.assertIsNone(ri.probed_nesting(self.write(Path(d), body)))
+
+    def test_collect_and_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            p = self.write(tmp, {"schema": 1, "nesting": "svm"})
+            info = ri.collect(EPYC, tmp / "results", p)
+            self.assertEqual(info["nesting"], "svm")
+            self.assertIn("| Nesting |", ri.summary(info))
+            self.assertIn("| svm |", ri.summary(info))
+            info = ri.collect(EPYC, tmp / "results", tmp / "absent.json")
+            self.assertNotIn("nesting", info)
+            self.assertNotIn("Nesting", ri.summary(info))
+
+
 class Main(unittest.TestCase):
     def test_writes_runner_json_and_summary(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -109,6 +144,7 @@ class Main(unittest.TestCase):
             step = tmp / "summary.md"
             with (
                 mock.patch.object(ri, "RESULTS_DIR", tmp / "results"),
+                mock.patch.object(ri, "NESTING", tmp / "nesting.json"),
                 mock.patch.object(ri, "OUT", out),
                 mock.patch.object(ri, "_read_cpuinfo", return_value=XEON),
                 mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(step)}),

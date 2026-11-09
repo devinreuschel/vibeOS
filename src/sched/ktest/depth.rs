@@ -26,9 +26,11 @@ pub(crate) fn exit_depth(tid: u32) -> Option<usize> {
     DEPTH.lock().recent(tid).map(|d| d.used)
 }
 
-/// Scan every live thread's stack, then print one line per stack size and
-/// the report line, outside the lock (TESTING §8.2). Runs just before
-/// `vibeOS: ktest: end`.
+/// Scan every live thread's stack into the table the exit scans already
+/// fill, then print one line per stack size and the report line, outside
+/// the lock (TESTING §8.2). Runs just before `vibeOS: ktest: end`. An
+/// exited thread stays in the table, so its use can be the deepest of its
+/// size.
 pub(crate) fn report() {
     thread_init::testing::scan_live_stacks(record);
     let mut sizes: [Option<Deepest>; SIZES] = [None; SIZES];

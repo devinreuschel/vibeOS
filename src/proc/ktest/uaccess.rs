@@ -1,22 +1,29 @@
 //! In-guest tests of the syscall user accessors (ROADMAP §10.6, §9.2).
+#![cfg(target_arch = "x86_64")]
 
+#[cfg(target_arch = "x86_64")]
 use vibeos::proc::{wexitstatus, wifexited};
 
 use super::exec::unlink_quiet;
 use crate::ktest::Outcome;
-use crate::ktest::user::{self, Image, Layout, user_code};
+#[cfg(target_arch = "x86_64")]
+use crate::ktest::user::Layout;
+use crate::ktest::user::{self, Image, x86_user_code};
 
 /// The file [`test_uaccess_syscall_copies`]' program writes, as its
 /// `.asciz` names it.
+#[cfg(target_arch = "x86_64")]
 const COPIES: &str = "/tmp/uaccess_syscall_copies";
 
 /// The file [`test_uaccess_readonly_efault`]'s program writes, as its
 /// `.asciz` names it.
+#[cfg(target_arch = "x86_64")]
 const READONLY: &str = "/tmp/uaccess_readonly_efault";
 
 /// Run `img`, then unlink the `/tmp` file `path` it wrote, whatever its
 /// status, so the run gives back the file's page: its exit status, or why
 /// it has none.
+#[cfg(target_arch = "x86_64")]
 fn run_then_unlink(img: &Image, argv: &[&str], path: &str) -> Result<u32, Outcome> {
     let st = user::run(img, argv);
     let unlinked = unlink_quiet(path);
@@ -32,7 +39,8 @@ fn run_then_unlink(img: &Image, argv: &[&str], path: &str) -> Result<u32, Outcom
 // forked child exits, `wait4` with the status pointer on the unmapped page
 // must return -EFAULT, and the next `wait4` -ECHILD. Exits with the failing
 // step's number, else 0.
-user_code!(
+#[cfg(target_arch = "x86_64")]
+x86_user_code!(
     UACCESS_SHORT,
     "
     lea rbx, [rip]
@@ -128,6 +136,7 @@ user_code!(
     "
 );
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_uaccess_syscall_copies() -> Outcome {
     let layout = Layout {
         vaddr: 0x4000_0000,
@@ -163,7 +172,8 @@ pub(crate) fn test_uaccess_syscall_copies() -> Outcome {
 // it after a forked child exits, and `read` into the kernel half must each
 // return -EFAULT, and the file, read onto the stack, must still match the
 // text. Exits with the failing step's number, else 0.
-user_code!(
+#[cfg(target_arch = "x86_64")]
+x86_user_code!(
     UACCESS_RO,
     "
     lea rbx, [rip]
@@ -274,6 +284,7 @@ user_code!(
     "
 );
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_uaccess_readonly_efault() -> Outcome {
     let img = Image::Code(UACCESS_RO, user::DEFAULT);
     let st = match run_then_unlink(&img, &["uaccess_ro"], READONLY) {

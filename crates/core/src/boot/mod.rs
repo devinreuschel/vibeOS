@@ -1,9 +1,14 @@
 //! Boot inputs, portable half: the kernel command line ([`cmdline`]) and
 //! QEMU's fw_cfg encodings, which the kernel half (`boot::fw_cfg_init`)
-//! drives through ports. Constants and layouts are those of QEMU's
-//! `docs/specs/fw_cfg.rst` (DESIGN §1.5: cited, no text copied).
+//! drives through ports on x86_64 and MMIO on aarch64. Constants and
+//! layouts are those of QEMU's `docs/specs/fw_cfg.rst` (DESIGN §1.5:
+//! cited, no text copied).
 
 pub mod cmdline;
+
+/// The Limine base revision every port requests (BOOT.md §3.2): 6, the
+/// lowest the pinned Limine accepts on aarch64. `marker::LIMINE_OK` names it.
+pub const LIMINE_BASE_REVISION: u64 = 6;
 
 /// Selector key of the `QEMU` signature.
 pub const FW_CFG_SIGNATURE: u16 = 0x0000;

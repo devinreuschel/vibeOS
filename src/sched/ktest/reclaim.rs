@@ -30,17 +30,28 @@ pub(crate) fn dead_list_batched_rounds() -> Outcome {
     if !crate::ktest::quiesce() {
         return Outcome::Fail("threads did not settle");
     }
-    let mut stacks: [Option<kva_init::GuardedStack>; PARKED_STACKS] =
-        [const { None }; PARKED_STACKS];
-    for slot in stacks.iter_mut() {
-        match kva_init::alloc_guarded_stack(DEFAULT_STACK_PAGES) {
-            Ok(s) => *slot = Some(s),
+    // The list is on the heap: 64 `GuardedStack` handles do not fit the
+    // 16 KiB stack aarch64 gives the registry (ROADMAP §11.3).
+    let Ok(mut stacks) =
+        vibeos::kalloc::TryVec::<Option<kva_init::GuardedStack>>::try_with_capacity(PARKED_STACKS)
+    else {
+        return Outcome::Fail("no memory for the stack list");
+    };
+    for _ in 0..PARKED_STACKS {
+        let s = match kva_init::alloc_guarded_stack(DEFAULT_STACK_PAGES) {
+            Ok(s) => s,
             Err(_) => {
                 for s in stacks.iter_mut().filter_map(Option::take) {
                     kva_init::free_stack(s);
                 }
                 return Outcome::Fail("stack alloc failed");
             }
+        };
+        if stacks.try_push(Some(s)).is_err() {
+            for s in stacks.iter_mut().filter_map(Option::take) {
+                kva_init::free_stack(s);
+            }
+            return Outcome::Fail("stack list push");
         }
     }
     let r0 = crate::irq::ktest::rounds_sent();

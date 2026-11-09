@@ -49,6 +49,7 @@ PARSERS: tuple[tuple[str, str, str], ...] = (
     ("console/kbd.rs", "fn", "Decoder::feed"),
     ("fs/vibefs/mod.rs", "allow", "§14.8"),
     ("boot/cmdline.rs", "inner", ""),
+    ("machine/fdt.rs", "inner", ""),
     ("boot/mod.rs", "fn", "parse_fw_cfg_dir_count"),
     ("boot/mod.rs", "fn", "parse_fw_cfg_dir_entry"),
     ("boot/mod.rs", "fn", "fw_cfg_dma_access"),

@@ -95,6 +95,7 @@ GONE: list[tuple[str, str]] = [
     ("stash_evict", "the block layer keeps only the orders DESIGN §10.2 names"),
     ("writeback_all", "the block layer keeps only the orders DESIGN §10.2 names"),
     ("set_hhdm_offset", "a `Buddy::new` argument replaces"),
+    ("HHDM_BASE", "the physmap base is the HHDM offset Limine reports"),
     ("from_phys", "`DmaBuffer` and `GuardedStack` are move-only"),
     ("DEFERRED", "every switch tail empties the"),
     ("MAX_DEFERRED", "every switch tail empties the"),
@@ -316,6 +317,11 @@ GONE: list[tuple[str, str]] = [
     ("control_regs", "DESIGN §2.5's rule that nothing is silently swallowed"),
     ("drain_deferred", "every switch tail empties the"),
     ("ready_head", "dead scheduler and bring-up state deleted"),
+    ("PHYSMAP_CAP", "one physmap policy on both architectures"),
+    ("physmap_extent", "one physmap policy on both architectures"),
+    ("patch_physmap_uc", "one physmap policy on both architectures"),
+    ("ensure_physmap_wb", "one physmap policy on both architectures"),
+    ("src/acpi/acpi_init.rs: fn map_gap", "one physmap policy on both architectures"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

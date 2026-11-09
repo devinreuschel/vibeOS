@@ -55,6 +55,26 @@ impl From<RankError> for crate::kerror::KError {
     }
 }
 
+/// Why DESIGN §7.9's calling contract refuses a TLB-maintenance call here
+/// ([`Held::check_cross_cpu_wait`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitRefused {
+    /// Inside a lockless section: an NMI, `#MC`, or CPL-0 `#DB` body, or
+    /// serviced shootdown or call-function work.
+    Lockless,
+    /// Inside the log path's emit, whose waiters service no IPIs.
+    LogEmit,
+}
+
+impl core::fmt::Display for WaitRefused {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            WaitRefused::Lockless => f.write_str("TLB maintenance in a lockless section"),
+            WaitRefused::LogEmit => f.write_str("TLB maintenance inside the log emit"),
+        }
+    }
+}
+
 impl core::fmt::Display for RankError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match *self {
@@ -182,6 +202,22 @@ impl Held {
         }
     }
 
+    /// DESIGN §7.9's calling contract for the TLB-maintenance seam: on
+    /// x86_64 an invalidation may wait for every online CPU with IF=0, so
+    /// it is called only where §2.9 rule 2 allows a cross-CPU wait: not in
+    /// a lockless section and not inside the log path's emit. Holding a
+    /// ranked lock is allowed. Both ports check it, although aarch64's
+    /// broadcast waits for no peer.
+    pub const fn check_cross_cpu_wait(self, in_log_emit: bool) -> Result<(), WaitRefused> {
+        if self.lockless_depth() != 0 {
+            Err(WaitRefused::Lockless)
+        } else if in_log_emit {
+            Err(WaitRefused::LogEmit)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Raise the lockless depth. Saturates.
     pub const fn enter_lockless(self) -> Held {
         if self.lockless_depth() as u64 == DEPTH_MAX {
@@ -214,6 +250,25 @@ impl Held {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cross_cpu_wait_refused_in_lockless_and_log_emit() {
+        let none = Held::EMPTY;
+        assert_eq!(none.check_cross_cpu_wait(false), Ok(()));
+        // A ranked lock does not refuse it; the x86 wait polls inbound work.
+        let locked = none.acquire(RANK_BUDDY).unwrap();
+        assert_eq!(locked.check_cross_cpu_wait(false), Ok(()));
+        let lockless = none.enter_lockless();
+        assert_eq!(
+            lockless.check_cross_cpu_wait(false),
+            Err(WaitRefused::Lockless)
+        );
+        assert_eq!(
+            lockless.leave_lockless().check_cross_cpu_wait(false),
+            Ok(())
+        );
+        assert_eq!(none.check_cross_cpu_wait(true), Err(WaitRefused::LogEmit));
+    }
 
     #[test]
     fn ranks_are_the_documented_order() {

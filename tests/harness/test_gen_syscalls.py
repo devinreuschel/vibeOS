@@ -21,6 +21,7 @@ from scripts.gen_syscalls import (
     ROOT,
     SYSCALL_MD,
     TABLE,
+    USER_AARCH64_OUT,
     USER_ERRNO_OUT,
     USER_OUT,
     X86_OUT,
@@ -87,6 +88,12 @@ errors = ["EFAULT"]
 
 DOC = """\
 # Doc
+
+regs
+
+<!-- gen_syscalls: begin aarch64-registers -->
+old registers
+<!-- gen_syscalls: end aarch64-registers -->
 
 before
 
@@ -161,7 +168,10 @@ class GenerateTest(unittest.TestCase):
 
     def test_emits_every_output(self) -> None:
         self.assertEqual(set(self.out), {e.path for e in EMITTERS})
-        self.assertEqual(set(self.out), {KERNEL_OUT, X86_OUT, USER_OUT, SYSCALL_MD, USER_ERRNO_OUT})
+        self.assertEqual(
+            set(self.out),
+            {KERNEL_OUT, X86_OUT, USER_OUT, USER_AARCH64_OUT, SYSCALL_MD, USER_ERRNO_OUT},
+        )
         kernel = self.out[KERNEL_OUT]
         x86 = self.out[X86_OUT]
         self.assertTrue(kernel.startswith("// @generated"))
@@ -195,7 +205,10 @@ class GenerateTest(unittest.TestCase):
         md = self.out[SYSCALL_MD]
         begin = "<!-- gen_syscalls: begin syscall-table -->"
         end = "<!-- gen_syscalls: end syscall-table -->"
-        self.assertTrue(md.startswith("# Doc\n\nbefore\n\n" + begin + "\n"))
+        self.assertTrue(md.startswith("# Doc\n\nregs\n\n"), md)
+        self.assertIn("<!-- gen_syscalls: end aarch64-registers -->\n\nbefore\n\n" + begin + "\n",
+                      md)
+        self.assertNotIn("old registers", md)
         self.assertIn(end + "\n\nafter\n\n<!-- gen_syscalls: begin errno-table -->\n", md)
         self.assertTrue(md.endswith("<!-- gen_syscalls: end errno-table -->\n\nend\n"))
         self.assertNotIn("old table", md)
@@ -203,6 +216,34 @@ class GenerateTest(unittest.TestCase):
         # Generating over its own output changes nothing.
         (self.root / SYSCALL_MD).write_text(md, encoding="utf-8")
         self.assertEqual(generate(FIXTURE, self.root)[SYSCALL_MD], md)
+
+    def test_aarch64_register_block(self) -> None:
+        md = self.out[SYSCALL_MD]
+        block = md.split("<!-- gen_syscalls: begin aarch64-registers -->\n")[1].split(
+            "<!-- gen_syscalls: end aarch64-registers -->")[0]
+        rows = [line for line in block.splitlines() if line.startswith("| ")]
+        self.assertEqual(rows[0], "| Role | Register | Notes |")
+        self.assertEqual(rows[1], "| trap | `svc #0` | from EL0 |")
+        self.assertTrue(rows[2].startswith("| number | `x8` | the low 32 bits, read as unsigned"))
+        self.assertIn("(`NrRule::Low32`)", rows[2])
+        self.assertEqual(
+            [r.split(" | ")[1] for r in rows[3:9]], [f"`x{i}`" for i in range(6)]
+        )
+        self.assertEqual(rows[9].split(" | ")[:2], ["| return", "`x0`"])
+        # The kernel reads the registers the block documents: the aarch64 table's rule, and
+        # the register constants `trap::Abi` and `UserFrame::svc_entry` index.
+        kernel = self.out[KERNEL_OUT]
+        self.assertIn(f"NrTable::new(NrRule::{gen_syscalls.AARCH64.rule}, &SLOTS)", kernel)
+        self.assertIn("    pub const NR_REG: usize = 8;\n", kernel)
+        self.assertIn("    pub const ARG_REGS: [usize; 6] = [0, 1, 2, 3, 4, 5];\n", kernel)
+        self.assertIn("    pub const RET_REG: usize = 0;\n", kernel)
+
+    def test_reg_index(self) -> None:
+        self.assertEqual(gen_syscalls.reg_index("x8"), 8)
+        self.assertEqual(gen_syscalls.reg_index("x30"), 30)
+        for bad in ("x31", "w0", "x", "sp"):
+            with self.assertRaises(TableError):
+                gen_syscalls.reg_index(bad)
 
     def test_missing_markers_is_an_error(self) -> None:
         for doc in (
@@ -538,7 +579,7 @@ class ValidationTest(unittest.TestCase):
 
     def test_script_docstring_names_its_outputs(self) -> None:
         doc = gen_syscalls.__doc__ or ""
-        for p in (KERNEL_OUT, X86_OUT, USER_OUT, USER_ERRNO_OUT, KERROR):
+        for p in (KERNEL_OUT, X86_OUT, USER_OUT, USER_AARCH64_OUT, USER_ERRNO_OUT, KERROR):
             self.assertIn(str(p), doc)
         self.assertTrue(re.search(r"--check", doc))
 

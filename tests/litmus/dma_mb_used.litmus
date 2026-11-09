@@ -1,0 +1,14 @@
+AArch64 vibeos-dma-mb-used
+(* get_used: the used_event store, DMB OSH, then the used index reload.
+   The device does the same with the index and the event. Both loads
+   reading the old value is forbidden. *)
+{
+0:X1=used_event; 0:X2=used_idx;
+1:X1=used_event; 1:X2=used_idx;
+}
+ P0              | P1              ;
+ MOV W0,#1       | MOV W0,#1       ;
+ STR W0,[X1]     | STR W0,[X2]     ;
+ DMB OSH         | DMB OSH         ;
+ LDR W2,[X2]     | LDR W2,[X1]     ;
+exists (0:X2=0 /\ 1:X2=0)

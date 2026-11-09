@@ -5,7 +5,8 @@
 //! half is the upper 256 slots of the root. `PageFlags` keeps this format's
 //! bit values, so its encoding here is the identity on the flag bits.
 
-use crate::paging::{PageFlags, PhysAddr, VirtAddr};
+use crate::paging::{CoreFormat, Desc, PageFlags, PhysAddr, VirtAddr};
+use crate::proc::elf::EM_X86_64;
 
 /// Levels of the walk, the root being level 4.
 pub const LEVELS: u8 = 4;
@@ -19,6 +20,25 @@ pub const KERNEL_PML4_FIRST: usize = 256;
 /// Physical-address mask for a PTE. Bits 12..=51 are the frame address on
 /// current hardware; bits 0..12 and 52..63 are flags / reserved / NX.
 pub const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+/// MAXPHYADDR when CPUID.80000008H is absent: the SDM's 36-bit floor, which
+/// every 64-bit CPU reports at least.
+pub const MAXPHYADDR_FLOOR: u32 = 36;
+
+/// One past the highest physical address a CPU with CPUID.80000008H:EAX[7:0]
+/// equal to `bits` can name, clamped to the 52 bits the PTE address field
+/// holds. A higher address sets a reserved bit in the table walk, so it is
+/// refused rather than mapped. `bits` of 0 is an absent leaf.
+pub const fn phys_limit_for_maxphyaddr(bits: u32) -> u64 {
+    let bits = if bits < MAXPHYADDR_FLOOR {
+        MAXPHYADDR_FLOOR
+    } else if bits > 52 {
+        52
+    } else {
+        bits
+    };
+    1u64 << bits
+}
 
 /// The index `va` selects in a table at `level` (4 is the root, 1 holds
 /// 4 KiB leaves).
@@ -53,6 +73,49 @@ pub const fn is_leaf(entry: u64, level: u8) -> bool {
     level == 1 || entry & PageFlags::HUGE != 0
 }
 
+/// The core tool's view of this format (ROADMAP §10.7): 4-level tables from
+/// CR3's PML4, the kernel half at slot 256 up. `crate::arch` re-exports it.
+pub struct X86_64;
+
+impl CoreFormat for X86_64 {
+    const E_MACHINE: u16 = EM_X86_64;
+    const LEVELS: u8 = LEVELS;
+    const ENTRIES: usize = PTES_PER_TABLE;
+    const KERNEL_ROOT_FIRST: usize = KERNEL_PML4_FIRST;
+    const KERNEL_VA_START: u64 = 0xFFFF_8000_0000_0000;
+    fn index(va: u64, level: u8) -> usize {
+        index(VirtAddr(va), level)
+    }
+    fn desc(entry: u64, level: u8) -> Desc {
+        if entry & PageFlags::PRESENT == 0 {
+            Desc::None
+        } else if is_leaf(entry, level) {
+            Desc::Leaf
+        } else {
+            Desc::Table
+        }
+    }
+    fn entry_phys(entry: u64) -> u64 {
+        pte_phys(entry).as_u64()
+    }
+    fn entry_flags(entry: u64) -> PageFlags {
+        pte_flags(entry)
+    }
+    fn va_ok(va: u64) -> bool {
+        crate::paging::is_canonical(va)
+    }
+    /// Present, writable and user, as the kernel's mapper links a table.
+    fn table_entry(pa: u64) -> u64 {
+        make_pte(
+            PhysAddr(pa),
+            PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER),
+        )
+    }
+    fn leaf_entry(_va: u64, pa: u64, flags: u64) -> u64 {
+        make_pte(PhysAddr(pa), PageFlags(flags))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,6 +141,32 @@ mod tests {
             index(v, 4),
             ((0x0000_1234_5678_9abcu64 >> 39) & 0x1FF) as usize
         );
+    }
+
+    #[test]
+    fn phys_limit_follows_maxphyaddr() {
+        assert_eq!(phys_limit_for_maxphyaddr(40), 1 << 40);
+        assert_eq!(phys_limit_for_maxphyaddr(46), 1 << 46);
+        assert_eq!(phys_limit_for_maxphyaddr(52), 1 << 52);
+        // An absent leaf, and a field above the 52-bit address field.
+        assert_eq!(phys_limit_for_maxphyaddr(0), 1 << 36);
+        assert_eq!(phys_limit_for_maxphyaddr(0xFF), 1 << 52);
+    }
+
+    #[test]
+    fn firmware_addresses_past_maxphyaddr_are_refused() {
+        use crate::physmap::phys_range_below;
+        let limit = phys_limit_for_maxphyaddr(40);
+        // The top page of the 64-bit space, and a garbage HPET-sized base
+        // with a non-canonical bit set, both past 1 TiB.
+        assert!(!phys_range_below(0xFFFF_FFFF_FFFF_F000, 0x1000, limit));
+        assert!(!phys_range_below(0x0100_0000_0000_0000, 0x1000, limit));
+        assert!(!phys_range_below(limit - 0x1000, 0x1001, limit));
+        assert!(phys_range_below(limit - 0x1000, 0x1000, limit));
+        // The LAPIC, I/O APIC and HPET pages sit well under the limit.
+        assert!(phys_range_below(0xFEE0_0000, 0x1000, limit));
+        assert!(phys_range_below(0xFEC0_0000, 0x1000, limit));
+        assert!(phys_range_below(0xFED0_0000, 0x1000, limit));
     }
 
     #[test]

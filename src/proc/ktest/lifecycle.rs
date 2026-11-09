@@ -11,14 +11,13 @@ use vibeos::lock::RANK_DEVICE;
 use vibeos::proc::{
     SIGCONT, SIGKILL, SIGQUIT, SIGSEGV, SIGSTOP, SIGTERM, wait_exited, wait_signaled,
 };
-use vibeos::syscall::SYS_KILL;
 use vibeos::thread::{ThreadId, ThreadState};
 
-use crate::arch::idt::testing as idt_testing;
+use crate::arch::current::syscall_nr::SYS_KILL;
 use crate::console_init::testing as console_testing;
 use crate::file_init;
 use crate::heap_init::fail_after::{self, Scope, Seen};
-use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, user_code, x86_user_code};
 use crate::ktest::{
     Outcome, free_frames, free_frames_owned, sleep_until_s19, spin_until, spin_until_ns,
 };
@@ -34,7 +33,7 @@ fn kill(pid: u32, sig: u32) -> i64 {
 }
 
 // getpid forever.
-user_code!(
+x86_user_code!(
     S19_GETPID_LOOP,
     "
 1:
@@ -262,6 +261,7 @@ pub(crate) fn test_stop_cont_no_lost_wakeup() -> Outcome {
 }
 
 // getpid, then exit(0).
+#[cfg(target_arch = "x86_64")]
 user_code!(
     S19_GETPID_EXIT,
     "
@@ -274,7 +274,22 @@ user_code!(
     "
 );
 
+// getpid (172), then exit(0) (93): the generic syscall numbers.
+#[cfg(target_arch = "aarch64")]
+user_code!(
+    S19_GETPID_EXIT,
+    "
+    mov x8, #172
+    svc #0
+    mov x0, #0
+    mov x8, #93
+    svc #0
+    udf #0
+    "
+);
+
 // A store to 0x5000_0000, which nothing maps.
+#[cfg(target_arch = "x86_64")]
 user_code!(
     S19_FAULT_A,
     "
@@ -284,7 +299,20 @@ user_code!(
     "
 );
 
+// A store to 0x5000_0000, which nothing maps: an EL0 data abort.
+#[cfg(target_arch = "aarch64")]
+user_code!(
+    S19_FAULT_A,
+    "
+    movz x0, #0x5000, lsl #16
+    mov w1, #1
+    strb w1, [x0]
+    udf #0
+    "
+);
+
 // 64 sched_yield calls, then a store to 0x5100_0000, which nothing maps.
+#[cfg(target_arch = "x86_64")]
 user_code!(
     S19_FAULT_B,
     "
@@ -297,6 +325,24 @@ user_code!(
     mov eax, 0x51000000
     mov byte ptr [rax], 1
     ud2
+    "
+);
+
+// 64 sched_yield calls, then a store to 0x5100_0000, which nothing maps.
+#[cfg(target_arch = "aarch64")]
+user_code!(
+    S19_FAULT_B,
+    "
+    mov w19, #64
+1:
+    mov x8, #124
+    svc #0
+    subs w19, w19, #1
+    b.ne 1b
+    movz x0, #0x5100, lsl #16
+    mov w1, #1
+    strb w1, [x0]
+    udf #0
     "
 );
 
@@ -394,8 +440,8 @@ fn parse_hex(digits: &[u8]) -> Option<u64> {
     Some(v)
 }
 
-/// The `cr2=` of the last `user: pid <pid> killed SIGSEGV` record in the
-/// log ring; `None` without one.
+/// The fault address of the last `user: pid <pid> killed SIGSEGV` record in
+/// the log ring (`cr2=` on x86_64, `far=` on aarch64); `None` without one.
 fn kill_line_cr2(pid: u32) -> Option<u64> {
     let prefix = crate::ktest::FailMsg::from_args(format_args!("user: pid {pid} killed SIGSEGV "));
     let want = prefix.as_str().as_bytes();
@@ -404,7 +450,11 @@ fn kill_line_cr2(pid: u32) -> Option<u64> {
         if !msg.starts_with(want) {
             return;
         }
-        let key = b" cr2=0x";
+        let key: &[u8] = if cfg!(target_arch = "aarch64") {
+            b" far=0x"
+        } else {
+            b" cr2=0x"
+        };
         found = msg
             .windows(key.len())
             .rposition(|w| w == key)
@@ -417,6 +467,11 @@ fn kill_line_cr2(pid: u32) -> Option<u64> {
 /// (ROADMAP §10.6, F011): a 50 ms `getpid` on CPU 0 acks another CPU's
 /// shootdown and is preempted by a ready thread, and a `#PF` body that
 /// yields to another process's fault still reports its own CR2.
+///
+/// On aarch64 the shootdown half proves nothing: `vunmap`'s broadcast TLBI
+/// waits for no peer, so the unmap returns before `getpid` ends whatever
+/// DAIF holds. There the preemption half (`spin_switches`) is the proof
+/// that the body runs with IRQs unmasked.
 pub(crate) fn test_syscall_body_if_on() -> Outcome {
     let Some(other) = crate::ktest::second_cpu() else {
         return Outcome::Skip("needs 2 CPUs");
@@ -486,9 +541,19 @@ fn body_unmap_and_switch(other: u32) -> Result<(), Outcome> {
     Ok(())
 }
 
+/// `syscall_body_if_on`'s fault half alone, on aarch64 (ROADMAP §11.3),
+/// where `syscall_body_if_on` runs both halves too: an EL0 data abort's
+/// body yields at its top, after the entry saved
+/// `ESR_EL1` and `FAR_EL1` and unmasked DAIF, to another process's data
+/// abort on the same CPU, and each kill line still names its own `far`.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn test_el0_fault_body_yield() -> Outcome {
+    body_cr2()
+}
+
 fn body_cr2() -> Outcome {
     BODY_SPAWNED.store(false, Ordering::Release);
-    idt_testing::arm_pf_yield(CR2_A);
+    user::arm_fault_yield(CR2_A);
     crate::ktest::spawn_thread_on("s19_body_faults", body_spawn_faults, 0);
     let spawned = sleep_until_s19(|| BODY_SPAWNED.load(Ordering::Acquire), 5_000);
     let (a, b) = (spawned_pid(0), spawned_pid(1));
@@ -497,7 +562,7 @@ fn body_cr2() -> Outcome {
     } else {
         [None, None]
     };
-    idt_testing::disarm_pf_yield();
+    user::disarm_fault_yield();
     if !spawned {
         return Outcome::Fail("fault spawner did not run");
     }
@@ -510,9 +575,9 @@ fn body_cr2() -> Outcome {
             return crate::fail_fmt!("{who} status {st:?}, want {segv:#x}");
         }
     }
-    let during = idt_testing::pf_during_yield();
+    let during = user::fault_during_yield();
     if during != CR2_B {
-        return crate::fail_fmt!("#PF body during A's yield had cr2 {during:#x}, want B's");
+        return crate::fail_fmt!("fault body during A's yield had address {during:#x}, want B's");
     }
     for (who, pid, want) in [("A", a, CR2_A), ("B", b, CR2_B)] {
         match kill_line_cr2(pid) {
@@ -683,7 +748,7 @@ pub(crate) fn test_kalloc_fail_after_hook() -> Outcome {
 // (exit 4 otherwise), exit 0. On -ENOMEM: wait4(-1, 0, WNOHANG) must
 // return -ECHILD (exit 3 otherwise: a child exists), exit 12. Any other
 // fork error exits 1.
-user_code!(
+x86_user_code!(
     FORK_ONCE,
     "
     mov eax, 57
@@ -730,7 +795,7 @@ user_code!(
 // Push a canary, then execve("/hello", ["/hello", "s20", NULL], NULL).
 // /hello exits 42. A return must be -ENOMEM (exit 1 otherwise) with the
 // canary unchanged (exit 2 otherwise): exit 12.
-user_code!(
+x86_user_code!(
     EXEC_HELLO,
     "
     mov rax, 0x5332305f43414e41
@@ -767,7 +832,7 @@ user_code!(
 // open("/hello", O_RDONLY). On an fd: close it, exit 0. On -ENOMEM:
 // close(3) must return -EBADF (exit 5 otherwise: an fd leaked), exit 12.
 // Any other error exits 1.
-user_code!(
+x86_user_code!(
     OPEN_RO,
     "
     lea rdi, [rip + 6f]
@@ -803,7 +868,7 @@ user_code!(
 );
 
 // open("/vibe/s20", O_CREAT | O_RDWR, 0644), then as OPEN_RO.
-user_code!(
+x86_user_code!(
     OPEN_CREAT,
     "
     lea rdi, [rip + 6f]
@@ -841,7 +906,7 @@ user_code!(
 // fork (#1). Child: getpid (#1), exit(42) (#2). Parent: wait4(child, &st,
 // 0) (#2) must return the child (exit 7 otherwise) with st 0x2A00 (exit 6
 // otherwise): exit 0. A failed fork exits 8.
-user_code!(
+x86_user_code!(
     EXIT_WAIT,
     "
     mov eax, 57
@@ -883,7 +948,7 @@ user_code!(
 // mmap 16 MiB anonymous read-write (#1; exit 8 on failure), store to each
 // of its 4,096 pages, spin 2^26 iterations, munmap it (#2; exit 7 unless
 // 0), then sched_yield until killed.
-user_code!(
+x86_user_code!(
     MUNMAP_16M,
     "
     xor edi, edi

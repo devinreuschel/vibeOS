@@ -59,6 +59,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fdt_parse"
+path = "fuzz_targets/fdt_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "kbd_decode"
 path = "fuzz_targets/kbd_decode.rs"
 test = false

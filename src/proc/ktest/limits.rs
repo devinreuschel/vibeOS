@@ -13,7 +13,7 @@ use vibeos::proc::{wait_exited, wexitstatus, wifexited};
 
 use crate::addr_space_init;
 use crate::fs_init;
-use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, x86_user_code};
 use crate::ktest::{
     FrameCount, Outcome, quiesce, quiescent_free_frames, spawn_thread_on, spin_until_ns,
 };
@@ -25,7 +25,7 @@ use crate::user_init;
 
 // fork(): exit 0 when it returns -EAGAIN, 1 for any other error or a pid;
 // a child exits 2.
-user_code!(
+x86_user_code!(
     FORK_EAGAIN,
     "
     mov eax, 57
@@ -104,7 +104,7 @@ fn fork_full_filled() -> Result<(), Outcome> {
 // The failure must be -EAGAIN; then reap every child with wait4(-1) until
 // -ECHILD and exit with the fork count. Anything else, or twice
 // MAX_PROCS forks, is a ud2.
-user_code!(
+x86_user_code!(
     PROC_FILL,
     "
     xor r12d, r12d
@@ -148,7 +148,7 @@ user_code!(
 
 // Open /dev/null until -EMFILE and exit with the count; any other error,
 // or twice MAX_FDS opens, is a ud2.
-user_code!(
+x86_user_code!(
     FD_FILL,
     "
     xor r12d, r12d
@@ -180,7 +180,7 @@ user_code!(
 // mmap one anonymous page at a time, PROT_READ and PROT_READ|PROT_WRITE in
 // turn so no two regions merge, until -ENOMEM, and exit with the count; any
 // other error, or twice MAX_REGIONS maps, is a ud2.
-user_code!(
+x86_user_code!(
     MAP_FILL,
     "
     xor r12d, r12d

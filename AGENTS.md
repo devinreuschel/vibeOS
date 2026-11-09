@@ -45,7 +45,7 @@ These rules come from [KERNEL_REVIEW.md §8.1](docs/reviews/KERNEL_REVIEW.md#81-
 
 ## How to run
 
-    ./setup.sh          # Limine clone + host-tool check (verifies pinned Limine commit)
+    ./setup.sh          # Limine archive + host-tool check (verifies the pinned Limine tag, commit and SHA-256)
     make check          # fast local gate (fmt, host and kernel clippy, host units, harness, ruff/mypy, the default kernel ELF, check scripts, cargo deny)
     make                # kernel + build/vibeos.iso
     make run            # QEMU window = PS/2; the terminal is COM1
@@ -63,7 +63,7 @@ Kernel target is built-in `x86_64-unknown-none` (B2); user programs build for `x
 
 `make check` needs `ruff`, `mypy` and `cargo-deny` at the versions the `check` job in `.github/workflows/ci.yml` pins (`./setup.sh` prints cargo-deny's install command), and `fsck.fat` (`dosfstools`) for the FAT host tests, and it fails when one is missing. `VIBEOS_ALLOW_MISSING_TOOLS=1` is a gate switch, not one of the `VIBEOS_*` QEMU overrides `harness.py` reads: the Makefile and the FAT host test read it, skip each check whose tool is missing, and print the check they skipped. CI never sets it. `make check` also builds `vibeos-core` with its MSRV toolchain, which `./setup.sh` installs, and fails without it on the same terms.
 
-`VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS` (`uefi` boots the probed UEFI firmware), `FW_X86_64` (the firmware code image `uefi` boots), `QEMU_EXTRA`, `CMDLINE` (the kernel command line, through fw_cfg), `KTEST` (the in-guest tests to run), `KTEST_REPEAT` (runs of the in-guest suite in one boot). One reader, which holds the only defaults: `tests/harness/harness.py` (`env_config`); the Makefile sets none. `make run`, `make run-panic` and `make debug` honour the same settings: they start QEMU through `tests/harness/run_interactive.py`.
+`VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS` (`uefi` boots the probed UEFI firmware), `FW_X86_64` (the firmware code image `uefi` boots), `QEMU_EXTRA`, `CMDLINE` (the kernel command line, through fw_cfg), `KTEST` (the in-guest tests to run), `KTEST_REPEAT` (runs of the in-guest suite in one boot). One reader, which holds the only defaults: `tests/harness/harness.py` (`env_config`, and `env_firmware`, which it calls for the firmware variables). The Makefile sets further `VIBEOS_*` variables in its recipes, so a recipe is the reference for what a tier sets: `VIBEOS_ARCH` from `ARCH` (default `x86_64`, a make variable), `VIBEOS_TIER` and `VIBEOS_ISO` in the test recipes, `VIBEOS_SMP` for the in-guest tiers (2 for `test-kernel`, 4 for `test-kernel-smp4`, each unless the caller already set it) and for the panic-stop (5), SMP-stress (4) and IRQ-off (1, under TCG) tiers, `VIBEOS_GIC=2` and `VIBEOS_SMP=2` for `test-gic-fallback`, `VIBEOS_GIC=2` with the panic-stop's `VIBEOS_SMP=5` for the aarch64-only `test-e2e-panic-stop-gic2`, and `VIBEOS_QEMU_CPU` for `test-lapic-fallback`. `VIBEOS_MACHINE` and `VIBEOS_FW_AARCH64` are read through `env_config` and are not set by the Makefile. `make run`, `make run-panic` and `make debug` honour the same settings: they start QEMU through `tests/harness/run_interactive.py`.
 
 macOS: `brew install qemu xorriso python dosfstools zstd`. `make test-unit` runs `vibeos-core` on the
 host triple (A2). The firmware probe finds Homebrew's `share/qemu/edk2-x86_64-code.fd` with
@@ -93,7 +93,7 @@ in its own PR, with `make models` green on Linux and on the Apple Silicon dev ho
 ## Do not
 
 - commit build products (anything under `build/` or `target/`, `limine/`, and the assembled `user/` programs)
-- edit `limine/` (cloned by `setup.sh`)
+- edit `limine/` (unpacked by `setup.sh`)
 - add a crate to the dependency graph without naming it, with its reason, in `deny.toml`'s `[bans]` allow list (`make check`'s `cargo deny check licenses bans sources` fails until it is there) and without a note in the PR
 - copy or translate code, comments, or tables from a file licensed only under the GPL or LGPL (most of Linux, glibc, GNU tools), or have its implementation open while writing the code that matches it: match Linux's behaviour from its documentation and from running it, and cite where an interface's constants and layouts are defined; a format that only GPL code defines, with the algorithm that maintains it, is learned from what Linux writes, never from that code (DESIGN §1.5)
 - adapt code into a vibeOS file unless its license is notice-only (MIT, BSD, ISC, zlib, 0BSD, or that option of a dual license), with its notice and a provenance header; Apache-2.0-only code enters only as a crate or a port (DESIGN §1.5)

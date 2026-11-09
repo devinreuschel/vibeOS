@@ -120,7 +120,10 @@ fn tmp_full_round() -> Result<(), &'static str> {
     let Ok(f) = fid::open(tf_path(TMP_FULL_NAMES - 1, &mut buf), O_RDWR, 0) else {
         return Err("open data file");
     };
-    let page = [0x5Au8; 4096];
+    // On the heap: a 4 KiB buffer plus the FAT write frames exceeds
+    // DESIGN §4.5's margin on the 16 KiB aarch64 registry stack
+    // (ROADMAP §11.3).
+    let page = super::filled_buf(4096, |_| 0x5A).map_err(|_| "buffer")?;
     let mut full = None;
     for _ in 0..64 {
         if let Err(e) = fid::write(f, &page) {

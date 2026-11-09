@@ -3,16 +3,17 @@
 //!
 //! The table itself is generated from `syscalls.toml` into
 //! [`crate::proc::syscall_table`] (C-SYSTABLE), and its items are re-exported
-//! here, with the reference port's `SYS_*` numbers (`arch::syscall_nr`); each
-//! port's dispatch is `SyscallAbi::dispatch`. Handlers live in the kernel half
-//! (`proc_init`); `vibeos_syscall_stub` is the one entry path.
+//! here. The `SYS_*` numbers are not: each port's are named by the kernel as
+//! `arch::current::syscall_nr`, and host tests name the reference port's as
+//! `arch::syscall_nr`. Each port's dispatch is `SyscallAbi::dispatch`. Handlers
+//! live in the kernel half (`proc_init`); `vibeos_syscall_stub` is the one
+//! entry path.
 
 pub use crate::arch::UserFrame;
 
 pub const F_GETFD: u32 = 1;
 pub const F_SETFD: u32 = 2;
 
-pub use crate::arch::syscall_nr::*;
 pub use crate::proc::syscall_table::{
     Arg, CType, Dir, Handlers, NrRule, NrTable, Ptr, PtrKind, ROWS, Row, Sys, SysResult, aarch64,
 };
@@ -30,8 +31,10 @@ pub const fn encode(r: SysResult) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The stub port's table is the reference port's, so these name its numbers.
     use crate::arch::SyscallAbi;
     use crate::arch::stub::Arch;
+    use crate::arch::syscall_nr::{SYS_GETPID, SYS_KILL, SYS_READ, SYS_WAIT4};
     use crate::kerror::KError;
 
     /// Every errno of the `KError` table reaches ring 3 as Linux's
@@ -139,7 +142,10 @@ mod tests {
                     aarch64::dispatch::<Recorder>,
                 ),
             ];
-            for (nr, dispatch) in arches {
+            for (is_a64, nr, dispatch) in [
+                (false, arches[0].0, arches[0].1),
+                (true, arches[1].0, arches[1].1),
+            ] {
                 let Some(nr) = nr else { continue };
                 for high in [true, false] {
                     let base = if high {
@@ -153,7 +159,13 @@ mod tests {
                     assert_eq!(rec.sys, Some(row.sys), "{}", row.name);
                     for (i, a) in row.args.iter().enumerate() {
                         let got = rec.args[i];
-                        let w = want(a.ty, high, i as u64);
+                        // aarch64 `clone` swaps `tls` and `child_tid`.
+                        let reg = if is_a64 && row.sys == Sys::Clone {
+                            [0u64, 1, 2, 4, 3][i]
+                        } else {
+                            i as u64
+                        };
+                        let w = want(a.ty, high, reg);
                         assert_eq!(got, Some(w), "{}.{} high={high}", row.name, a.name);
                     }
                     for slot in &rec.args[row.arity()..] {

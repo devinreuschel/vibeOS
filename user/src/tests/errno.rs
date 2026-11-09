@@ -278,6 +278,74 @@ const PAIRS: &[Pair] = &[
     pair(Sys::Getdents64, Errno::EINVAL, Run(getdents64_einval)),
     pair(Sys::Getdents64, Errno::EFAULT, Run(getdents64_efault)),
     pair(Sys::Psinfo, Errno::EFAULT, Run(psinfo_efault)),
+    pair(
+        Sys::Openat,
+        Errno::EBADF,
+        Run(|| Ok(sys::openat(99, c"x".as_ptr().cast(), 0, 0))),
+    ),
+    pair(
+        Sys::Openat,
+        Errno::EFAULT,
+        Run(|| Ok(sys::openat(-100, KERNEL_PTR as *const u8, 0, 0))),
+    ),
+    pair(Sys::Openat, Errno::ENAMETOOLONG, Run(openat_enametoolong)),
+    pair(
+        Sys::Openat,
+        Errno::EINVAL,
+        Run(|| Ok(openat_raw(c"/utest_none", sys::O_CREAT | sys::O_DIRECTORY))),
+    ),
+    pair(
+        Sys::Openat,
+        Errno::ENOENT,
+        Run(|| Ok(openat_raw(c"/utest_none", sys::O_RDONLY))),
+    ),
+    pair(
+        Sys::Openat,
+        Errno::ENOTDIR,
+        Run(|| Ok(openat_raw(c"/hello/x", sys::O_RDONLY))),
+    ),
+    pair(
+        Sys::Openat,
+        Errno::EISDIR,
+        Run(|| Ok(openat_raw(c"/", sys::O_WRONLY))),
+    ),
+    pair(
+        Sys::Openat,
+        Errno::EEXIST,
+        Run(|| Ok(openat_raw(HELLO, sys::O_CREAT | O_EXCL))),
+    ),
+    pair(Sys::Openat, Errno::EACCES, Run(openat_eacces)),
+    pair(
+        Sys::Openat,
+        Errno::ELOOP,
+        Run(|| Ok(openat_raw(LOOP, sys::O_RDONLY))),
+    ),
+    pair(Sys::Openat, Errno::EMFILE, Run(openat_emfile)),
+    pair(Sys::Openat, Errno::ENFILE, Run(openat_enfile)),
+    pair(Sys::Openat, Errno::ENOSPC, Run(openat_enospc)),
+    pair(Sys::Openat, Errno::ENOMEM, Ktest),
+    pair(Sys::Openat, Errno::EIO, Ktest),
+    pair(Sys::Dup3, Errno::EBADF, Run(|| Ok(sys::dup3(99, 50, 0)))),
+    pair(Sys::Dup3, Errno::EINVAL, Run(dup3_einval)),
+    pair(
+        Sys::Clone,
+        Errno::EAGAIN,
+        Delegate("fork_bomb_eagain_at_limit"),
+    ),
+    pair(Sys::Clone, Errno::ENOMEM, Ktest),
+    pair(
+        Sys::Clone,
+        Errno::EINVAL,
+        Run(|| {
+            Ok(sys::clone(
+                0,
+                0,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                0,
+            ))
+        }),
+    ),
 ];
 
 /// A success probe: `Err` says what went wrong.
@@ -309,6 +377,9 @@ const OKS: &[(Sys, OkProbe)] = &[
     }),
     (Sys::Getdents64, getdents64_ok),
     (Sys::Psinfo, psinfo_ok),
+    (Sys::Openat, openat_ok),
+    (Sys::Dup3, dup3_ok),
+    (Sys::Clone, clone_ok),
 ];
 
 /// The calls with no success probe, and why.
@@ -423,6 +494,9 @@ fn matrix(registered: &[bool; 2]) -> Outcome {
         }
     }
     for p in PAIRS {
+        if !CALLS.iter().any(|c| c.sys == p.sys) {
+            continue;
+        }
         let listed = CALLS
             .iter()
             .any(|c| c.sys == p.sys && c.errors.contains(&p.errno));
@@ -449,6 +523,11 @@ const LOOP: &CStr = c"/proc/self/../self/../self/../self/../self/../self/../self
 /// `open(path, flags, 0644)`.
 pub(super) fn open_raw(path: &CStr, flags: i32) -> Result<usize, Errno> {
     sys::open(path.as_ptr().cast(), flags, 0o644)
+}
+
+/// `openat(AT_FDCWD, path, flags, 0644)`.
+fn openat_raw(path: &CStr, flags: i32) -> Result<usize, Errno> {
+    sys::openat(-100, path.as_ptr().cast(), flags, 0o644)
 }
 
 /// `open`, the descriptor as `u32`.
@@ -502,11 +581,11 @@ fn read_into(fd: u32, n: usize) -> Result<usize, Errno> {
 
 /// `fstat(fd, <a stack buffer>)`: the call's result and `st_mode`.
 fn fstat_mode(fd: u32) -> (Result<usize, Errno>, u32) {
-    let mut st = [0u32; 36];
-    // SAFETY: the kernel writes 144 bytes into `st`, a local of 144 bytes
-    // no reference covers during the call; established here.
-    let r = unsafe { sys::fstat(fd, st.as_mut_ptr().cast()) };
-    (r, st[6])
+    let mut st = sys::Stat::default();
+    // SAFETY: the kernel writes this port's `struct stat` through
+    // `&raw mut st`; established here.
+    let r = unsafe { sys::fstat(fd, core::ptr::from_mut(&mut st).cast()) };
+    (r, st.st_mode)
 }
 
 fn fstat_into(fd: u32) -> Result<usize, Errno> {
@@ -757,13 +836,21 @@ fn open_eacces() -> Result<Result<usize, Errno>, &'static str> {
 /// Open `/hello` until a call fails: that call's error, with every
 /// descriptor it opened closed.
 fn open_until_error(max: usize) -> Result<usize, Errno> {
+    open_until_error_with(max, || open_raw(HELLO, sys::O_RDONLY))
+}
+
+/// Hold each successful open until `max` or the first error, then close.
+fn open_until_error_with(
+    max: usize,
+    mut open_one: impl FnMut() -> Result<usize, Errno>,
+) -> Result<usize, Errno> {
     let mut fds = [0u32; 300];
     let mut n = 0;
     let mut last = Ok(0);
     while n < max.min(fds.len()) {
-        match open(HELLO, sys::O_RDONLY) {
+        match open_one() {
             Ok(fd) => {
-                fds[n] = fd;
+                fds[n] = fd as u32;
                 n += 1;
             }
             Err(e) => {
@@ -868,12 +955,21 @@ fn execve_enfile() -> Result<Result<usize, Errno>, &'static str> {
     })?
 }
 
+fn open_enospc() -> Result<Result<usize, Errno>, &'static str> {
+    volume_enospc(*b"/utest_ns000\0", |p| {
+        sys::open(p, sys::O_CREAT | sys::O_RDWR, 0o644)
+    })
+}
+
 /// Fill the root FAT volume through one file, then create names in its
 /// root directory until one needs a cluster; then free the clusters. Only
 /// under init: a kernel-parented run (`kernel_tests`' `user_syscalls`)
 /// shares the initrd volume with the in-guest tests that run after it,
 /// whose own files need the root directory's room.
-fn open_enospc() -> Result<Result<usize, Errno>, &'static str> {
+fn volume_enospc(
+    mut name: [u8; 13],
+    mut create: impl FnMut(*const u8) -> Result<usize, Errno>,
+) -> Result<Result<usize, Errno>, &'static str> {
     if sys::getppid() != Ok(1) {
         return Err(NOT_HERE);
     }
@@ -894,12 +990,11 @@ fn open_enospc() -> Result<Result<usize, Errno>, &'static str> {
     let mut r = Err("the volume did not fill");
     if full {
         r = Err("200 names fit in the root directory");
-        let mut name = *b"/utest_ns000\0";
         for i in 0..200u32 {
             name[9] = b'0' + (i / 100) as u8;
             name[10] = b'0' + (i / 10 % 10) as u8;
             name[11] = b'0' + (i % 10) as u8;
-            match sys::open(name.as_ptr(), sys::O_CREAT | sys::O_RDWR, 0o644) {
+            match create(name.as_ptr()) {
                 Ok(fd) => close(fd as u32),
                 Err(e) => {
                     r = Ok(Err(e));
@@ -1165,6 +1260,63 @@ fn open_ok() -> Result<(), &'static str> {
         return Err("a descriptor below 3");
     }
     sys::close(fd).map(|_| ()).map_err(|_| "close")
+}
+
+fn openat_ok() -> Result<(), &'static str> {
+    let fd = openat_raw(HELLO, sys::O_RDONLY).map_err(|_| "openat /hello")?;
+    if fd < 3 {
+        return Err("a descriptor below 3");
+    }
+    sys::close(fd as u32).map(|_| ()).map_err(|_| "close")
+}
+
+fn openat_enametoolong() -> Result<Result<usize, Errno>, &'static str> {
+    let mut p = [b'a'; 301];
+    p[0] = b'/';
+    p[300] = 0;
+    Ok(sys::openat(-100, p.as_ptr(), sys::O_RDONLY, 0))
+}
+
+fn openat_eacces() -> Result<Result<usize, Errno>, &'static str> {
+    Ok(openat_raw(c"/dev/utest_new", sys::O_CREAT | sys::O_WRONLY))
+}
+
+fn openat_emfile() -> Result<Result<usize, Errno>, &'static str> {
+    Ok(open_until_error_with(300, || {
+        openat_raw(HELLO, sys::O_RDONLY)
+    }))
+}
+
+fn openat_enfile() -> Result<Result<usize, Errno>, &'static str> {
+    with_files_full(|| open_until_error_with(250, || openat_raw(HELLO, sys::O_RDONLY)))
+}
+
+fn openat_enospc() -> Result<Result<usize, Errno>, &'static str> {
+    volume_enospc(*b"/utest_as000\0", |p| {
+        sys::openat(-100, p, sys::O_CREAT | sys::O_RDWR, 0o644)
+    })
+}
+
+fn dup3_einval() -> Result<Result<usize, Errno>, &'static str> {
+    Ok(sys::dup3(1, 1, 0))
+}
+
+fn dup3_ok() -> Result<(), &'static str> {
+    if sys::dup3(1, 50, 0) != Ok(50) {
+        return Err("dup3(1, 50, 0)");
+    }
+    sys::close(50).map(|_| ()).map_err(|_| "close")
+}
+
+fn clone_ok() -> Result<(), &'static str> {
+    match sys::clone(17, 0, core::ptr::null_mut(), core::ptr::null_mut(), 0) {
+        Ok(0) => vibeos_user::rt::exit(7),
+        Ok(pid) => match utest::wait_status(pid).map(utest::exited) {
+            Ok(Some(7)) => Ok(()),
+            _ => Err("child status"),
+        },
+        Err(_) => Err("clone"),
+    }
 }
 
 /// The console is a character device.

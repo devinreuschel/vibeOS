@@ -16,7 +16,9 @@ use crate::x86;
 /// Skips port I/O when FADT says there is no legacy 8259.
 ///
 /// # Safety
-/// IRQs should already be off. Call before `lidt`. ACPI walk already ran.
+/// IRQs should already be off. Call before `idt::init`: the early IDT
+/// reports only exceptions, and IF=0 keeps every 8259 vector out of it.
+/// ACPI walk already ran.
 pub unsafe fn remap_and_mask() {
     let legacy = crate::acpi_init::info()
         .and_then(|i| i.fadt)
@@ -105,7 +107,7 @@ pub fn unclaimed(irq: u8) -> bool {
 }
 
 /// Whether line `irq` is masked at its PIC.
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub fn is_masked(irq: u8) -> bool {
     let Some((port, bit)) = irq_port_bit(irq) else {
         return false;

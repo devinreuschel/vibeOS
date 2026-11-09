@@ -73,7 +73,7 @@ pub(super) fn finish_exit(wait_status: u32, fault: Option<u64>) -> ! {
     if let Some(space) = old {
         // The TCB stops naming the root before the kernel root is loaded,
         // so a switch back in between cannot reload it (invariant I44).
-        thread_init::set_pid_cr3(tid, 0, 0);
+        thread_init::set_pid_cr3(tid, 0, 0, 0);
         crate::arch::gs::force_kernel();
         addr_space_init::load_kernel_cr3();
         // The thread's `users` put, after every lock: the last one tears
@@ -440,4 +440,109 @@ pub fn write_ps(w: &mut impl Write) {
         )]
         let _ = writeln!(w, "vibeOS: ps: {line}");
     }
+}
+
+#[cfg(not(feature = "vibefs_crash"))]
+enum KernelWait {
+    Done(u32),
+    Sleep,
+    NotKernelChild,
+}
+
+/// Block until `pid`, a process whose parent is the kernel (ppid 0),
+/// exits; reap it and return its `wait4` status word.
+#[cfg(not(feature = "vibefs_crash"))]
+pub(crate) fn wait_kernel(pid: u32) -> u32 {
+    debug_assert_eq!(current_pid(), 0);
+    loop {
+        let r = thread_init::with_sched(|s| {
+            table_locked(|t| {
+                let Some(p) = t.get(pid) else {
+                    return KernelWait::NotKernelChild;
+                };
+                if p.ppid != 0 {
+                    return KernelWait::NotKernelChild;
+                }
+                match p.state {
+                    ProcState::Zombie => {
+                        let st = p.wait_status;
+                        reap_zombie(s, t, pid);
+                        KernelWait::Done(st)
+                    }
+                    ProcState::Live | ProcState::Stopped => {
+                        s.begin_wait(&mut t.kernel_wq, FAR_DEADLINE);
+                        KernelWait::Sleep
+                    }
+                    ProcState::Unused => KernelWait::NotKernelChild,
+                }
+            })
+        });
+        assert!(
+            !matches!(r, KernelWait::NotKernelChild),
+            "wait_kernel({pid}): not a live kernel-parented process; only kernel code calls \
+             wait_kernel, once per ppid-0 pid that spawn_elf or spawn_image returned, and only \
+             wait_kernel reaps a ppid-0 process"
+        );
+        match r {
+            KernelWait::Done(st) => return st,
+            KernelWait::Sleep | KernelWait::NotKernelChild => thread_init::schedule(),
+        }
+    }
+}
+
+/// User exception from a portable `TrapKind`: default action (kill).
+/// Kernel stays up. No-op if this is not a user process, or the kind is
+/// not a ring-3 fault.
+#[cfg(target_arch = "aarch64")]
+pub fn try_user_trap(kind: TrapKind, pc: u64, far: u64) {
+    let pid = current_pid();
+    if pid == 0 {
+        return;
+    }
+    let Ring3Action::Signal { sig, si_code: _ } = trap::ring3_action(kind) else {
+        return;
+    };
+    let name = sig_name(sig);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to Serial cannot fail (DESIGN §2.5)"
+    )]
+    let _ = writeln!(
+        Serial,
+        "user: pid {pid} killed SIG{name} pc=0x{pc:x} far=0x{far:x}"
+    );
+    crate::arch::gs::force_kernel();
+    finish_exit(wait_signaled(sig), Some(far));
+}
+
+/// Processes `kill_bad_return` has killed, for the in-guest tests that the
+/// `return_ok` check, not a later fault, ended the process.
+#[cfg(all(target_arch = "aarch64", feature = "kernel_tests"))]
+pub(crate) static BAD_ELR_KILLS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// A return to EL0 whose `ELR_EL1` is not a user PC or whose `SPSR_EL1`
+/// is not EL0t: `SIGSEGV`.
+#[cfg(target_arch = "aarch64")]
+pub fn kill_bad_return(pc: u64, pstate: u64) -> ! {
+    // The entry's DAIF is all set; the next thread runs with the mask it
+    // leaves (DESIGN §2.9 rule 3).
+    crate::arch::aarch64::cpu::daif_clear_all();
+    let pid = current_pid();
+    if pid == 0 {
+        crate::arch::current::halt();
+    }
+    // Relaxed: a count; pairs with nothing.
+    #[cfg(feature = "kernel_tests")]
+    BAD_ELR_KILLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to Serial cannot fail (DESIGN §2.5)"
+    )]
+    let _ = writeln!(
+        Serial,
+        "user: pid {pid} killed SIGSEGV bad return elr=0x{pc:x} spsr=0x{pstate:x}"
+    );
+    crate::arch::gs::force_kernel();
+    finish_exit(wait_signaled(vibeos::proc::SIGSEGV), Some(pc));
 }

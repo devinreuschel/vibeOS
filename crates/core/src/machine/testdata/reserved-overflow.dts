@@ -1,0 +1,16 @@
+/dts-v1/;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		top@fff00000 {
+			reg = <0xffffffff 0xfff00000 0x0 0x200000>;
+		};
+	};
+};

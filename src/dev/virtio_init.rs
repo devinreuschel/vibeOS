@@ -2,11 +2,12 @@
 //!
 //! Transport + virtio-rng. virtio-blk is `virtio_blk_init`. ROADMAP §6.5.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::arch::Barriers;
 use vibeos::dev::{DevRef, Device, Driver, IdMatch, Instance, ProbeError};
-use vibeos::dma::{self, DmaAlloc, DmaBuffer};
-use vibeos::irq::IrqError;
+use vibeos::dma::{DmaAlloc, DmaBuffer};
+use vibeos::irq::{IrqError, IrqId};
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::pci::{Bdf, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
@@ -16,7 +17,8 @@ use vibeos::virtio::{
     COMMON_OFF_QNOTIFY, COMMON_OFF_QSEL, COMMON_OFF_QSIZE, COMMON_OFF_STATUS, DEV_RNG_LEGACY,
     DEV_RNG_MODERN, F_EVENT_IDX, F_INDIRECT_DESC, MSI_NO_VECTOR, ModernCaps, OFFER, PciCap,
     STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK, SplitLayout,
-    VENDOR_ID, VirtioError, notify_addr, pick_features, write_indirect_write,
+    VENDOR_ID, VirtioError, cap_fits, min_cap_len, notify_addr, pick_features,
+    write_indirect_write,
 };
 
 use crate::arch::{self, current::Arch};
@@ -24,7 +26,6 @@ use crate::dev_init;
 use crate::dma_init;
 use crate::irq_init;
 use crate::pci_init;
-use crate::per_cpu_init;
 use crate::sync_init::SpinMutex;
 use crate::work_init;
 
@@ -57,95 +58,109 @@ pub(super) static DATA_DEV: AtomicU64 = AtomicU64::new(0);
 pub(super) static DATA_VIRT: AtomicU64 = AtomicU64::new(0);
 static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// The bound device ([`bdf_key`], 0 for none), its common configuration
-/// and its vector (0 for none), which `remove` stops and frees.
+/// and its IRQ (0 for none), which `remove` stops and frees.
 static DEV_KEY: AtomicU64 = AtomicU64::new(0);
 static COMMON_VA: AtomicU64 = AtomicU64::new(0);
-static VEC: AtomicU8 = AtomicU8::new(0);
+static VEC: AtomicU32 = AtomicU32::new(0);
 /// Frames kept because a device's bus mastering would not turn off.
 pub(crate) static KEPT_FRAMES: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const RNG_PAYLOAD: usize = 32;
 const RNG_PAYLOAD_OFF: usize = 16;
 
-fn r8(va: u64, off: u16) -> u8 {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u8) }
+/// Register access shared by the PCI and mmio transports; `va` and `off`
+/// are the caller's to keep inside a window `map_mmio` mapped. Each goes
+/// through the port's ordered accessors (DESIGN §4.7): a write follows
+/// every earlier store to memory, and a read completes before any later
+/// load, so no driver adds a barrier around a register access.
+pub(crate) fn r8(va: u64, off: u16) -> u8 {
+    // SAFETY: invariant I54: `va` is a register of a window `map_mmio`
+    // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
+    // and `off` a register offset inside it; established by
+    // `pci_init::map_mmio`.
+    unsafe { Arch::mmio_read((va.wrapping_add(off as u64)) as *const u8) }
 }
 
-fn w8(va: u64, off: u16, v: u8) {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u8, v) }
+pub(crate) fn w8(va: u64, off: u16, v: u8) {
+    // SAFETY: invariant I54: `va` is a register of a window `map_mmio`
+    // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
+    // and `off` a register offset inside it; established by
+    // `pci_init::map_mmio`.
+    unsafe { Arch::mmio_write((va.wrapping_add(off as u64)) as *mut u8, v) }
 }
 
-fn r16(va: u64, off: u16) -> u16 {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        u16::from_le(core::ptr::read_volatile(
-            (va.wrapping_add(off as u64)) as *const u16,
-        ))
-    }
+pub(crate) fn r16(va: u64, off: u16) -> u16 {
+    // SAFETY: invariant I54: `va` is a register of a window `map_mmio`
+    // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
+    // and `off` a register offset inside it; established by
+    // `pci_init::map_mmio`.
+    u16::from_le(unsafe { Arch::mmio_read((va.wrapping_add(off as u64)) as *const u16) })
 }
 
-fn w16(va: u64, off: u16, v: u16) {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u16, v.to_le());
-    }
+pub(crate) fn w16(va: u64, off: u16, v: u16) {
+    // SAFETY: invariant I54: `va` is a register of a window `map_mmio`
+    // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
+    // and `off` a register offset inside it; established by
+    // `pci_init::map_mmio`.
+    unsafe { Arch::mmio_write((va.wrapping_add(off as u64)) as *mut u16, v.to_le()) }
 }
 
-fn r32(va: u64, off: u16) -> u32 {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        u32::from_le(core::ptr::read_volatile(
-            (va.wrapping_add(off as u64)) as *const u32,
-        ))
-    }
+pub(crate) fn r32(va: u64, off: u16) -> u32 {
+    // SAFETY: invariant I54: `va` is a register of a window `map_mmio`
+    // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
+    // and `off` a register offset inside it; established by
+    // `pci_init::map_mmio`.
+    u32::from_le(unsafe { Arch::mmio_read((va.wrapping_add(off as u64)) as *const u32) })
 }
 
-fn w32(va: u64, off: u16, v: u32) {
-    // SAFETY: invariant I54: `va` is a register of a BAR `map_mmio`
-    // mapped uncached for this bound device, and `off` a register offset
-    // inside that capability's region; established by `pci_init::map_mmio`.
-    unsafe {
-        core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, v.to_le());
-    }
+pub(crate) fn w32(va: u64, off: u16, v: u32) {
+    // SAFETY: invariant I54: `va` is a register of a window `map_mmio`
+    // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
+    // and `off` a register offset inside it; established by
+    // `pci_init::map_mmio`.
+    unsafe { Arch::mmio_write((va.wrapping_add(off as u64)) as *mut u32, v.to_le()) }
 }
 
-fn w64(va: u64, off: u16, v: u64) {
+/// Read a PCI transport's ISR status byte at `isr`, which acknowledges the
+/// interrupt (virtio 1.2 §4.1.4.5), through `virtio::read_isr`: ordered
+/// before the used-ring reads that follow it.
+pub(crate) fn read_isr8(isr: u64) -> u8 {
+    // SAFETY: invariant I54: `isr` is the ISR capability's register inside
+    // a BAR `map_mmio` mapped uncached for this bound device; established
+    // by `pci_init::map_mmio`.
+    unsafe { virtio::read_isr::<Arch, u8>(isr as *const u8) }
+}
+
+pub(crate) fn w64(va: u64, off: u16, v: u64) {
     w32(va, off, v as u32);
     w32(va, off + 4, (v >> 32) as u32);
 }
 
+pub(crate) fn r64(va: u64, off: u16) -> u64 {
+    (r32(va, off) as u64) | ((r32(va, off + 4) as u64) << 32)
+}
+
 /// The VA of capability `cap`'s region, inside a BAR the probe claimed
 /// and mapped (`dev_init::claim_mem_bars`).
-fn region(dev: &DevRef, cap: PciCap) -> Option<u64> {
+pub(crate) fn region(dev: &DevRef, cap: PciCap) -> Option<u64> {
     let r = dev.resources.get(cap.bar as usize)?;
-    if (cap.offset as u64) >= r.size {
+    if !cap_fits(cap.offset, cap.length, min_cap_len(cap.cfg_type), r.size) {
         return None;
     }
     let va = dev_init::bar_va(dev, cap.bar)?;
     Some(va.wrapping_add(cap.offset as u64))
 }
 
-fn clamp_qsize(hw: u16) -> u16 {
-    let n = hw.min(16);
+/// `hw` rounded down to a power of two, at most `max`; 0 if `hw` is 0.
+pub(crate) fn clamp_qsize(hw: u16, max: u16) -> u16 {
+    let n = hw.min(max);
     if n == 0 {
         return 0;
     }
     1u16 << (15u32 - n.leading_zeros())
 }
 
-fn read_features(common: u64) -> u64 {
+pub(crate) fn read_features(common: u64) -> u64 {
     w32(common, COMMON_OFF_DFSEL, 0);
     let lo = r32(common, COMMON_OFF_DF) as u64;
     w32(common, COMMON_OFF_DFSEL, 1);
@@ -153,7 +168,7 @@ fn read_features(common: u64) -> u64 {
     lo | (hi << 32)
 }
 
-fn write_features(common: u64, feat: u64) {
+pub(crate) fn write_features(common: u64, feat: u64) {
     w32(common, COMMON_OFF_DRSEL, 0);
     w32(common, COMMON_OFF_DR, feat as u32);
     w32(common, COMMON_OFF_DRSEL, 1);
@@ -197,7 +212,8 @@ pub(crate) enum Stopped {
     /// device can no longer reach memory.
     MasterOff,
     /// Bus mastering still reads back on: the device may still write the
-    /// memory it was given.
+    /// memory it was given. A virtio-mmio device has no such bit: its reset
+    /// timing out is `Stuck`.
     Stuck,
 }
 
@@ -233,6 +249,7 @@ pub(crate) fn release(stopped: Stopped, buf: DmaBuffer) -> usize {
     }
     let n = buf.frame_count();
     core::mem::forget(buf);
+    // Relaxed: a count; pairs with nothing.
     KEPT_FRAMES.fetch_add(n as u64, Ordering::Relaxed);
     n
 }
@@ -252,7 +269,7 @@ pub(crate) fn report_stuck(bdf: Bdf, stopped: Stopped, kept: usize) {
 /// The one unwind of a probe that fails once bus mastering is on, in
 /// INTERRUPTS.md §5.4's order: stop the device, turn MSI-X off and free
 /// `vec`, then free `bufs`, or keep them when the device is `Stuck`.
-fn fail_probe(dev: &Device, common: u64, vec: Option<u8>, bufs: [Option<DmaBuffer>; 2]) {
+fn fail_probe(dev: &Device, common: u64, vec: Option<IrqId>, bufs: [Option<DmaBuffer>; 2]) {
     let stopped = stop_device(dev.addr, common);
     irq_init::disable_msix(dev);
     if let Some(v) = vec {
@@ -280,11 +297,12 @@ fn on_soft(_arg: usize) {
 /// One device, module state: `_ctx` is `None` (ROADMAP §10.12).
 fn rng_top(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {
     TOP_HITS.fetch_add(1, Ordering::SeqCst);
+    // Acquire: pairs with the Release stores in `setup` and `remove`.
     let isr = ISR_VA.load(Ordering::Acquire);
     if isr != 0 {
         // Reading the ISR status acknowledges the interrupt; the value
         // itself is not needed (virtio 1.x §4.1.4.5).
-        let _ = r8(isr, 0);
+        let _ = read_isr8(isr);
     }
     if !work_init::raise_softirq(on_soft, 1) {
         crate::klog_ratelimited!(
@@ -323,13 +341,29 @@ fn harvest() {
     {
         let mut g = Q.lock();
         if let Some(q) = g.as_mut() {
-            while let Some(u) = q.vq.get_used() {
-                n += 1;
-                last = u.len;
+            loop {
+                match q.vq.get_used() {
+                    Ok(Some(u)) => {
+                        n += 1;
+                        last = u.len;
+                    }
+                    Ok(None) => break,
+                    // The queue stays broken, so no request completes again.
+                    Err(e) => {
+                        crate::klog_ratelimited!(
+                            1000,
+                            vibeos::log::Level::Error,
+                            "vibeOS: virtio-rng: {}",
+                            e.as_str()
+                        );
+                        break;
+                    }
+                }
             }
             if n != 0 {
                 q.data.sync_for_cpu::<Arch>();
                 publish_pool(q, last);
+                // Release: pairs with the Acquire load in `rng_request`.
                 IN_FLIGHT.store(false, Ordering::Release);
             }
         }
@@ -349,18 +383,36 @@ fn rng_work(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {
     harvest();
 }
 
-fn kick(doorbell: u64) {
-    dma::dma_wmb::<Arch>();
-    // SAFETY: invariant I54: `doorbell` is queue 0's notify register inside
+/// Notify queue `qi` through `virtio::notify`, an ordered `mmio_write`
+/// after the descriptor and `avail.idx` stores (DESIGN §4.7).
+pub(crate) fn kick(doorbell: u64, qi: u16) {
+    // SAFETY: invariant I54: `doorbell` is a queue's notify register inside
     // the notify capability's BAR, which `map_mmio` mapped uncached, checked
     // against the capability length by `virtio::notify_addr`; established by
-    // `pci_init::map_mmio`.
-    unsafe {
-        core::ptr::write_volatile(doorbell as *mut u16, 0u16);
+    // `pci_init::map_mmio`. The store is that virtqueue's index
+    // (virtio 1.2 §§4.1.5.2, 4.2.2).
+    unsafe { virtio::notify::<Arch>(doorbell, qi, false) }
+}
+
+/// Refuse a DMA-non-coherent device before touching it: the drivers that
+/// call this run no cache maintenance on their rings (DESIGN §4.7). The
+/// probe fails with `NonCoherent`, and the line names the device.
+pub(crate) fn refuse_non_coherent(driver: &str, dev: &Device) -> Result<(), VirtioError> {
+    if dev.dma_coherent {
+        return Ok(());
     }
+    crate::klog_ratelimited!(
+        1000,
+        vibeos::log::Level::Warn,
+        "vibeOS: {}: {}: non-coherent DMA, not bound",
+        driver,
+        dev.addr
+    );
+    Err(VirtioError::NonCoherent)
 }
 
 fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
+    refuse_non_coherent("virtio-rng", dev)?;
     let common_cap = caps.common.ok_or(VirtioError::NoCaps)?;
     let notify_cap = caps.notify.ok_or(VirtioError::NoCaps)?;
     let isr_cap = caps.isr.ok_or(VirtioError::NoCaps)?;
@@ -401,24 +453,24 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
     }
 
     let cpu = irq_init::threaded_cpu();
-    let Some(pc) = per_cpu_init::cpu(cpu) else {
-        fail_probe(dev, common, None, [None, None]);
-        return Err(VirtioError::Failed);
-    };
-    let vec = match irq_init::allocate_vector(cpu) {
-        Ok(v) => v,
-        Err(_) => {
+    let irq = match irq_init::alloc_msi(dev, 1).ok().and_then(|s| s.get(0)) {
+        Some(i) => i,
+        None => {
             fail_probe(dev, common, None, [None, None]);
             return Err(VirtioError::Failed);
         }
     };
-    if irq_init::set_threaded(vec, Some(rng_top), rng_work, None).is_err() {
-        fail_probe(dev, common, Some(vec), [None, None]);
+    if irq_init::set_affinity(irq, cpu).is_err() {
+        fail_probe(dev, common, Some(irq), [None, None]);
+        return Err(VirtioError::Failed);
+    }
+    if irq_init::set_threaded(irq, Some(rng_top), rng_work, None).is_err() {
+        fail_probe(dev, common, Some(irq), [None, None]);
         return Err(VirtioError::Failed);
     }
     pci_init::update_command(dev.addr, CMD_INTX_DISABLE, 0);
-    if let Err(e) = irq_init::enable_msix(dev, 0, vec, pc.apic_id.load(Ordering::Relaxed) as u8) {
-        fail_probe(dev, common, Some(vec), [None, None]);
+    if let Err(e) = irq_init::enable_msix(dev, 0, irq) {
+        fail_probe(dev, common, Some(irq), [None, None]);
         return match e {
             IrqError::NoRoute => Err(VirtioError::NoCaps),
             _ => Err(VirtioError::Failed),
@@ -428,22 +480,22 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
 
     w16(common, COMMON_OFF_QSEL, 0);
     let hw_qs = r16(common, COMMON_OFF_QSIZE);
-    let qsz = clamp_qsize(hw_qs);
+    let qsz = clamp_qsize(hw_qs, 16);
     if qsz == 0 {
-        fail_probe(dev, common, Some(vec), [None, None]);
+        fail_probe(dev, common, Some(irq), [None, None]);
         return Err(VirtioError::BadQueue);
     }
     w16(common, COMMON_OFF_QSIZE, qsz);
     let Some(layout) = SplitLayout::new(qsz) else {
-        fail_probe(dev, common, Some(vec), [None, None]);
+        fail_probe(dev, common, Some(irq), [None, None]);
         return Err(VirtioError::BadQueue);
     };
-    let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64)) else {
-        fail_probe(dev, common, Some(vec), [None, None]);
+    let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64, dev.dma_coherent)) else {
+        fail_probe(dev, common, Some(irq), [None, None]);
         return Err(VirtioError::Failed);
     };
-    let Some(data) = dma_init::alloc(DmaAlloc::dma32(64)) else {
-        fail_probe(dev, common, Some(vec), [Some(qdma), None]);
+    let Some(data) = dma_init::alloc(DmaAlloc::dma32(64, dev.dma_coherent)) else {
+        fail_probe(dev, common, Some(irq), [Some(qdma), None]);
         return Err(VirtioError::Failed);
     };
     // SAFETY: both buffers were just allocated, are `len()` bytes long at
@@ -457,8 +509,15 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
     // least `layout.total` bytes, which stays allocated beside the queue
     // until the device is reset and it is freed; established by
     // `dma_init::alloc`.
-    let mut vq = unsafe {
+    let vq = unsafe {
         arch::current::SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0)
+    };
+    let mut vq = match vq {
+        Ok(vq) => vq,
+        Err(e) => {
+            fail_probe(dev, common, Some(irq), [Some(qdma), Some(data)]);
+            return Err(e);
+        }
     };
     vq.init();
     qdma.sync_for_device::<Arch>();
@@ -481,7 +540,7 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
     w16(common, COMMON_OFF_QENABLE, 1);
     #[cfg(feature = "kernel_tests")]
     if crate::dev::ktest::fail_after_qenable(dev.addr) {
-        fail_probe(dev, common, Some(vec), [Some(qdma), Some(data)]);
+        fail_probe(dev, common, Some(irq), [Some(qdma), Some(data)]);
         return Err(VirtioError::Failed);
     }
     let qoff = r16(common, COMMON_OFF_QNOTIFY);
@@ -492,20 +551,28 @@ fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {
         qoff,
         notify_cap.notify_off_multiplier,
     ) else {
-        fail_probe(dev, common, Some(vec), [Some(qdma), Some(data)]);
+        fail_probe(dev, common, Some(irq), [Some(qdma), Some(data)]);
         return Err(VirtioError::Notify);
     };
 
     let st = r8(common, COMMON_OFF_STATUS);
     w8(common, COMMON_OFF_STATUS, st | STATUS_DRIVER_OK);
 
+    // Release: pairs with the Acquire load in `rng_top`.
     ISR_VA.store(isr, Ordering::Release);
+    // Release: pairs with the AcqRel swap in `remove`.
     COMMON_VA.store(common, Ordering::Release);
-    VEC.store(vec, Ordering::Release);
+    // Release: pairs with the AcqRel swap in `remove`.
+    VEC.store(irq.raw(), Ordering::Release);
+    // Release: pairs with the Acquire load in `remove`.
     DEV_KEY.store(bdf_key(dev.addr), Ordering::Release);
+    // Release: pairs with the Acquire load in `dev::ktest::rng_features`.
     FEATURES.store(feat, Ordering::Release);
+    // Release: pairs with the Acquire load in `dev::ktest::rng_qdma_device`.
     QDMA_DEV.store(qdma.device().as_u64(), Ordering::Release);
+    // Release: pairs with the Acquire load in `dev::ktest::rng_data_device`.
     DATA_DEV.store(data.device().as_u64(), Ordering::Release);
+    // Release: pairs with the Acquire load in `dev::ktest::rng_data_virt`.
     DATA_VIRT.store(data.virt(), Ordering::Release);
 
     let mut g = Q.lock();
@@ -558,6 +625,7 @@ impl Driver for RngDriver {
     /// `dev_init::bind_all` probes one device at a time, and a concurrent
     /// binder would need a claim (a compare-exchange) instead.
     fn probe(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
+        // Acquire: pairs with the Release stores below and in `remove`.
         if BOUND.load(Ordering::Acquire) {
             crate::marker!("vibeOS: virtio: rng {} already bound", dev.addr);
             return Err(ProbeError::Busy);
@@ -570,6 +638,7 @@ impl Driver for RngDriver {
         dev_init::claim_mem_bars(dev)?;
         let r = match setup(dev, caps) {
             Ok(()) => {
+                // Release: pairs with the Acquire loads above and in `rng_bound`.
                 BOUND.store(true, Ordering::Release);
                 return Ok(None);
             }
@@ -591,11 +660,14 @@ impl Driver for RngDriver {
     /// ISR; then the device stops before its vector and memory go, and
     /// `BOUND` clears last, when nothing of the device is left.
     fn remove(&self, dev: &DevRef) {
+        // Acquire: pairs with the Release stores in `setup` and below.
         if DEV_KEY.load(Ordering::Acquire) != bdf_key(dev.addr) {
             return;
         }
         let q = Q.lock().take();
+        // Release: pairs with the Acquire load in `rng_top`.
         ISR_VA.store(0, Ordering::Release);
+        // AcqRel: pairs with the Release store in `setup`.
         let common = COMMON_VA.swap(0, Ordering::AcqRel);
         let stopped = if common != 0 {
             stop_device(dev.addr, common)
@@ -603,23 +675,28 @@ impl Driver for RngDriver {
             Stopped::Reset
         };
         irq_init::disable_msix(dev);
-        let vec = VEC.swap(0, Ordering::AcqRel);
-        if vec != 0 && irq_init::free_vector(vec).is_err() {
+        // AcqRel: pairs with the Release store in `setup`.
+        let raw = VEC.swap(0, Ordering::AcqRel);
+        if raw != 0 && irq_init::free_vector(IrqId::from_raw(raw)).is_err() {
             crate::klog!(
                 vibeos::log::Level::Warn,
-                "vibeOS: virtio: rng {} vector {:#x} not freed",
+                "vibeOS: virtio: rng {} irq {} not freed",
                 dev.addr,
-                vec
+                raw
             );
         }
+        irq_init::release_its_device(dev);
         if let Some(Q { qdma, data, .. }) = q {
             let kept = release(stopped, qdma).saturating_add(release(stopped, data));
             report_stuck(dev.addr, stopped, kept);
         }
+        // Release: pairs with the Acquire load in `rng_request`.
         IN_FLIGHT.store(false, Ordering::Release);
+        // Release: pairs with the Acquire load above.
         DEV_KEY.store(0, Ordering::Release);
         // The device is stopped and every VA into its BARs dropped.
         dev_init::release_bars(dev);
+        // Release: pairs with the Acquire loads in `probe` and `rng_bound`.
         BOUND.store(false, Ordering::Release);
     }
 }
@@ -634,6 +711,7 @@ pub fn init() {
 }
 
 pub fn rng_bound() -> bool {
+    // Acquire: pairs with the Release stores in `probe` and `remove`.
     BOUND.load(Ordering::Acquire)
 }
 
@@ -667,6 +745,7 @@ pub fn rng_take(buf: &mut [u8]) -> usize {
 pub fn rng_request() -> Result<(), VirtioError> {
     let mut g = Q.lock();
     let q = g.as_mut().ok_or(VirtioError::Failed)?;
+    // Acquire: pairs with the Release stores below and in `harvest` and `remove`.
     if IN_FLIGHT.load(Ordering::Acquire) {
         return Ok(());
     }
@@ -694,8 +773,9 @@ pub fn rng_request() -> Result<(), VirtioError> {
     q.vq.publish();
     q.qdma.sync_for_device::<Arch>();
     if q.vq.should_kick(old) {
-        kick(q.doorbell);
+        kick(q.doorbell, 0);
     }
+    // Release: pairs with the Acquire load above.
     IN_FLIGHT.store(true, Ordering::Release);
     Ok(())
 }

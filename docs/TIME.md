@@ -19,6 +19,8 @@ hold on both architectures.
 | TSC | `busy_wait_ms`, the TSC-deadline arm, trace timestamps. The clocksource, first in §6.4's rank: when CPUID reports it invariant and the warp test saw no backward step. |
 | LAPIC timer | Per-CPU preemption tick. TSC-deadline mode preferred. |
 | RTC / CMOS | Wall clock date and time, read once at boot. |
+| Generic timer `CNTVCT_EL0` (aarch64) | The cycle counter and the clocksource. Read after `isb`. `mult`/`shift` from `CNTFRQ_EL0`, or the timer node's `clock-frequency`. |
+| Generic timer TVAL (aarch64) | The preemption tick. EL1 uses `CNTV_*` (`virt`). EL2+VHE uses `CNTHV_*` (`hyp-virt`) when the node has a fifth interrupt, otherwise `CNTHP_*` (`hyp-phys`). |
 
 | Value | Meaning |
 |-------|---------|
@@ -244,7 +246,12 @@ TSC invariant and the bring-up warp test ([DESIGN §7.4](SMP.md#74-ap-bring-up-s
 result `vibeOS: smp: tsc skew <n> cycles` reports, saw no backward step (Linux's `check_tsc_warp`
 rule). Otherwise the export (`trace::export_chrome`) orders records within each CPU only and says so
 in its `otherData`. The header of `VIBEOS_TRACE` carries the calibration and the warp result for the
-core tool.
+core tool. On aarch64 the records carry raw `CNTVCT_EL0` reads; the BSP publishes the `CNTFRQ_EL0`
+value the kernel recorded as the header's frequency, with `COUNTER_UNIFORM` set: `CNTVCT_EL0` is the
+one system counter, `CNTPCT_EL0`, minus `CNTVOFF_EL2`, and every CPU holds the same offset (the
+hypervisor sets one per VM at EL1; at EL2 with VHE each secondary zeroes its own, and the
+`sysreg_compare` ktest checks them against the boot CPU's), so the export orders across CPUs with no
+warp test (`trace::ClockInfo::order`).
 
 ## 6.5 Timers and timeouts
 

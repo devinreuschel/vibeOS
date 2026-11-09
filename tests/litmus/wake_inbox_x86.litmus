@@ -1,0 +1,13 @@
+X86 vibeos-wake-inbox-x86
+(* The kernel's lock or is a full barrier. herd's X86 model rejects
+   LOCK OR, so this is LOCK ADD of 1 from zero, the locked RMW it
+   accepts. XCHG of the summary then of the word must not see a set
+   summary with an empty word. No MFENCE. *)
+{
+}
+ P0                     | P1                 ;
+ LOCK ADD [word],$1     | MOV EAX,$0         ;
+ LOCK ADD [summary],$1  | XCHG EAX,[summary] ;
+                        | MOV EBX,$0         ;
+                        | XCHG EBX,[word]    ;
+exists (1:EAX=1 /\ 1:EBX=0)

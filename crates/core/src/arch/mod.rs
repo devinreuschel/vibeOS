@@ -7,15 +7,25 @@
 //! traits on one zero-sized type: the kernel's `arch::x86_64::Arch`, and the
 //! stub port `stub::Arch` that host builds test against.
 
+pub mod aarch64;
 pub mod x86_64;
 
 /// The reference port's pure-half items that portable code and the kernel
-/// name directly, until a second port's kernel builds (ROADMAP Phase 11): the
-/// x86_64 descriptor, vector, 8259, APIC and UART encodings, its user frame,
-/// and its syscall numbers (`docs/ARCH.md`).
-pub use x86_64::syscall::nr as syscall_nr;
-pub use x86_64::trap::UserFrame;
+/// name directly (`docs/ARCH.md`): the x86_64 descriptor, vector, 8259, APIC
+/// and UART encodings. Each port's user frame and `SYS_*` numbers live in
+/// that port's module; the kernel picks them in `arch::current`.
 pub use x86_64::{apic, desc, pic, uart, vectors};
+
+/// The core tool's x86_64 page-table format (`log::vmcore::walk`), named
+/// here so portable code reaches it outside this directory.
+pub use x86_64::paging::X86_64;
+
+/// Host tests and the x86_64 kernel use the reference port's numbers.
+pub use x86_64::syscall::nr as syscall_nr;
+
+/// Host tests use the x86_64 user frame. The kernel's `arch::current`
+/// aliases the running port's frame.
+pub use x86_64::trap::UserFrame;
 
 use crate::thread::Tcb;
 
@@ -50,19 +60,14 @@ impl MmioWidth for u16 {}
 impl MmioWidth for u32 {}
 impl MmioWidth for u64 {}
 
-/// The machine state the boot handshake hands over, normalized.
+/// The machine state the boot handshake hands over, normalized. Every port
+/// requests one Limine base revision (`boot::LIMINE_BASE_REVISION`), so the
+/// record differs by platform (a DTB against an RSDP), never by revision.
 pub trait BootHandover {
     type Info: 'static;
-    /// The boot protocol revision the port asks its loader for (Limine's
-    /// base revision).
-    const BASE_REVISION: u64;
     /// The handover record. Valid only after entry has captured it, which
     /// every caller outside the entry path is.
     fn info() -> &'static Self::Info;
-    /// The physical address of a firmware table the loader handed over as
-    /// `raw`: a physical address, or an address in the loader's direct map
-    /// at `hhdm_offset`, as the port's revision gives it.
-    fn table_phys(raw: u64, hhdm_offset: u64) -> u64;
 }
 
 /// This CPU's interrupt mask.
@@ -120,21 +125,42 @@ pub trait Barriers {
     /// `reg` is an aligned register of a mapped device, and the write is one
     /// the caller's driver owns.
     unsafe fn mmio_write<W: MmioWidth>(reg: *mut W, v: W);
-    /// Make the CPU's writes to `start..start + len` visible to a device
-    /// (a clean; a no-op on a coherent port).
+    /// Make the CPU's writes to `start..start + len` visible to a
+    /// non-coherent device: clean each line to the Point of Coherency, then
+    /// a full barrier (aarch64's `dc cvac` and `dsb sy`; a no-op on a port
+    /// whose devices are all coherent). `vibeos::dma` calls it only for a
+    /// device the registry records as non-coherent (DESIGN §4.7).
     ///
     /// # Safety
     ///
     /// The range is mapped memory the caller owns for this DMA.
     unsafe fn sync_for_device(start: *const u8, len: usize);
-    /// Make a device's writes to `start..start + len` visible to the CPU
-    /// (an invalidate; a no-op on a coherent port).
+    /// Make a non-coherent device's writes to `start..start + len` visible
+    /// to the CPU: invalidate each line, then a full barrier (aarch64's
+    /// `dc ivac`, `dc civac` on a line the range covers in part, and
+    /// `dsb sy`; a no-op on a port whose devices are all coherent).
     ///
     /// # Safety
     ///
     /// The range is mapped memory the caller owns for this DMA, and no CPU
     /// store to it is pending that the invalidate would discard.
     unsafe fn sync_for_cpu(start: *const u8, len: usize);
+    /// The cache writeback granule in bytes, a power of two no larger than
+    /// a page: a non-coherent device's DMA region smaller than a page is
+    /// aligned to and sized in it, so no two regions share one (aarch64's
+    /// `CTR_EL0.CWG`, DESIGN §4.7). 1 on a port whose devices are all
+    /// coherent.
+    fn dma_granule() -> usize {
+        1
+    }
+    /// Make bytes written to `start..start + len` through a data alias
+    /// fetchable as code (aarch64's `dc cvau` and `ic ivau`; x86_64's
+    /// caches are coherent with fetch).
+    ///
+    /// # Safety
+    ///
+    /// The range is mapped, readable memory.
+    unsafe fn sync_icache(_start: *const u8, _len: usize) {}
 }
 
 /// The per-CPU base register.

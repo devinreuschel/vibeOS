@@ -1,0 +1,8 @@
+X86 vibeos-dma-mb-used-x86-relaxed
+{
+}
+ P0                      | P1                      ;
+ MOV [used_event],$1     | MOV [used_idx],$1       ;
+ MOV EAX,[used_idx]      | MFENCE                  ;
+                         | MOV EBX,[used_event]   ;
+exists (0:EAX=0 /\ 1:EBX=0)

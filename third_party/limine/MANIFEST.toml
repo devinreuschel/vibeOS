@@ -1,78 +1,62 @@
-# Limine's notices (ROADMAP §10.9, DESIGN §1.5). The binary branch setup.sh
-# clones ships only LICENSE, so the texts of the projects Limine's 3RDPARTY.md
+# Limine's notices (ROADMAP §10.9, DESIGN §1.5). The binary archive setup.sh
+# unpacks ships only LICENSE, so the texts of the projects Limine's 3RDPARTY.md
 # lists are kept here, with the release they were copied from.
-# scripts/gen_notices.py reads this file and fails when `release` or
-# `binary_commit` differs from setup.sh's LIMINE_TAG or LIMINE_COMMIT, or when
-# a 3RDPARTY.md entry has no project here.
+# scripts/gen_notices.py reads this file and fails when `release` or `commit`
+# differs from setup.sh's LIMINE_TAG or LIMINE_COMMIT, or when a 3RDPARTY.md
+# entry has no project here.
 #
-# The v9.6.7 source release archive could not be fetched when these were
-# copied, so `source` names the release tag and the commit it points at, and
-# each project names the commit Limine's ./bootstrap at that tag pins and the
-# repository that commit was read from. LICENSE equals the binary branch's
-# LICENSE and the source tree's COPYING byte for byte. Texts only, never code.
+# LICENSE and 3RDPARTY.md come from the release's source archive, `source`;
+# LICENSE equals its COPYING and the binary archive's LICENSE byte for byte.
+# Each project names the repository and commit the release's ./bootstrap
+# clones, where its text was read, and that text equals the copy the source
+# archive ships where it ships one. Texts only, never code.
 
-release = "v9.6.7"
-binary_commit = "ee5d29cd0a8034612dcd1df3f00052480db785c5"
-source = "https://github.com/limine-bootloader/limine.git"
-source_commit = "6f9722ed66e47498626edc20fff88aaa8b1de85a"
+release = "v12.9.1"
+commit = "c82c3708b3304be806b2492dc2ce34e219c6f989"
+source = "https://github.com/limine-bootloader/limine/releases/download/v12.9.1/limine-12.9.1.tar.xz"
+source_sha256 = "c1096fdd506487fbd92c113baa9e153a9973cf766483cc3928e13fd29b976b32"
 
 [[project]]
 name = "cc-runtime"
 license = "Apache-2.0 WITH LLVM-exception"
-upstream = "https://codeberg.org/OSDev/cc-runtime.git"
+upstream = "https://github.com/osdev0/cc-runtime.git"
 commit = "dae79833b57a01b9fd3e359ee31def69f5ae899b"
-read_from = "https://github.com/osdev0/cc-runtime.git"
 files = ["cc-runtime/LICENSE.TXT"]
 
 [[project]]
-name = "0BSD Freestanding C Headers"
+name = "Freestanding C Headers"
 license = "0BSD"
-upstream = "https://codeberg.org/OSDev/freestnd-c-hdrs-0bsd.git"
-commit = "5e4e9e70278fe89ea328d359a58aff4f4a94b165"
-read_from = "https://github.com/osdev0/freestnd-c-hdrs-0bsd.git"
-files = ["freestnd-c-hdrs/LICENSE"]
+upstream = "https://github.com/osdev0/freestanding-c-hdrs.git"
+commit = "38fed4e1e3365733ddbfa03b0a28936243ad31e9"
+files = ["freestanding-c-hdrs/LICENSE"]
 
 [[project]]
 name = "Limine Boot Protocol"
 license = "0BSD"
-upstream = "https://codeberg.org/Limine/limine-protocol.git"
-commit = "fedf97facd1c473ee8720f8dfd5a71d03490d928"
-read_from = "https://github.com/limine-bootloader/limine-protocol.git"
+upstream = "https://github.com/Limine-Bootloader/limine-protocol.git"
+commit = "3a0526b700e356f0eac1b71a77697b3fd1c707a3"
 files = ["limine-protocol/LICENSE"]
 
 [[project]]
 name = "PicoEFI"
 license = "BSD-2-Clause AND BSD-2-Clause-Patent AND BSD-3-Clause AND LicenseRef-scancode-bsd-no-disclaimer-unmodified AND MIT"
-upstream = "https://codeberg.org/PicoEFI/PicoEFI.git"
-commit = "4bd08c13f103de9efd7b215a3e337447f1e2ce37"
-read_from = "https://github.com/PicoEFI/PicoEFI.git"
+upstream = "https://github.com/PicoEFI/PicoEFI.git"
+commit = "0f428ea76696fee9a46950d21fc02c13c3493179"
 files = ["picoefi/COPYING", "picoefi/LicenseRef-scancode-bsd-no-disclaimer-unmodified.txt"]
-
-[[project]]
-name = "tinf"
-license = "Zlib"
-upstream = "https://github.com/jibsen/tinf.git"
-commit = "57ffa1f1d5e3dde19011b2127bd26d01689b694b"
-read_from = "https://github.com/jibsen/tinf.git"
-files = ["tinf/LICENSE"]
 
 [[project]]
 name = "Flanterm"
 license = "BSD-2-Clause"
-upstream = "https://codeberg.org/Mintsuki/Flanterm.git"
-commit = "55d228ff16234513b0df0dd12de8bc58160fc196"
-read_from = "https://github.com/mintsuki/flanterm.git"
+upstream = "https://github.com/Mintsuki/Flanterm.git"
+commit = "3e311fe2ce4f663273c22d1a229745bc53afa930"
 files = ["flanterm/LICENSE"]
 
-# The license section at the end of stb_image.h (MIT, the option Limine uses,
-# or public domain); the file's SHA-256 is the one ./bootstrap checks.
+# MIT, the option Limine uses, or public domain.
 [[project]]
-name = "stb_image"
+name = "stb_image (hardened)"
 license = "MIT"
-upstream = "https://github.com/nothings/stb/raw/5c205738c191bcb0abc65c4febfa9bd25ff35234/stb_image.h"
-commit = "5c205738c191bcb0abc65c4febfa9bd25ff35234"
-sha256 = "594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3"
-read_from = "https://raw.githubusercontent.com/nothings/stb/5c205738c191bcb0abc65c4febfa9bd25ff35234/stb_image.h"
+upstream = "https://github.com/Mintsuki/stbi-hardened.git"
+commit = "b85b7e87f6f87300f32f7de3d94e1ed083a71263"
 files = ["stb_image/LICENSE"]
 
 # libfdt is GPL-2.0-or-later OR BSD-2-Clause; Limine uses BSD-2-Clause.
@@ -81,7 +65,13 @@ files = ["stb_image/LICENSE"]
 [[project]]
 name = "libfdt"
 license = "BSD-2-Clause"
-upstream = "https://codeberg.org/OSDev/libfdt.git"
+upstream = "https://github.com/osdev0/libfdt.git"
 commit = "7bf94e6347129d17eca263112296ad170dec28a9"
-read_from = "https://github.com/osdev0/libfdt.git"
 files = ["libfdt/BSD-2-Clause", "libfdt/COPYRIGHT"]
+
+[[project]]
+name = "pdgzip"
+license = "0BSD"
+upstream = "https://github.com/iczelia/pdgzip.git"
+commit = "010197664688f071b923615ea235ecb24963b61a"
+files = ["pdgzip/LICENSE"]

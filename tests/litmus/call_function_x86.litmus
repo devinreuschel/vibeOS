@@ -1,0 +1,15 @@
+X86 vibeos-call-function-x86
+(* Two rounds, plain stores and loads. TSO forbids a stable round whose
+   func or waiters belong to another round. No MFENCE. *)
+{
+}
+ P0                 | P1               ;
+ MOV [round],$1     | MOV EAX,[round]  ;
+ MOV [func],$1      | MOV EBX,[waiters];
+ MOV [waiters],$1   | MOV ECX,[func]   ;
+ MOV [round],$2     | MOV EDX,[round]  ;
+ MOV [round],$3     |                  ;
+ MOV [func],$2      |                  ;
+ MOV [waiters],$2   |                  ;
+ MOV [round],$4     |                  ;
+exists ((1:EAX=2 /\ 1:EDX=2 /\ 1:ECX=0) \/ (1:EAX=2 /\ 1:EDX=2 /\ 1:ECX=2) \/ (1:EAX=2 /\ 1:EDX=2 /\ 1:EBX=0) \/ (1:EAX=2 /\ 1:EDX=2 /\ 1:EBX=2) \/ (1:EAX=4 /\ 1:EDX=4 /\ 1:ECX=0) \/ (1:EAX=4 /\ 1:EDX=4 /\ 1:ECX=1) \/ (1:EAX=4 /\ 1:EDX=4 /\ 1:EBX=0) \/ (1:EAX=4 /\ 1:EDX=4 /\ 1:EBX=1))

@@ -1,0 +1,576 @@
+//! aarch64 trap decode: vector slot and `ESR_EL1` to a `TrapKind`
+//! (DESIGN §11.5), and the user frame every entry from EL0 saves
+//! (DESIGN §5.10, ROADMAP §11.6). Compiles on every host.
+
+use crate::proc::syscall_table::{self, Handlers, NrTable, SysResult};
+use crate::trap::{DebugCause, FpCause, FpUnit, PageFaultCause, SyscallAbi, TrapKind};
+
+/// Sixteen VBAR entries, 0x80 bytes apart. Index is `offset / 0x80`.
+pub const SLOT_CURRENT_SP0_SYNC: u8 = 0;
+pub const SLOT_CURRENT_SP0_IRQ: u8 = 1;
+pub const SLOT_CURRENT_SP0_FIQ: u8 = 2;
+pub const SLOT_CURRENT_SP0_SERROR: u8 = 3;
+pub const SLOT_CURRENT_SPX_SYNC: u8 = 4;
+pub const SLOT_CURRENT_SPX_IRQ: u8 = 5;
+pub const SLOT_CURRENT_SPX_FIQ: u8 = 6;
+pub const SLOT_CURRENT_SPX_SERROR: u8 = 7;
+pub const SLOT_LOWER_A64_SYNC: u8 = 8;
+pub const SLOT_LOWER_A64_IRQ: u8 = 9;
+pub const SLOT_LOWER_A64_FIQ: u8 = 10;
+pub const SLOT_LOWER_A64_SERROR: u8 = 11;
+pub const SLOT_LOWER_A32_SYNC: u8 = 12;
+pub const SLOT_LOWER_A32_IRQ: u8 = 13;
+pub const SLOT_LOWER_A32_FIQ: u8 = 14;
+pub const SLOT_LOWER_A32_SERROR: u8 = 15;
+
+const ESR_EC_SHIFT: u32 = 26;
+const ESR_EC_MASK: u64 = 0x3F;
+const ESR_ISS_MASK: u64 = 0x01FF_FFFF;
+const ISS_FSC_MASK: u32 = 0x3F;
+const ISS_WNR: u32 = 1 << 6;
+
+/// Exception class from `ESR_EL1`.
+pub const fn esr_ec(esr: u64) -> u8 {
+    ((esr >> ESR_EC_SHIFT) & ESR_EC_MASK) as u8
+}
+
+const fn esr_iss(esr: u64) -> u32 {
+    (esr & ESR_ISS_MASK) as u32
+}
+
+/// Exception class of a data abort taken at the kernel's own level.
+const EC_DABT_EL1: u8 = 0x25;
+/// Exception class of an instruction abort taken at the kernel's own level.
+const EC_IABT_EL1: u8 = 0x21;
+
+/// A data abort at the kernel's own level (EC 0x25). Only this class may
+/// resume at a user-memory accessor's fixup (PORTABILITY §11.5, the table's
+/// `0x24`, `0x25` row).
+pub const fn is_el1_data_abort(esr: u64) -> bool {
+    esr_ec(esr) == EC_DABT_EL1
+}
+
+/// An abort at the kernel's own level, data (EC 0x25) or instruction (EC
+/// 0x21): what a `catch_dabt` window arms for.
+pub const fn is_el1_abort(esr: u64) -> bool {
+    matches!(esr_ec(esr), EC_DABT_EL1 | EC_IABT_EL1)
+}
+
+/// The mnemonic of a fatal synchronous exception in a `#<name>` dump line,
+/// from its class (DESIGN §11.5): instruction and data aborts, the two
+/// alignment faults, debug, and `UNDEF` for every other class.
+pub const fn fault_mnemonic(esr: u64) -> &'static str {
+    match esr_ec(esr) {
+        0x20 | 0x21 => "IABT",
+        0x22 => "PCALIGN",
+        0x24 | 0x25 => "DABT",
+        0x26 => "SPALIGN",
+        0x30..=0x3C => "DEBUG",
+        _ => "UNDEF",
+    }
+}
+
+/// The address a ring-3 fault reports: `far` for a class that sets
+/// `FAR_EL1` (aborts, the PC alignment fault, watchpoints, DDI0487
+/// D17.2.40), `sp` for the SP alignment fault, else `pc`, since `FAR_EL1`
+/// is UNKNOWN for the SP alignment fault, `udf`, `brk` and the rest.
+pub const fn fault_addr(esr: u64, far: u64, pc: u64, sp: u64) -> u64 {
+    match esr_ec(esr) {
+        0x20 | 0x21 | 0x22 | 0x24 | 0x25 | 0x34 | 0x35 => far,
+        0x26 => sp,
+        _ => pc,
+    }
+}
+
+/// Slot kind: bits [1:0] of the 16-entry index.
+const fn slot_group(slot: u8) -> u8 {
+    slot & 3
+}
+
+/// Decode a vector slot and `ESR_EL1` (0 on IRQ/FIQ/SError) into a
+/// portable [`TrapKind`]. DESIGN §11.5.
+pub const fn decode(slot: u8, esr: u64) -> TrapKind {
+    match slot_group(slot) {
+        1 => TrapKind::Interrupt(0),
+        2 => TrapKind::Fiq,
+        3 => TrapKind::SError,
+        _ => decode_sync(esr_ec(esr), esr_iss(esr)),
+    }
+}
+
+const fn decode_sync(ec: u8, iss: u32) -> TrapKind {
+    match ec {
+        0x01 => TrapKind::WaitTrap,
+        0x15 => TrapKind::Syscall,
+        0x1C => TrapKind::PacFail,
+        0x20 | 0x21 => decode_abort(iss, true),
+        0x22 | 0x26 => TrapKind::AlignmentCheck,
+        0x24 | 0x25 => decode_abort(iss, false),
+        0x2C => TrapKind::FloatingPoint(FpUnit::Simd, FpCause::Unknown),
+        0x30 | 0x31 | 0x34 | 0x35 => TrapKind::Debug(DebugCause::HwBreakpoint),
+        0x32 | 0x33 => TrapKind::Debug(DebugCause::SingleStep),
+        0x3C => TrapKind::SoftwareBreak,
+        0x00 | 0x07 | 0x0D | 0x0E | 0x18 | 0x19 | 0x1D => TrapKind::Undef,
+        _ => TrapKind::Undef,
+    }
+}
+
+const fn decode_abort(iss: u32, fetch: bool) -> TrapKind {
+    let fsc = iss & ISS_FSC_MASK;
+    if fsc == 0b100001 {
+        return TrapKind::AlignmentCheck;
+    }
+    // Synchronous external abort, or one taken on a table walk.
+    if fsc == 0b010000 || (fsc & 0b11_1100) == 0b010100 {
+        return TrapKind::BusError;
+    }
+    let protection = (fsc & 0b11_1100) == 0b001100;
+    let write = !fetch && (iss & ISS_WNR) != 0;
+    TrapKind::PageFault(PageFaultCause {
+        protection,
+        write,
+        fetch,
+    })
+}
+
+/// An EL0 register frame: Linux's `struct user_pt_regs`
+/// (`arch/arm64/include/uapi/asm/ptrace.h`: `x0`-`x30`, `sp` from SP_EL0,
+/// `pc` from ELR_EL1, `pstate` from SPSR_EL1), then `orig_x0` and the
+/// syscall number, -1 on an entry that is not a syscall (DESIGN §5.10).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UserFrame {
+    pub x: [u64; 31],
+    pub sp: u64,
+    pub pc: u64,
+    pub pstate: u64,
+    pub orig_x0: u64,
+    pub syscallno: u64,
+}
+
+/// EL0t, DAIF clear: `SPSR_EL1` M[3:0] = 0.
+const PSTATE_EL0T: u64 = 0;
+
+/// `SPSR_EL1` M[4:0] (M[4] set is AArch32) and IL, bit 20.
+const PSTATE_MODE_IL: u64 = 0x1F | (1 << 20);
+
+/// Whether `pstate` may be written to `SPSR_EL1` for a return to EL0: the
+/// mode is AArch64 EL0t and IL is clear, so an `eret` cannot enter EL1 or
+/// AArch32 whatever path last wrote the frame (Linux's `valid_user_regs`).
+pub const fn el0_pstate_ok(pstate: u64) -> bool {
+    pstate & PSTATE_MODE_IL == 0
+}
+
+impl UserFrame {
+    pub const fn zeroed() -> Self {
+        Self {
+            x: [0; 31],
+            sp: 0,
+            pc: 0,
+            pstate: 0,
+            orig_x0: 0,
+            syscallno: 0,
+        }
+    }
+
+    /// A new program's first frame: GPRs zero, EL0t, DAIF clear, and
+    /// `syscallno` = -1 so the first `eret` is not a restart.
+    pub const fn new_user(pc: u64, sp: u64) -> Self {
+        let mut f = Self::zeroed();
+        f.pc = pc;
+        f.sp = sp;
+        f.pstate = PSTATE_EL0T;
+        f.syscallno = u64::MAX;
+        f
+    }
+
+    /// At an `svc` from EL0: saves `x0` as `orig_x0` for a restart and
+    /// records the number, the low 32 bits of `x8` read as unsigned, as
+    /// Linux's arm64 `invoke_syscall` reads it (SYSCALL.md §1.1). Returns
+    /// the number.
+    pub fn svc_entry(&mut self) -> u64 {
+        let nr = u64::from(self.reg(syscall_table::aarch64::NR_REG) as u32);
+        self.orig_x0 = self.reg(syscall_table::aarch64::RET_REG);
+        self.syscallno = nr;
+        nr
+    }
+
+    /// `x<n>`, or 0 past `x30`.
+    fn reg(&self, n: usize) -> u64 {
+        self.x.get(n).copied().unwrap_or(0)
+    }
+
+    /// A successful `execve`'s frame: [`new_user`] plus the syscall
+    /// number the exit is still returning from. `new_user` writes -1.
+    pub const fn exec_from(pc: u64, sp: u64, nr: u64) -> Self {
+        let mut f = Self::new_user(pc, sp);
+        f.syscallno = nr;
+        f
+    }
+}
+
+/// The aarch64 Linux syscall ABI over [`UserFrame`]: number in the low
+/// 32 bits of `x8` as Linux's `invoke_syscall` reads it, args `x0`-`x5`,
+/// result in `x0`. `svc #0` is four bytes.
+pub struct Abi;
+
+// The generated convention names only `x0` to `x30`, so no register read
+// through `UserFrame::reg` falls back to 0 (SYSCALL.md §1.1).
+const _: () = {
+    use syscall_table::aarch64::{ARG_REGS, NR_REG, RET_REG};
+    assert!(NR_REG < 31 && RET_REG < 31);
+    let mut i = 0;
+    while i < ARG_REGS.len() {
+        assert!(ARG_REGS[i] < 31);
+        i += 1;
+    }
+};
+
+impl SyscallAbi for Abi {
+    type Frame = UserFrame;
+
+    fn nr(f: &UserFrame) -> u64 {
+        f.syscallno
+    }
+
+    fn arg(f: &UserFrame, i: usize) -> u64 {
+        syscall_table::aarch64::ARG_REGS
+            .get(i)
+            .map_or(0, |&r| f.reg(r))
+    }
+
+    fn set_ret(f: &mut UserFrame, v: u64) {
+        if let Some(r) = f.x.get_mut(syscall_table::aarch64::RET_REG) {
+            *r = v;
+        }
+    }
+
+    fn ip(f: &UserFrame) -> u64 {
+        f.pc
+    }
+
+    fn set_ip(f: &mut UserFrame, v: u64) {
+        f.pc = v;
+    }
+
+    fn sp(f: &UserFrame) -> u64 {
+        f.sp
+    }
+
+    fn set_sp(f: &mut UserFrame, v: u64) {
+        f.sp = v;
+    }
+
+    fn table() -> &'static NrTable {
+        &syscall_table::aarch64::TABLE
+    }
+
+    fn dispatch<H: Handlers + ?Sized>(h: &mut H, raw_nr: u64, regs: &[u64; 6]) -> SysResult {
+        syscall_table::aarch64::dispatch(h, raw_nr, regs)
+    }
+
+    fn restart(f: &mut UserFrame) {
+        Self::set_ret(f, f.orig_x0);
+        f.pc = f.pc.wrapping_sub(4);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proc::{SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGTRAP};
+    use crate::trap::si_code::*;
+    use crate::trap::{Ring3Action, ring3_action};
+
+    fn esr(ec: u8) -> u64 {
+        u64::from(ec) << ESR_EC_SHIFT
+    }
+
+    #[test]
+    fn fault_mnemonic_names_every_class() {
+        // The dump mnemonic of each exception class 0x00 to 0x3F, written out
+        // here rather than derived from the match in `fault_mnemonic`
+        // (DESIGN §11.5). Index is the EC.
+        const WANT: [&str; 64] = [
+            "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF",
+            "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF",
+            "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF",
+            "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "IABT", "IABT", "PCALIGN", "UNDEF",
+            "DABT", "DABT", "SPALIGN", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF", "UNDEF",
+            "UNDEF", "UNDEF", "UNDEF", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "DEBUG",
+            "DEBUG", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "UNDEF", "UNDEF",
+            "UNDEF",
+        ];
+        for (ec, want) in (0u8..).zip(WANT.iter()) {
+            assert_eq!(fault_mnemonic(esr(ec)), *want, "EC {ec:#x}");
+        }
+        // The ISS bits do not change the class.
+        assert_eq!(fault_mnemonic(esr(0x25) | 0x1FF_FFFF), "DABT");
+    }
+
+    #[test]
+    fn fault_addr_takes_far_only_where_far_is_valid() {
+        const FAR: u64 = 0xdead_0000;
+        const PC: u64 = 0x40_1000;
+        const SP: u64 = 0x7fff_fff9;
+        for ec in 0..=0x3Fu8 {
+            let want = match ec {
+                0x20 | 0x21 | 0x22 | 0x24 | 0x25 | 0x34 | 0x35 => FAR,
+                0x26 => SP,
+                _ => PC,
+            };
+            assert_eq!(fault_addr(esr(ec), FAR, PC, SP), want, "EC {ec:#x}");
+        }
+        // `udf` (EC 0x00) and `brk` (EC 0x3C) report the pc, and the SP
+        // alignment fault (EC 0x26) the sp, not a stale FAR.
+        assert_eq!(fault_addr(esr(0x00), FAR, PC, SP), PC);
+        assert_eq!(fault_addr(esr(0x3C), FAR, PC, SP), PC);
+        assert_eq!(fault_addr(esr(0x26), FAR, PC, SP), SP);
+    }
+
+    fn esr_iss(ec: u8, iss: u32) -> u64 {
+        esr(ec) | u64::from(iss) & ESR_ISS_MASK
+    }
+
+    fn action(slot: u8, esr: u64) -> Ring3Action {
+        ring3_action(decode(slot, esr))
+    }
+
+    fn sig(slot: u8, esr: u64) -> (u32, i32) {
+        match action(slot, esr) {
+            Ring3Action::Signal { sig, si_code } => (sig, si_code),
+            other => panic!("slot {slot} esr {esr:#x} -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn el0_pstate_ok_takes_only_aarch64_el0t() {
+        assert!(el0_pstate_ok(0));
+        // NZCV, SS, PAN, and DAIF leave the mode alone.
+        assert!(el0_pstate_ok(0xF000_0000 | (1 << 21) | (1 << 22) | 0x3C0));
+        for m in 1u64..=0x1F {
+            assert!(!el0_pstate_ok(m), "M = {m:#x}");
+        }
+        assert!(!el0_pstate_ok(1 << 20), "IL");
+    }
+
+    #[test]
+    fn ring3_action_covers_ecs_0x00_to_0x3f_and_slots() {
+        // Every EL0 synchronous class ends in a signal, the syscall path, or
+        // a step over a trapped `wfi`/`wfe`: a `NotRing3` there would leave
+        // `try_user_trap` to return and the instruction to fault again
+        // forever (rule 3).
+        for ec in 0u8..=0x3F {
+            let got = action(SLOT_LOWER_A64_SYNC, esr(ec));
+            match ec {
+                0x15 => assert_eq!(got, Ring3Action::Syscall, "ec {ec:#x}"),
+                0x01 => assert_eq!(got, Ring3Action::StepOver, "ec {ec:#x}"),
+                _ => assert!(
+                    matches!(got, Ring3Action::Signal { .. }),
+                    "ec {ec:#x} -> {got:?}"
+                ),
+            }
+        }
+        for slot in [
+            SLOT_CURRENT_SP0_IRQ,
+            SLOT_CURRENT_SPX_IRQ,
+            SLOT_LOWER_A64_IRQ,
+            SLOT_LOWER_A32_IRQ,
+        ] {
+            assert_eq!(action(slot, 0), Ring3Action::NotRing3, "irq slot {slot}");
+            assert!(matches!(decode(slot, 0), TrapKind::Interrupt(_)));
+        }
+        for slot in [
+            SLOT_CURRENT_SP0_FIQ,
+            SLOT_CURRENT_SPX_FIQ,
+            SLOT_LOWER_A64_FIQ,
+            SLOT_LOWER_A32_FIQ,
+        ] {
+            assert_eq!(action(slot, 0), Ring3Action::NotRing3, "fiq slot {slot}");
+            assert_eq!(decode(slot, 0), TrapKind::Fiq);
+        }
+        for slot in [
+            SLOT_CURRENT_SP0_SERROR,
+            SLOT_CURRENT_SPX_SERROR,
+            SLOT_LOWER_A64_SERROR,
+            SLOT_LOWER_A32_SERROR,
+        ] {
+            assert_eq!(action(slot, 0), Ring3Action::NotRing3, "serror slot {slot}");
+            assert_eq!(decode(slot, 0), TrapKind::SError);
+        }
+    }
+
+    #[test]
+    fn design_11_5_rows() {
+        assert_eq!(sig(SLOT_LOWER_A64_SYNC, esr(0x00)), (SIGILL, ILL_ILLOPC));
+        assert_eq!(
+            action(SLOT_LOWER_A64_SYNC, esr(0x01)),
+            Ring3Action::StepOver
+        );
+        assert_eq!(sig(SLOT_LOWER_A64_SYNC, esr(0x07)), (SIGILL, ILL_ILLOPC));
+        assert_eq!(sig(SLOT_LOWER_A64_SYNC, esr(0x0D)), (SIGILL, ILL_ILLOPC));
+        assert_eq!(sig(SLOT_LOWER_A64_SYNC, esr(0x0E)), (SIGILL, ILL_ILLOPC));
+        assert_eq!(action(SLOT_LOWER_A64_SYNC, esr(0x15)), Ring3Action::Syscall);
+        assert_eq!(sig(SLOT_LOWER_A64_SYNC, esr(0x18)), (SIGILL, ILL_ILLOPC));
+        assert_eq!(sig(SLOT_LOWER_A64_SYNC, esr(0x19)), (SIGILL, ILL_ILLOPC));
+        assert_eq!(sig(SLOT_LOWER_A64_SYNC, esr(0x1D)), (SIGILL, ILL_ILLOPC));
+        assert_eq!(sig(SLOT_LOWER_A64_SYNC, esr(0x1C)), (SIGILL, ILL_ILLOPN));
+        assert_eq!(
+            sig(SLOT_LOWER_A64_SYNC, esr_iss(0x20, 0b000100)),
+            (SIGSEGV, SEGV_MAPERR)
+        );
+        assert_eq!(
+            sig(SLOT_LOWER_A64_SYNC, esr_iss(0x24, 0b001100)),
+            (SIGSEGV, SEGV_ACCERR)
+        );
+        assert_eq!(
+            sig(SLOT_LOWER_A64_SYNC, esr_iss(0x24, 0b100001)),
+            (SIGBUS, BUS_ADRALN)
+        );
+        assert_eq!(
+            sig(SLOT_LOWER_A64_SYNC, esr_iss(0x24, 0b010000)),
+            (SIGBUS, BUS_OBJERR)
+        );
+        assert_eq!(sig(SLOT_LOWER_A64_SYNC, esr(0x22)), (SIGBUS, BUS_ADRALN));
+        assert_eq!(sig(SLOT_LOWER_A64_SYNC, esr(0x26)), (SIGBUS, BUS_ADRALN));
+        match action(SLOT_LOWER_A64_SYNC, esr(0x2C)) {
+            Ring3Action::Signal { sig, .. } => assert_eq!(sig, SIGFPE),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(sig(SLOT_LOWER_A64_SYNC, esr(0x30)), (SIGTRAP, TRAP_HWBKPT));
+        assert_eq!(sig(SLOT_LOWER_A64_SYNC, esr(0x32)), (SIGTRAP, TRAP_TRACE));
+        assert_eq!(sig(SLOT_LOWER_A64_SYNC, esr(0x34)), (SIGTRAP, TRAP_HWBKPT));
+        assert_eq!(sig(SLOT_LOWER_A64_SYNC, esr(0x3C)), (SIGTRAP, TRAP_BRKPT));
+        assert_eq!(sig(SLOT_LOWER_A64_SYNC, esr(0x3F)), (SIGILL, ILL_ILLOPC));
+    }
+
+    #[test]
+    fn data_abort_wnr_and_fetch() {
+        let pf = |ec, iss| match decode(SLOT_LOWER_A64_SYNC, esr_iss(ec, iss)) {
+            TrapKind::PageFault(c) => c,
+            k => panic!("{k:?}"),
+        };
+        assert_eq!(
+            pf(0x24, 0b000100 | ISS_WNR),
+            PageFaultCause {
+                protection: false,
+                write: true,
+                fetch: false
+            }
+        );
+        assert_eq!(
+            pf(0x20, 0b000100 | ISS_WNR),
+            PageFaultCause {
+                protection: false,
+                write: false,
+                fetch: true
+            }
+        );
+    }
+
+    #[test]
+    fn el1_aborts_are_their_own_classes_only() {
+        for ec in 0u8..=0x3F {
+            // The ISS varies too: the class alone decides.
+            for iss in [0, 0x0000_0040, 0x0000_0005] {
+                let e = esr_iss(ec, iss);
+                assert_eq!(is_el1_data_abort(e), ec == 0x25, "data ec {ec:#x}");
+                assert_eq!(
+                    is_el1_abort(e),
+                    ec == 0x21 || ec == 0x25,
+                    "abort ec {ec:#x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_slot_decodes() {
+        for slot in 0u8..16 {
+            let _ = decode(slot, 0);
+        }
+    }
+
+    /// SYSCALL.md §1.1: the number is the low 32 bits of `x8`, unsigned,
+    /// arguments are `x0` to `x5`, and the result goes in `x0`.
+    #[test]
+    fn svc_entry_reads_low_32_of_x8_unsigned() {
+        let mut f = UserFrame::new_user(0x40_1004, 0x7fff_f000);
+        f.x = core::array::from_fn(|i| 0x100 + i as u64);
+        for (x8, want) in [
+            (64, 64),
+            (0xFFFF_FFFF_0000_0040, 0x40),
+            (0x8000_0040, 0x8000_0040),
+            (u64::MAX, 0xFFFF_FFFF),
+        ] {
+            let mut g = f;
+            g.x[8] = x8;
+            assert_eq!(g.svc_entry(), want, "x8 {x8:#x}");
+            assert_eq!(Abi::nr(&g), want, "x8 {x8:#x}");
+            assert_eq!(g.orig_x0, 0x100);
+        }
+        // A number with bit 31 set is no table row: ENOSYS, not a negative
+        // index.
+        assert_eq!(Abi::table().lookup(0x8000_0040), None);
+        assert_eq!(
+            Abi::table().lookup(0xFFFF_FFFF_0000_0040),
+            Some(crate::proc::syscall::Sys::Write)
+        );
+        for i in 0..6 {
+            assert_eq!(Abi::arg(&f, i), 0x100 + i as u64);
+        }
+        assert_eq!(Abi::arg(&f, 6), 0);
+        let mut r = f;
+        Abi::set_ret(&mut r, (-9i64) as u64);
+        assert_eq!(r.x[0] as i64, -9);
+    }
+
+    #[test]
+    fn user_pt_regs_layout_is_linux() {
+        use core::mem::{offset_of, size_of};
+        // `arch/arm64/include/uapi/asm/ptrace.h` `user_pt_regs`, then
+        // `orig_x0` and the syscall number (DESIGN §5.10).
+        assert_eq!(size_of::<UserFrame>(), 288);
+        assert_eq!(offset_of!(UserFrame, x), 0);
+        assert_eq!(offset_of!(UserFrame, sp), 248);
+        assert_eq!(offset_of!(UserFrame, pc), 256);
+        assert_eq!(offset_of!(UserFrame, pstate), 264);
+        assert_eq!(offset_of!(UserFrame, orig_x0), 272);
+        assert_eq!(offset_of!(UserFrame, syscallno), 280);
+        let f = UserFrame::new_user(0x40_0000, 0x7fff_f000);
+        assert_eq!((f.pc, f.sp, f.pstate), (0x40_0000, 0x7fff_f000, 0));
+        assert_eq!(f.syscallno, u64::MAX);
+        assert_eq!(f.x[0], 0);
+        let e = UserFrame::exec_from(0x40_0000, 0x7fff_f000, 221);
+        assert_eq!(
+            (e.pc, e.sp, e.pstate, e.syscallno),
+            (0x40_0000, 0x7fff_f000, 0, 221)
+        );
+        let mut r = f;
+        r.orig_x0 = 7;
+        r.pc = 0x40_1004;
+        Abi::restart(&mut r);
+        assert_eq!(r.x[0], 7);
+        assert_eq!(r.pc, 0x40_1000);
+        assert_eq!(Abi::nr(&UserFrame { syscallno: 64, ..f }), 64);
+        assert_eq!(
+            Abi::arg(
+                &UserFrame {
+                    x: {
+                        let mut x = [0; 31];
+                        x[0] = 1;
+                        x[1] = 2;
+                        x[5] = 6;
+                        x
+                    },
+                    ..f
+                },
+                5
+            ),
+            6
+        );
+        let mut ret = f;
+        Abi::set_ret(&mut ret, 9);
+        assert_eq!(ret.x[0], 9);
+    }
+}

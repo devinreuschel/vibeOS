@@ -1,13 +1,15 @@
 use core::any::Any;
+use core::sync::atomic::Ordering;
 
-use super::issue::{copy_from_bounce, slot_base};
+use super::issue::{PUMP_BATCH, copy_from_bounce, slot_base};
 use super::*;
 
 impl VirtioBlk {
-    /// This disk's vector allocated on `cpu`, valid only on that CPU.
+    /// This disk's IDT vector allocated on `cpu`, valid only on that CPU.
     #[cfg(feature = "kernel_tests")]
     pub fn queue_vector(&self, cpu: u32) -> Option<u8> {
         self.queue_vecs.iter().find_map(|q| {
+            // Acquire: pairs with the Release store in `setup`.
             let v = q.load(Ordering::Acquire);
             (v & QUEUE_VEC_LIVE != 0 && ((v & !QUEUE_VEC_LIVE) >> 8) as u32 == cpu)
                 .then_some(v as u8)
@@ -17,6 +19,7 @@ impl VirtioBlk {
     /// `st`, or `S_UNSUPP` while an injected failure is left (test-only).
     #[cfg(feature = "kernel_tests")]
     fn injected(&self, st: u8) -> u8 {
+        // AcqRel, Acquire on failure: pairs with the Release store in `inject_unsupp`.
         let take = self
             .inject_unsupp
             .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
@@ -28,60 +31,89 @@ impl VirtioBlk {
     }
 
     pub(super) fn harvest(&self) {
-        let mut done: [Option<(Request, Result<(), BlockError>)>; N_SLOTS] = [None; N_SLOTS];
-        let mut n = 0usize;
-        {
-            let mut g = self.st.lock();
-            let Some(blk) = g.as_deref_mut() else {
-                return;
-            };
-            let mut qi = 0usize;
-            while qi < blk.nq as usize {
-                if let Some(v) = blk.vqs[qi].as_mut() {
-                    while let Some(u) = v.vq.get_used() {
-                        let id = u.id as usize;
-                        let si = if id < MAX_QSIZE {
-                            let s = v.inflight[id];
-                            v.inflight[id] = FREE;
-                            s
-                        } else {
-                            FREE
-                        };
-                        if si == FREE || (si as usize) >= N_SLOTS {
-                            continue;
-                        }
-                        let si = si as usize;
-                        blk.slots.sync_for_cpu::<Arch>();
-                        // SAFETY: slot `si` is in flight on this queue, so the
-                        // device wrote its status byte at offset 16, synced for
-                        // the CPU above; established by
-                        // `virtio_blk_init::issue::slot_base`.
-                        let st = unsafe { *slot_base(&blk.slots, si).add(16) };
-                        #[cfg(feature = "kernel_tests")]
-                        let st = self.injected(st);
-                        let res = map_status(st);
-                        if let Some(req) = blk.slot_req[si].take() {
-                            if res.is_ok() && req.bio.op == Op::Read {
-                                copy_from_bounce(&blk.slots, si, &req);
+        // [`PUMP_BATCH`] completions at a time, same as [`pump`](Self::pump):
+        // a `[Request; N_SLOTS]` local is ~4 KiB, and this runs on irqth's
+        // 16 KiB stack under a top half (DESIGN §4.5).
+        let mut bad = false;
+        loop {
+            let mut done: [Option<(Request, Result<(), BlockError>)>; PUMP_BATCH] =
+                [None; PUMP_BATCH];
+            let mut n = 0usize;
+            {
+                let mut g = self.st.lock();
+                let Some(blk) = g.as_deref_mut() else {
+                    return;
+                };
+                let mut qi = 0usize;
+                while qi < blk.nq as usize && n < PUMP_BATCH && !bad {
+                    if let Some(v) = blk.vqs[qi].as_mut() {
+                        while n < PUMP_BATCH {
+                            let u = match v.vq.get_used() {
+                                Ok(Some(u)) => u,
+                                Ok(None) => break,
+                                Err(_) => {
+                                    bad = true;
+                                    break;
+                                }
+                            };
+                            // The queue vouches for `id`: in flight and below its size.
+                            let id = u.id as usize;
+                            let si = v.inflight.get(id).copied().unwrap_or(FREE);
+                            if let Some(e) = v.inflight.get_mut(id) {
+                                *e = FREE;
                             }
-                            if n < N_SLOTS {
+                            if si == FREE || (si as usize) >= N_SLOTS {
+                                bad = true;
+                                break;
+                            }
+                            let si = si as usize;
+                            let stride = blk.stride;
+                            // Before the CPU reads the slot: a non-coherent
+                            // device's slot is invalidated line by line.
+                            take_slot::<Arch>(&blk.slots, si, stride);
+                            // SAFETY: slot `si` is in flight on this queue, so the
+                            // device wrote its status byte at `SLOT_STATUS`, synced
+                            // for the CPU above; established by
+                            // `virtio_blk_init::issue::slot_base`.
+                            let st = unsafe { *slot_base(&blk.slots, si, stride).add(SLOT_STATUS) };
+                            #[cfg(feature = "kernel_tests")]
+                            let st = self.injected(st);
+                            let res = map_status(st);
+                            if let Some(req) = blk.slot_req[si].take() {
+                                if res.is_ok() && req.bio.op == Op::Read {
+                                    copy_from_bounce(&blk.slots, si, stride, &req);
+                                }
                                 done[n] = Some((req, res));
                                 n += 1;
                             }
+                            blk.slot_used[si] = false;
+                            self.completions.fetch_add(1, Ordering::SeqCst);
                         }
-                        blk.slot_used[si] = false;
-                        self.completions.fetch_add(1, Ordering::SeqCst);
                     }
+                    qi += 1;
                 }
-                qi += 1;
+            }
+            let mut i = 0usize;
+            while i < n {
+                if let Some((req, res)) = done[i].take() {
+                    self.finish(req, res);
+                }
+                i += 1;
+            }
+            if n == 0 || bad {
+                break;
             }
         }
-        let mut i = 0usize;
-        while i < n {
-            if let Some((req, res)) = done[i].take() {
-                self.finish(req, res);
-            }
-            i += 1;
+        if bad {
+            // The device broke the used ring: nothing it says can be trusted.
+            crate::klog_ratelimited!(
+                1000,
+                vibeos::log::Level::Error,
+                "vibeOS: virtio-blk: {}: bad used ring, failing the device",
+                self.name()
+            );
+            self.fail_rest();
+            return;
         }
         self.pump();
     }
@@ -97,11 +129,21 @@ pub(super) fn blk_top(ctx: Option<&(dyn Any + Send + Sync)>) {
         return;
     };
     b.top_hits.fetch_add(1, Ordering::SeqCst);
-    let isr = b.isr.load(Ordering::Acquire);
-    if isr != 0 {
-        // Reading the ISR status acknowledges the interrupt; the value
-        // itself is not needed (virtio 1.x §4.1.4.5).
-        let _ = r8(isr, 0);
+    // Acquire: pairs with the Release store in `setup`.
+    if b.mmio.load(Ordering::Acquire) {
+        // Acquire: pairs with the Release store of `common` in `setup_mmio`.
+        let base = b.common.load(Ordering::Acquire);
+        if base != 0 {
+            crate::virtio_mmio_init::ack_isr(base);
+        }
+    } else {
+        // Acquire: pairs with the Release store in `setup`.
+        let isr = b.isr.load(Ordering::Acquire);
+        if isr != 0 {
+            // Reading the ISR status acknowledges the interrupt; the value
+            // itself is not needed (virtio 1.x §4.1.4.5).
+            let _ = crate::virtio_init::read_isr8(isr);
+        }
     }
 }
 

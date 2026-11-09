@@ -1,0 +1,10 @@
+X86 vibeos-dma-mb-used-x86
+(* used_event store, MFENCE, then the used index reload, and the same
+   shape on the device. Both loads reading the old value is forbidden. *)
+{
+}
+ P0                      | P1                      ;
+ MOV [used_event],$1     | MOV [used_idx],$1       ;
+ MFENCE                  | MFENCE                  ;
+ MOV EAX,[used_idx]      | MOV EBX,[used_event]   ;
+exists (0:EAX=0 /\ 1:EBX=0)

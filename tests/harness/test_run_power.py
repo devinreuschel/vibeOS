@@ -25,7 +25,7 @@ def k(text: str) -> str:
 def boot_lines(row: str = ROW, line: str = LINE) -> list[str]:
     """A boot that runs `row` and prints `line`."""
     return [
-        k("vibeOS: limine: rev 3 ok"),
+        k("vibeOS: limine: rev 6 ok"),
         k("vibeOS: ktest: begin 1"),
         k(f"vibeOS: ktest: run {row} 10000"),
         k(line),

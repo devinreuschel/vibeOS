@@ -20,14 +20,22 @@ import tomllib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from tests.harness.harness import HarnessError, QemuConfig, effective_accel_name, qemu_argv
+from tests.harness.harness import (
+    HarnessError,
+    QemuConfig,
+    effective_accel_name,
+    guest_cpu,
+    qemu_argv,
+)
 
 SKIPS_TOML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skips.toml")
 
 # The configuration fields a row may constrain; `smp` is an integer.
 FIELDS = ("arch", "accel", "cpu", "smp", "mem", "machine", "host")
 _INT_FIELDS = frozenset({"smp"})
-_KEYS = frozenset({"name", "reason", *FIELDS})
+# `counterpart` / `no_counterpart` are check_arch.py's aarch64 fields
+# (ROADMAP §11.1); they do not constrain a launch.
+_KEYS = frozenset({"name", "reason", "counterpart", "no_counterpart", *FIELDS})
 # A `VIBEOS_KTEST` item holding one of these is a glob, not a name.
 GLOB_CHARS = "*?["
 
@@ -115,7 +123,7 @@ def launch_config(cfg: QemuConfig) -> dict[str, Value]:
     return {
         "arch": arch,
         "accel": effective_accel_name(cfg),
-        "cpu": cfg.cpu,
+        "cpu": guest_cpu(cfg),
         "smp": cfg.smp,
         "mem": cfg.mem,
         "machine": _machine(argv),

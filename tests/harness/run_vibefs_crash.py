@@ -276,7 +276,7 @@ def main() -> int:
     args = ap.parse_args()
     plants = [p for p in args.plants.split(",") if p]
     env = env_config(default_iso=default_iso("vibefs-crash"), default_timeout=BOOT_ALLOWANCE_S)
-    res = results.Results(env.tier)
+    res = results.Results(env.tier, env.arch)
     tools = Tools(
         mkfs=env_str("VIBEOS_MKFS", "mkfs-vibefs"),
         fsck=env_str("VIBEOS_FSCK", "fsck-vibefs"),

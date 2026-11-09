@@ -4,14 +4,14 @@
 use vibeos::proc::wait_exited;
 
 use crate::ktest::Outcome;
-use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::user::{self, DEFAULT, Image, x86_user_code};
 
 // getpid; psinfo into a 512-byte stack buffer and parse this process's
 // line's last field as c1, which is 2 (getpid and psinfo: a new thread
 // starts at 0, and an entry counts before its body runs); 20 getpids;
 // psinfo again for c2; exit with c2 - c1, or 255 if c1 is not 2 or the
 // line is missing.
-user_code!(
+x86_user_code!(
     SYSCALL_COUNT,
     "
     mov eax, 39

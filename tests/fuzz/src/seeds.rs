@@ -11,7 +11,7 @@ use vibeos::elf;
 use vibeos::fat::{self, FatInode, FatVol};
 use vibeos::fs::InodeKind;
 use vibeos::log::vmcore::{
-    self,
+    self, Machine,
     synth::{SymDef, Synth, kernel_elf},
 };
 use vibeos::log::vmcoreinfo;
@@ -67,6 +67,16 @@ pub fn corpus() -> Vec<Seed> {
         "vibefs",
         Sparse::encode_image(0, &vibefs_image(), vibefs::BLOCK),
     ));
+    out.push(seed(
+        "fdt_parse",
+        "two-uarts",
+        include_bytes!("../../../crates/core/src/machine/testdata/two-uarts.dtb").to_vec(),
+    ));
+    out.push(seed(
+        "fdt_parse",
+        "reserved-both",
+        include_bytes!("../../../crates/core/src/machine/testdata/reserved-both.dtb").to_vec(),
+    ));
     out.push(seed("pci_enumerate", "bus", pci_bus()));
     out.push(seed(
         "virtio_caps",
@@ -95,7 +105,12 @@ pub fn corpus() -> Vec<Seed> {
         out.push(seed("elf_parse", &name, data));
     }
     out.push(seed("cmdline_parse", "options", cmdline_seed()));
-    out.push(seed("vmcore", "core", vmcore_core()));
+    out.push(seed("vmcore", "core", vmcore_core(Machine::X86_64)));
+    out.push(seed(
+        "vmcore",
+        "core-aarch64",
+        vmcore_core(Machine::Aarch64),
+    ));
     out.push(seed("vmcore", "elf", vmcore_elf()));
     out.push(seed("vmcoreinfo_parse", "note", vmcoreinfo_note()));
     out.push(seed("vmcoreinfo_parse", "build-id", build_id_note()));
@@ -705,11 +720,12 @@ pub fn cmdline_seed() -> Vec<u8> {
 /// The kernel VA of the core seed's one mapped page run.
 const VMCORE_KBASE: u64 = 0xFFFF_FFFF_8000_0000;
 
-/// A 64 KiB physical core: a four-level table mapping 16 KiB at
-/// [`VMCORE_KBASE`], a two-frame `rbp` chain there, a VMCOREINFO note whose
-/// roots lie in that run, and two `NT_PRSTATUS` notes.
-fn vmcore_core() -> Vec<u8> {
-    let mut s = Synth::new(&[(0, 0x1_0000)]);
+/// A 64 KiB physical `machine` core: a four-level table (a PML4, or a TTBR1
+/// table) mapping 16 KiB at [`VMCORE_KBASE`], a two-frame `rbp` chain
+/// there, a VMCOREINFO note whose roots lie in that run, and two
+/// `NT_PRSTATUS` notes.
+fn vmcore_core(machine: Machine) -> Vec<u8> {
+    let mut s = Synth::new_for(machine, &[(0, 0x1_0000)]);
     for i in 0..4u64 {
         s.map(VMCORE_KBASE + i * 0x1000, 0x1000 + i * 0x1000, 0x1000, 0);
     }

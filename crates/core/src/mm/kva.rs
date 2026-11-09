@@ -61,6 +61,15 @@ impl KvaError {
     }
 }
 
+/// What one [`Kva::place`] search found.
+enum Placed {
+    At(u64),
+    /// No free range holds the placement.
+    NoFit,
+    /// The placement splits a range, and no node is spare for the split.
+    NoNode,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Range {
     start: u64,
@@ -113,6 +122,20 @@ pub struct KvaStats {
     pub used: u64,
     pub capacity: u64,
     pub free_ranges: usize,
+}
+
+/// Smallest `s >= range_start` with `s ≡ offset (mod align)`.
+fn first_aligned(range_start: u64, align: u64, offset: u64) -> Option<u64> {
+    if align == 0 {
+        return None;
+    }
+    let rem = range_start % align;
+    let delta = if rem <= offset {
+        offset - rem
+    } else {
+        align - rem + offset
+    };
+    range_start.checked_add(delta)
 }
 
 // Node links are `u16`, and `alloc`'s cap of `MAX_RANGES - 2` live ranges
@@ -195,43 +218,113 @@ impl Kva {
     /// First-fit. `len` page-aligned. Returns the start VA. `None` when no
     /// free range fits, or when `MAX_RANGES - 2` ranges are live already.
     pub fn alloc(&mut self, len: u64) -> Option<u64> {
-        if len == 0 || !len.is_multiple_of(PAGE_SIZE) || self.live >= LIVE_CAP {
+        self.alloc_placed(len, PAGE_SIZE, 0)
+    }
+
+    /// First-fit of `len` bytes at `start ≡ offset (mod align)`. A placement
+    /// that splits a range with no spare node coalesces the list first, as
+    /// [`Kva::free`] does, and searches once more.
+    pub fn alloc_placed(&mut self, len: u64, align: u64, offset: u64) -> Option<u64> {
+        if len == 0
+            || !len.is_multiple_of(PAGE_SIZE)
+            || align == 0
+            || !align.is_multiple_of(PAGE_SIZE)
+            || offset >= align
+            || !offset.is_multiple_of(PAGE_SIZE)
+            || self.live >= LIVE_CAP
+        {
             return None;
         }
+        match self.place(len, align, offset) {
+            Placed::At(start) => Some(start),
+            Placed::NoFit => None,
+            Placed::NoNode => {
+                // Coalescing changes no used, live, or free bytes, and a
+                // failed retry keeps that. It does move ranges freed before
+                // this call into address order, so one can be handed out
+                // sooner. `free` reads no list order (it appends and checks
+                // counts), and it coalesces the same way when it has no
+                // spare node, as a retry that succeeds does.
+                self.coalesce_all();
+                match self.place(len, align, offset) {
+                    Placed::At(start) => Some(start),
+                    Placed::NoFit | Placed::NoNode => None,
+                }
+            }
+        }
+    }
+
+    /// One first-fit search of [`Kva::alloc_placed`], with its split.
+    fn place(&mut self, len: u64, align: u64, offset: u64) -> Placed {
         let mut prev: Option<u16> = None;
         let mut cur = self.head;
         while let Some(i) = cur {
             let r = self.nodes[i as usize];
-            if r.len >= len {
-                let start = r.start;
-                if r.len == len {
+            if let Some(start) = first_aligned(r.start, align, offset)
+                && start
+                    .checked_add(len)
+                    .is_some_and(|end| end <= r.start + r.len)
+                && start >= r.start
+            {
+                let prefix = start - r.start;
+                let suffix_start = start + len;
+                let suffix = (r.start + r.len) - suffix_start;
+                if prefix > 0 && suffix > 0 {
+                    let Some(j) = self.alloc_slot() else {
+                        return Placed::NoNode;
+                    };
+                    self.nodes[i as usize] = Range {
+                        start: r.start,
+                        len: prefix,
+                    };
+                    self.nodes[j as usize] = Range {
+                        start: suffix_start,
+                        len: suffix,
+                    };
+                    self.next[j as usize] = self.next[i as usize];
+                    self.next[i as usize] = Some(j);
+                    if self.tail == Some(i) {
+                        self.tail = Some(j);
+                    }
+                } else if prefix > 0 {
+                    self.nodes[i as usize] = Range {
+                        start: r.start,
+                        len: prefix,
+                    };
+                } else if suffix > 0 {
+                    self.nodes[i as usize] = Range {
+                        start: suffix_start,
+                        len: suffix,
+                    };
+                } else {
                     self.unlink(prev, i);
                     self.free_slot(i);
-                } else {
-                    self.nodes[i as usize] = Range {
-                        start: r.start + len,
-                        len: r.len - len,
-                    };
                 }
                 self.used += len;
                 self.live += 1;
-                return Some(start);
+                return Placed::At(start);
             }
             prev = cur;
             cur = self.next[i as usize];
         }
-        None
+        Placed::NoFit
     }
 
-    /// Reserve `pages + 1` pages. First page is the guard (returned as
-    /// `guard`); mapped region starts at `guard + PAGE_SIZE` and is
-    /// `pages` pages long.
+    /// Reserve `2S` VA for a power-of-two stack of `pages` pages (`S`).
+    /// Returns the guard start: `S` unmapped bytes, then the stack at a
+    /// `2S`-aligned address (DESIGN §4.5).
     pub fn alloc_guarded(&mut self, pages: usize) -> Option<u64> {
-        if pages == 0 {
+        if pages == 0 || !pages.is_power_of_two() {
             return None;
         }
-        let len = (pages as u64 + 1) * PAGE_SIZE;
-        self.alloc(len)
+        let s = (pages as u64).checked_mul(PAGE_SIZE)?;
+        let total = s.checked_mul(2)?;
+        self.alloc_placed(total, total, s)
+    }
+
+    /// VA bytes a guarded stack of `pages` mapped pages occupies.
+    pub const fn guarded_va_len(pages: usize) -> u64 {
+        (pages as u64).saturating_mul(PAGE_SIZE).saturating_mul(2)
     }
 
     /// Append `[start, start+len)`, a range `alloc` handed out, to the
@@ -395,13 +488,36 @@ mod tests {
     }
 
     #[test]
-    fn guarded_reserves_pages_plus_one() {
+    fn guarded_reserves_2s_aligned() {
         let mut k = fresh();
         let guard = k.alloc_guarded(4).unwrap();
-        assert_eq!(guard, KVA_START);
-        assert_eq!(k.stats().used, 5 * PAGE_SIZE);
-        k.free(guard, 5 * PAGE_SIZE);
+        let s = 4 * PAGE_SIZE;
+        let stack = guard + s;
+        assert_eq!(stack % (2 * s), 0);
+        assert_eq!(guard + s, stack);
+        assert_eq!(k.stats().used, 8 * PAGE_SIZE);
+        let bit = s.trailing_zeros();
+        assert_eq!(stack & (1 << bit), 0);
+        assert_ne!(guard & (1 << bit), 0);
+        k.free(guard, Kva::guarded_va_len(4));
         assert_eq!(k.stats().used, 0);
+        assert!(k.alloc_guarded(3).is_none());
+        assert!(k.alloc_guarded(0).is_none());
+    }
+
+    #[test]
+    fn guarded_each_power_of_two_size() {
+        for pages in [1usize, 2, 4, 8] {
+            let mut k = window(64);
+            let guard = k.alloc_guarded(pages).unwrap();
+            let s = pages as u64 * PAGE_SIZE;
+            let stack = guard + s;
+            assert_eq!(stack % (2 * s), 0, "pages={pages}");
+            let bit = s.trailing_zeros();
+            assert_eq!(stack & (1 << bit), 0);
+            assert_ne!(guard & (1 << bit), 0);
+            k.free(guard, Kva::guarded_va_len(pages));
+        }
     }
 
     #[test]
@@ -526,6 +642,29 @@ mod tests {
         k.coalesce_all();
         assert_eq!(k.free_list(), std::vec![(KVA_START, 64 * PAGE_SIZE)]);
         assert_eq!(k.stats().used, 0);
+    }
+
+    #[test]
+    fn placed_split_coalesces_when_no_node_is_spare() {
+        let mut k = window(4 * MAX_RANGES as u64);
+        // Each placement at an odd page splits a range and so takes a node:
+        // after LIVE_CAP of them one node is spare.
+        let mut live = std::vec::Vec::new();
+        for _ in 0..LIVE_CAP {
+            live.push(k.alloc_placed(PAGE_SIZE, 2 * PAGE_SIZE, PAGE_SIZE).unwrap());
+        }
+        assert_eq!(k.nslots, 1);
+        // The free takes the last spare node.
+        k.free(live[0], PAGE_SIZE);
+        assert_eq!(k.nslots, 0);
+        // Only the large remainder holds a page at 3 pages mod 4 with room on
+        // both sides, so this placement needs a split and no node is spare.
+        let va = k
+            .alloc_placed(PAGE_SIZE, 4 * PAGE_SIZE, 3 * PAGE_SIZE)
+            .expect("a split with no spare node coalesces and places");
+        assert_eq!((va - KVA_START) % (4 * PAGE_SIZE), 3 * PAGE_SIZE);
+        assert_eq!(k.live, LIVE_CAP);
+        assert!(k.nslots > 0, "the coalesce left a spare node");
     }
 
     #[test]

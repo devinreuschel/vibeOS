@@ -1,0 +1,9 @@
+X86 vibeos-secondary-status-x86
+(* A plain load, then the status store; the other side loads the status,
+   then stores into the page. TSO forbids load buffering. No MFENCE. *)
+{
+}
+ P0               | P1               ;
+ MOV EAX,[param]  | MOV EBX,[status] ;
+ MOV [status],$1  | MOV [param],$2   ;
+exists (0:EAX=2 /\ 1:EBX=1)

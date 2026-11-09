@@ -67,10 +67,22 @@ class TestScan(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(len(scan([nm_line(name + H)])), 1)
 
+    def test_aarch64_and_ktest_hooks(self) -> None:
+        for name, kind in (("vibeos::arch::aarch64::catch::BUF", "b"),
+                           ("VIBEOS_ERET_BP_ARMED", "B"),
+                           ("vibeos_fault_on_bad_stack", "T"),
+                           ("vibeos_user_code_EL0_BRK", "T"),
+                           ("vibeos::proc::syscall_init_aarch64::testing::ERET_BP_HITS", "b"),
+                           ("vibeos::arch::aarch64::ktest_el0::run" + H, "t"),
+                           ("vibeos::fs::fat_init::ktest_root_file" + H, "t")):
+            with self.subTest(name=name):
+                self.assertEqual(len(scan([nm_line(name, kind)])), 1)
+
     def test_production_names_pass(self) -> None:
         names = ("vibeos::arch::x86_64::idt::trap_dispatch", "vibeos::block::block_init::execute",
                  "vibeos::proc::catch_signal", "vibeos::log::panic::panic",
-                 "vibeos::arch::x86_64::catchall::f")
+                 "vibeos::arch::x86_64::catchall::f", "vibeos::arch::aarch64::vectors::dispatch",
+                 "vibeos_el0_eret", "VIBEOS_TRACE", "vibeos::x::mktest")
         self.assertEqual(scan([nm_line(n + H) for n in names]), [])
 
 
@@ -120,8 +132,49 @@ class TestMain(unittest.TestCase):
             rc, _, _ = self.run_main(["--elf", str(d / "vibeos"), "--nm", str(d / "no-nm")])
             self.assertEqual(rc, 2)
 
+    def test_planted_leak_in_aarch64_elf_exits_1(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            elf = d / "aarch64-unknown-none-softfloat" / "hookcheck" / "vibeos"
+            elf.parent.mkdir(parents=True)
+            elf.write_bytes(b"\x7fELF")
+            clean = self.fake_nm(d, [nm_line("vibeos::arch::aarch64::vectors::dispatch" + H, "T")])
+            argv = ["--target", "aarch64-unknown-none-softfloat", "--nm", clean]
+            old = os.environ.get("CARGO_TARGET_DIR")
+            os.environ["CARGO_TARGET_DIR"] = str(d)
+            try:
+                rc, out, _ = self.run_main(argv)
+                self.assertEqual(rc, 0, out)
+                leak = self.fake_nm(d, [nm_line("VIBEOS_ERET_BP_ARMED", "B")])
+                rc, _, err = self.run_main(["--target", "aarch64-unknown-none-softfloat",
+                                            "--nm", leak])
+                self.assertEqual(rc, 1)
+                self.assertIn("VIBEOS_ERET_BP_ARMED:", err)
+                self.assertIn(str(elf), err)
+            finally:
+                if old is None:
+                    os.environ.pop("CARGO_TARGET_DIR", None)
+                else:
+                    os.environ["CARGO_TARGET_DIR"] = old
+
+    def test_default_target_follows_vibeos_arch(self) -> None:
+        old = os.environ.get("VIBEOS_ARCH")
+        try:
+            os.environ.pop("VIBEOS_ARCH", None)
+            self.assertEqual(check_test_hooks.default_target(), "x86_64-unknown-none")
+            os.environ["VIBEOS_ARCH"] = "aarch64"
+            self.assertEqual(check_test_hooks.default_target(), "aarch64-unknown-none-softfloat")
+            self.assertTrue(check_test_hooks.default_elf().endswith(
+                "aarch64-unknown-none-softfloat/hookcheck/vibeos"))
+        finally:
+            if old is None:
+                os.environ.pop("VIBEOS_ARCH", None)
+            else:
+                os.environ["VIBEOS_ARCH"] = old
+
     def test_default_elf_follows_cargo_target_dir(self) -> None:
         old = os.environ.get("CARGO_TARGET_DIR")
+        old_arch = os.environ.pop("VIBEOS_ARCH", None)
         try:
             os.environ["CARGO_TARGET_DIR"] = "/x/t"
             self.assertEqual(check_test_hooks.default_elf(),
@@ -134,6 +187,8 @@ class TestMain(unittest.TestCase):
                 os.environ.pop("CARGO_TARGET_DIR", None)
             else:
                 os.environ["CARGO_TARGET_DIR"] = old
+            if old_arch is not None:
+                os.environ["VIBEOS_ARCH"] = old_arch
 
 
 class TestSourceRules(unittest.TestCase):

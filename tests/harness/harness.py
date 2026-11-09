@@ -15,18 +15,22 @@ Drivers live in `run_*.py` and must not parse the environment or build argv;
 | Variable | Default | Drivers |
 |---|---|---|
 | `VIBEOS_ISO` | per driver | all, `run_interactive` |
-| `VIBEOS_SMP` | `2` | all, `run_interactive` |
+| `VIBEOS_ARCH` | `x86_64` | all (`qemu_argv`, `env_config`); `aarch64` is ROADMAP §11.3 / §11.7 |
+| `VIBEOS_GIC` | `3` on aarch64 | `qemu_argv` (`gic-version=2` or `3`) |
+| `VIBEOS_MACHINE` | virt+gic | aarch64 `-machine`; `virtualization=on` pins EL2 |
+| `VIBEOS_SMP` | `2` (`1` on aarch64) | all, `run_interactive` |
 | `VIBEOS_QEMU_CPU` | `max` | all, `run_interactive` |
 | `VIBEOS_MEM` | `128M` | all, `run_interactive` |
 | `VIBEOS_BIOS` | unset, `seabios`: SeaBIOS; `uefi`: probe, pflash | all, `run_interactive` |
 | `VIBEOS_FW_X86_64` | probed (`FIRMWARE_TABLE`) | all, `run_interactive` (`VIBEOS_BIOS=uefi`) |
-| `VIBEOS_FW_AARCH64` | probed (`FIRMWARE_TABLE`) | none yet (ROADMAP §11.7) |
+| `VIBEOS_FW_AARCH64` | probed (`FIRMWARE_TABLE`) | aarch64 boots (always UEFI) |
 | `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all, `run_interactive` |
 | `VIBEOS_TIMEOUT` | `60` (`BOOT_ALLOWANCE_S`), none interactive | all, `run_interactive` |
 | `VIBEOS_QEMU_EXTRA` | empty | all, `run_interactive` |
 | `VIBEOS_TIER` | `adhoc`; each `make test-*` recipe sets its target name | all (`results.py`) |
 | `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
 | `VIBEOS_GP_TEST` | off | `run_e2e` |
+| `VIBEOS_EARLY_FAULT` | off | `run_e2e` |
 | `VIBEOS_EXPECT_PIT` | off | `run_e2e` |
 | `VIBEOS_MCE_TEST` | off | `run_e2e` |
 | `VIBEOS_SKIP_PERSIST` | off | `run_ktest` |
@@ -87,10 +91,42 @@ ROWS: tuple[registry.Row, ...] = registry.load_rows()
 # (DESIGN §9.7). A user program's line never matches: every driver also fails
 # on `frame.USER_FAILURES` in user text and on `frame.LIMINE_SIGNATURES`
 # before the first framed line.
-PANIC_SIGNATURES: tuple[str, ...] = registry.signatures(ROWS, {frame.KERNEL})
+#
+# Each architecture has its own: the `both` rows and its own (`registry`'s
+# arch filter), so an aarch64 boot fails on `#DABT` or `#UNDEF` and an x86_64
+# boot ignores them. Every consumer below takes the boot's architecture
+# (`QemuConfig.arch`, else `VIBEOS_ARCH`); `PANIC_SIGNATURES` and
+# `FAILURE_PATTERNS` are x86_64's, the reference architecture's.
+ARCHES = ("x86_64", "aarch64")
+_SIGNATURES: dict[str, tuple[str, ...]] = {
+    a: registry.signatures(ROWS, {frame.KERNEL}, a) for a in ARCHES
+}
 # The kernel `failure` rows with a placeholder before their last literal, as
 # patterns: a kernel line one of them matches fails the run too.
-FAILURE_PATTERNS: tuple[re.Pattern[str], ...] = registry.failure_patterns(ROWS, {frame.KERNEL})
+_FAILURE_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    a: registry.failure_patterns(ROWS, {frame.KERNEL}, a) for a in ARCHES
+}
+PANIC_SIGNATURES: tuple[str, ...] = _SIGNATURES["x86_64"]
+FAILURE_PATTERNS: tuple[re.Pattern[str], ...] = _FAILURE_PATTERNS["x86_64"]
+
+
+def boot_arch(arch: str | None = None) -> str:
+    """`arch`, else `VIBEOS_ARCH`, else x86_64: the architecture whose
+    failure lines a run checks."""
+    a = arch if arch is not None else os.environ.get("VIBEOS_ARCH", "x86_64")
+    if a not in ARCHES:
+        raise HarnessError(f"arch {a!r}: not x86_64 or aarch64")
+    return a
+
+
+def panic_signatures_for(arch: str | None = None) -> tuple[str, ...]:
+    """The kernel head signatures for `boot_arch(arch)`."""
+    return _SIGNATURES[boot_arch(arch)]
+
+
+def failure_patterns_for(arch: str | None = None) -> tuple[re.Pattern[str], ...]:
+    """The kernel failure patterns for `boot_arch(arch)`."""
+    return _FAILURE_PATTERNS[boot_arch(arch)]
 
 # End of the dump. An expected-panic run waits for this so backtrace/logrec
 # are in the log.
@@ -101,10 +137,15 @@ PANIC_EXIT_S = 10.0
 
 # The line that opens a dump, mirroring the headers `src/log/panic.rs` writes:
 # `panic` (the bare `PANIC_BANNER`), `begin_dump`'s `panic: reentered`,
-# `exception_vec`, and `exception_halt` for each kind `src/arch/x86_64/idt.rs`
-# passes it. Anchored at the start, so a `vibeOS: logrec:` replay never counts.
+# `exception_vec`, `exception_halt` for each kind `src/arch/x86_64/idt.rs`
+# passes it, `early_exception`'s one line, which is the whole of the early
+# handler's report, and the kernel stack overflow line `exception_halt_args`
+# opens the dump with on both architectures (ROADMAP §11.3). Anchored at the
+# start, so a `vibeOS: logrec:` replay never counts.
 DUMP_BANNER_RE = re.compile(
     r"^vibeOS: (?:panic:(?: reentered)?$"
+    r"|panic: early vec=0x"
+    r"|panic: stack overflow far=0x"
     r"|exception: vector \d+ rip=0x"
     r"|(?:#UD|nmi|#DB|#GP|#PF|#DF|#MC) rip=0x)"
 )
@@ -282,25 +323,36 @@ def core_report(core: str | os.PathLike[str], elf: str | os.PathLike[str]) -> st
     return "\n--- core report ---\n" + out.rstrip("\n")
 
 
-def panic_signature(raw: str, sigs: tuple[str, ...] = PANIC_SIGNATURES) -> str | None:
-    """The first of `sigs` in `raw`'s kernel text, else the first of
-    `FAILURE_PATTERNS` that matches it (as its pattern), else None."""
+def panic_signature(
+    raw: str, sigs: tuple[str, ...] | None = None, *, arch: str | None = None
+) -> str | None:
+    """The first of `sigs` (default: `arch`'s signatures) in `raw`'s kernel
+    text, else the first of `arch`'s failure patterns that matches it (as
+    its pattern), else None."""
     text = kernel_text(raw)
     if text is None:
         return None
+    if sigs is None:
+        sigs = panic_signatures_for(arch)
     sig = next((s for s in sigs if s in text), None)
     if sig is not None:
         return sig
-    return next((p.pattern for p in FAILURE_PATTERNS if p.search(text)), None)
+    return next((p.pattern for p in failure_patterns_for(arch) if p.search(text)), None)
 
 
-def contains_panic(line: str, sigs: tuple[str, ...] = PANIC_SIGNATURES) -> bool:
-    """A kernel line holding one of `sigs`, or one of `FAILURE_PATTERNS` matches."""
-    return panic_signature(line, sigs) is not None
+def contains_panic(
+    line: str, sigs: tuple[str, ...] | None = None, *, arch: str | None = None
+) -> bool:
+    """A kernel line holding one of `sigs`, or one of `arch`'s failure patterns matches."""
+    return panic_signature(line, sigs, arch=arch) is not None
 
 
 def run_failure(
-    raw: str, stream: frame.Stream, sigs: tuple[str, ...] = PANIC_SIGNATURES
+    raw: str,
+    stream: frame.Stream,
+    sigs: tuple[str, ...] | None = None,
+    *,
+    arch: str | None = None,
 ) -> tuple[str, str] | None:
     """Why `raw` fails a run, as (reason, the line's text), or None: a panic
     signature in kernel text, a `frame.USER_FAILURES` entry in user text, or
@@ -310,7 +362,7 @@ def run_failure(
     _, text = stream.feed(raw)
     if limine:
         return "Limine panic before the kernel", text
-    sig = panic_signature(raw, sigs)
+    sig = panic_signature(raw, sigs, arch=arch)
     if sig is not None:
         return f"panic signature {sig!r}", text
     fail = frame.user_failure(raw)
@@ -321,12 +373,14 @@ def run_failure(
 
 def dump_after_panic(
     lines: Iterable[str],
-    panic_signatures: tuple[str, ...] = PANIC_SIGNATURES,
+    panic_signatures: tuple[str, ...] | None = None,
+    *,
+    arch: str | None = None,
 ) -> list[str]:
     """Lines from the first panic signature through the end."""
     out = list(lines)
     for i, line in enumerate(out):
-        if contains_panic(line, panic_signatures):
+        if contains_panic(line, panic_signatures, arch=arch):
             return out[i:]
     return []
 
@@ -370,8 +424,9 @@ def _send_monitor_quit(sock_path: str) -> None:
 def sendkey_chars(s: str) -> str:
     """QEMU `sendkey` chord for lowercase letters, digits, space, minus.
 
-    Window keyboard and monitor sendkey both go through the i8042. This
-    is the TCG stand-in for typing in the QEMU window (DESIGN §3.6 / #66).
+    Window keyboard and monitor sendkey go through the i8042 on x86_64
+    and through virtio-keyboard on aarch64 virt (ROADMAP §11.1 / #207).
+    This is the TCG stand-in for typing in the QEMU window (DESIGN §3.6 / #66).
     """
     parts: list[str] = []
     for c in s:
@@ -622,8 +677,7 @@ def _start_qemu(
 ) -> QemuProcess:
     """Check PATH and the ISO, then start QEMU with a monitor socket, and
     with `qmp_sock` a QMP socket, halted until `qmp.Session.start`."""
-    if not shutil.which("qemu-system-x86_64"):
-        raise HarnessError("qemu-system-x86_64 not on PATH")
+    _require_qemu(cfg.arch)
     if not os.path.exists(cfg.iso):
         raise HarnessError(f"ISO missing: {cfg.iso}")
     monitor_sock = _pick_monitor_path()
@@ -676,6 +730,15 @@ HPET_OFF_MACHINE = ("-machine", "pc,hpet=off")
 # and `vmcoreinfo` so `dump-guest-memory` copies the kernel's VMCOREINFO
 # note into a core (docs/VMCOREINFO.md). Neither is a PCI device.
 FORENSICS_DEVICES = ("-device", "pvpanic", "-device", "vmcoreinfo")
+# aarch64 `virt` (ROADMAP §11.7): PCI pvpanic, vmcoreinfo, ramfb, and the
+# virtio input devices. The ISO is a virtio-scsi CD-ROM, not IDE.
+AARCH64_FORENSICS = (
+    "-device", "ramfb",
+    "-device", "virtio-keyboard-pci",
+    "-device", "virtio-tablet-pci",
+    "-device", "pvpanic-pci",
+    "-device", "vmcoreinfo",
+)
 # The only defaults of the QEMU settings: the Makefile sets none, and
 # `make run` reads them through `run_interactive.py` (ROADMAP §10.2).
 DEFAULT_SMP = 2
@@ -703,6 +766,8 @@ class QemuConfig:
     iso: str
     smp: int = DEFAULT_SMP
     cpu: str = DEFAULT_CPU
+    # True when `VIBEOS_QEMU_CPU` set `cpu`. aarch64 remaps only the unset default.
+    cpu_explicit: bool = False
     mem: str = DEFAULT_MEM
     # UEFI firmware on pflash; None = QEMU's default SeaBIOS.
     firmware: Firmware | None = None
@@ -730,6 +795,28 @@ class QemuConfig:
     expect: str = "none"
     # The QMP `RESET` events an `expect="reset"` run allows.
     resets: int = 0
+    # Guest architecture. `x86_64` keeps the existing pc/SeaBIOS line.
+    arch: str = "x86_64"
+    # GICv2 or GICv3 on `virt`. Ignored on x86_64.
+    gic_version: str = "3"
+    # aarch64 `-machine` string. Empty uses DESIGN §8.4's `virt,acpi=off,gic-version=`.
+    machine: str = ""
+
+
+def qemu_system(arch: str) -> str:
+    """The QEMU binary `qemu_argv` starts for `arch`."""
+    if arch == "aarch64":
+        return "qemu-system-aarch64"
+    if arch == "x86_64":
+        return "qemu-system-x86_64"
+    raise HarnessError(f"arch {arch!r}: not x86_64 or aarch64")
+
+
+def _require_qemu(arch: str) -> str:
+    binary = qemu_system(arch)
+    if not shutil.which(binary):
+        raise HarnessError(f"{binary} not on PATH")
+    return binary
 
 
 @dataclass
@@ -750,6 +837,11 @@ class EnvConfig:
     # Multiplies every ktest progress deadline (`KtestDeadlines`); no
     # variable sets it until ROADMAP §17.6.
     timeout_scale: float = TIMEOUT_SCALE
+    arch: str = "x86_64"
+    gic_version: str = "3"
+    machine: str = ""
+    # True when `VIBEOS_QEMU_CPU` set `cpu`. See `QemuConfig.cpu_explicit`.
+    cpu_explicit: bool = False
 
     def fw_cfg_cmdline(self, driver_words: str = "") -> str:
         """The fw_cfg command-line string: the driver's words, then
@@ -789,6 +881,10 @@ class EnvConfig:
             cmdline=self.fw_cfg_cmdline(cmdline),
             expect=expect,
             resets=resets,
+            arch=self.arch,
+            gic_version=self.gic_version,
+            machine=self.machine,
+            cpu_explicit=self.cpu_explicit,
         )
 
 
@@ -818,18 +914,29 @@ _VARIANT_RE = re.compile(r"[a-z0-9-]+")
 def default_iso(variant: str = "default") -> str:
     """The ISO the Makefile builds for `variant` (C-BUILD-OUTPUTS).
 
-    `build/vibeos.iso` for `default`, `build/vibeos-<variant>.iso` otherwise.
+    `build/vibeos.iso` for `default`, `build/vibeos-<variant>.iso` otherwise;
+    under `VIBEOS_ARCH=aarch64` the same names live in `build/aarch64/`, as
+    the Makefile's `BUILD_OUT` puts them.
     """
     if not _VARIANT_RE.fullmatch(variant):
         raise ValueError(f"default_iso: bad variant {variant!r}")
+    out = "build/aarch64" if os.environ.get("VIBEOS_ARCH") == "aarch64" else "build"
     if variant == "default":
-        return "build/vibeos.iso"
-    return f"build/vibeos-{variant}.iso"
+        return f"{out}/vibeos.iso"
+    return f"{out}/vibeos-{variant}.iso"
 
 
-def env_firmware(environ: Mapping[str, str]) -> Firmware | None:
-    """`VIBEOS_BIOS`: unset, empty or `seabios` is SeaBIOS (None); `uefi` is
-    the x86_64 pair `probe_firmware` finds, which `VIBEOS_FW_X86_64` names."""
+def env_firmware(environ: Mapping[str, str], arch: str = "x86_64") -> Firmware | None:
+    """`VIBEOS_BIOS` on x86_64: unset, empty or `seabios` is SeaBIOS (None);
+    `uefi` is the pair `probe_firmware` finds. aarch64 always probes UEFI."""
+    if arch == "aarch64":
+        fw = probe_firmware("aarch64", environ)
+        if fw is None:
+            raise HarnessError(
+                "VIBEOS_ARCH=aarch64: no aarch64 UEFI firmware installed "
+                "(apt: qemu-efi-aarch64; Homebrew: qemu); set VIBEOS_FW_AARCH64 to a code image"
+            )
+        return fw
     bios = environ.get("VIBEOS_BIOS", "")
     if bios in ("", "seabios"):
         return None
@@ -848,7 +955,15 @@ def env_firmware(environ: Mapping[str, str]) -> Firmware | None:
 
 
 def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
-    firmware = env_firmware(os.environ)
+    arch = os.environ.get("VIBEOS_ARCH", "x86_64")
+    if arch not in ("x86_64", "aarch64"):
+        raise HarnessError(f"VIBEOS_ARCH={arch}: not x86_64 or aarch64")
+    gic = os.environ.get("VIBEOS_GIC", "3")
+    if arch == "aarch64" and gic not in ("2", "3"):
+        raise HarnessError(f"VIBEOS_GIC={gic}: not 2 or 3")
+    machine = os.environ.get("VIBEOS_MACHINE", "")
+    firmware = env_firmware(os.environ, arch)
+    cpu_env = os.environ.get("VIBEOS_QEMU_CPU")
     accel_raw = os.environ.get("VIBEOS_QEMU_ACCEL")
     extra = tuple(x for x in os.environ.get("VIBEOS_QEMU_EXTRA", "").split() if x)
     ktest = os.environ.get("VIBEOS_KTEST", "")
@@ -872,8 +987,8 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         timeout = float(timeout_raw)
     return EnvConfig(
         iso=os.environ.get("VIBEOS_ISO", default_iso),
-        smp=env_int("VIBEOS_SMP", DEFAULT_SMP),
-        cpu=os.environ.get("VIBEOS_QEMU_CPU", DEFAULT_CPU),
+        smp=env_int("VIBEOS_SMP", 1 if arch == "aarch64" else DEFAULT_SMP),
+        cpu=DEFAULT_CPU if cpu_env is None else cpu_env,
         mem=os.environ.get("VIBEOS_MEM", DEFAULT_MEM),
         firmware=firmware,
         accel=DEFAULT_ACCEL if accel_raw is None else accel_raw,
@@ -885,7 +1000,20 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         ktest_repeat=ktest_repeat,
         cmdline=os.environ.get("VIBEOS_CMDLINE", ""),
         timeout_scale=TIMEOUT_SCALE,
+        arch=arch,
+        gic_version=gic,
+        machine=machine,
+        cpu_explicit=cpu_env is not None,
     )
+
+
+def apply_arch_cli(arch: str | None) -> None:
+    """`--arch` for the harness drivers: sets `VIBEOS_ARCH` before `env_config`."""
+    if not arch:
+        return
+    if arch not in ("x86_64", "aarch64"):
+        raise HarnessError(f"--arch {arch}: not x86_64 or aarch64")
+    os.environ["VIBEOS_ARCH"] = arch
 
 
 @contextmanager
@@ -1018,27 +1146,56 @@ def ktest_devices(
     extra_disks: Sequence[str] = (),
     readonly: bool = False,
     blkdebug: str | None = None,
+    arch: str = "x86_64",
+    mmio_disk: str | None = None,
 ) -> tuple[str, ...]:
     """The in-guest registry's devices: `disk` is `vda`, and each of
     `extra_disks` a further virtio-blk disk after it. A second virtio-rng
     sits at `00:1d.0`, and a virtio-blk whose probe fails at `00:1e.0`.
-    `readonly` and `blkdebug` go to `virtio_blk_args` for `vda`."""
-    return (
-        "-device",
-        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    x86 also attaches `virtio-keyboard-pci` and `virtio-tablet-pci`
+    (aarch64 already has them on every boot). `readonly` and `blkdebug`
+    go to `virtio_blk_args` for `vda`. aarch64 has no `isa-debug-exit`;
+    pass is PSCI `SYSTEM_OFF`. `mmio_disk` is the virtio-mmio
+    `virtio-blk-device` image (F047); it must be a different file from
+    `disk` (QEMU write-locks the image)."""
+    isa = (
+        ()
+        if arch == "aarch64"
+        else ("-device", "isa-debug-exit,iobase=0xf4,iosize=0x04")
+    )
+    mmio_blk: tuple[str, ...] = ()
+    if arch == "aarch64" and mmio_disk is not None:
+        # virtio-mmio F047: QueueNotify takes the virtqueue index.
+        mmio_blk = (
+            "-drive",
+            f"file={mmio_disk},if=none,id=vibehdmmio,format=raw,cache=writeback",
+            "-device",
+            f"virtio-blk-device,drive=vibehdmmio,num-queues={smp}",
+        )
+    return isa + (
         "-device",
         "e1000e",
         "-device",
-        "edu",
+        "edu,dma_mask=0xFFFFFFFF",
         "-device",
         "virtio-rng-pci,disable-legacy=on",
         # A second virtio-rng in a high slot, after the first in bus order,
         # which the driver refuses (`dev::ktest::SPARE_RNG_BDF`).
         "-device",
         "virtio-rng-pci,disable-legacy=on,addr=0x1d",
+    ) + (
+        ()
+        if arch == "aarch64"
+        else (
+            # aarch64 already attaches both through AARCH64_FORENSICS.
+            "-device",
+            "virtio-keyboard-pci,disable-legacy=on",
+            "-device",
+            "virtio-tablet-pci,disable-legacy=on",
+        )
     ) + virtio_blk_args(
         disk, smp, extra=extra_disks, readonly=readonly, blkdebug=blkdebug
-    ) + (
+    ) + mmio_blk + (
         # A virtio-blk function in a high slot whose probe the kernel_tests
         # hook fails after QENABLE (`dev::ktest::PROBE_BLK_BDF`).
         "-blockdev",
@@ -1088,14 +1245,70 @@ def expected_lapic_mode(
     return "tsc-deadline"
 
 
-def expected_clocksource(*, hpet: bool = True, accel: str | None = None) -> str:
+def expected_clocksource(
+    *, hpet: bool = True, accel: str | None = None, arch: str = "x86_64"
+) -> str:
     """The clocksource the kernel must name in `time: clocksource <name>`
-    (DESIGN §6.4): `tsc` under KVM, whose guests the harness gives an
-    invariant TSC; else `hpet`, or `acpi_pm` with HPET off, since TCG never
-    reports an invariant TSC."""
+    (DESIGN §6.4): `cntvct` on aarch64; `tsc` under KVM, whose guests the
+    harness gives an invariant TSC; else `hpet`, or `acpi_pm` with HPET
+    off, since TCG never reports an invariant TSC."""
+    if arch == "aarch64":
+        return "cntvct"
     if _accel_name(accel) == "kvm":
         return "tsc"
     return "hpet" if hpet else "acpi_pm"
+
+
+# Marker text after `vibeOS: el: ` and `vibeOS: time: timer ` (ROADMAP §11.7).
+EL2_VHE = "2 vhe"
+EL2_TIMER_VIRT = "el2 hyp-virt"
+EL2_TIMER_PHYS = "el2 hyp-phys"
+
+
+def machine_type(machine: str) -> str:
+    """The QEMU machine type, the part of a `-machine` value before the first comma."""
+    return machine.split(",", 1)[0]
+
+
+def virtualization_on(machine: str) -> bool:
+    """True when a `-machine` value sets `virtualization=on`."""
+    return "virtualization=on" in machine.split(",")
+
+
+def expected_el2(machine: str) -> tuple[str, str] | None:
+    """`(el, timer)` to bind when `machine` boots at EL2.
+
+    `virt` wires the EL2 virtual timer. `virt-8.2` has no `hyp-virt`
+    interrupt, so the kernel names the EL2 physical timer (ROADMAP §11.7).
+    Other types with `virtualization=on` follow `virt`. None when the
+    property is off: `<el>` and `<timer>` stay wildcards.
+    """
+    if not virtualization_on(machine):
+        return None
+    timer = EL2_TIMER_PHYS if machine_type(machine) == "virt-8.2" else EL2_TIMER_VIRT
+    return EL2_VHE, timer
+
+
+def check_el2_boot(lines: list[str], machine: str, smp: int) -> None:
+    """Require `el: 2 vhe` on every CPU and the EL2 timer `expected_el2` names.
+
+    `lines` are kernel text, frame already stripped. No-op when `machine`
+    does not set `virtualization=on`. Raises `HarnessError` on an EL1 line,
+    a short count, or the other machine's timer.
+    """
+    want = expected_el2(machine)
+    if want is None:
+        return
+    el, timer = want
+    n = max(smp, 1)
+    want_el = f"vibeOS: el: {el}"
+    got_el = [ln for ln in lines if ln.startswith("vibeOS: el:")]
+    if got_el != [want_el] * n:
+        raise HarnessError(f"el2: want {n} {want_el!r}, got {got_el or 'none'}")
+    want_timer = f"vibeOS: time: timer {timer}"
+    got_timer = [ln for ln in lines if ln.startswith("vibeOS: time: timer ")]
+    if got_timer != [want_timer]:
+        raise HarnessError(f"el2: want {want_timer!r}, got {got_timer or 'none'}")
 
 
 def _accel_args(cfg: QemuConfig) -> list[str]:
@@ -1146,6 +1359,9 @@ FIRMWARE_TABLE: dict[str, tuple[FirmwarePair, ...]] = {
         FirmwarePair("edk2-x86_64-code.fd", "edk2-i386-vars.fd", (HOMEBREW_QEMU,)),
     ),
     "aarch64": (
+        # Ubuntu 26.04's AAVMF_CODE.fd may be the Secure Boot image, which
+        # will not start unsigned Limine. Prefer the no-secboot build.
+        FirmwarePair("AAVMF_CODE.no-secboot.fd", "AAVMF_VARS.fd", ("/usr/share/AAVMF",)),
         FirmwarePair("AAVMF_CODE.fd", "AAVMF_VARS.fd", ("/usr/share/AAVMF",)),
         FirmwarePair("edk2-aarch64-code.fd", "edk2-arm-vars.fd", (HOMEBREW_QEMU,)),
     ),
@@ -1272,7 +1488,7 @@ def pflash_args(fw: Firmware, vars_copy: str) -> list[str]:
     ]
 
 
-# OVMF BDS PXEs the default e1000 if the CD isn't first/ready. slirp
+# EDK2 BDS (OVMF and AAVMF) PXEs if the CD isn't first/ready. slirp
 # answers DHCP; TFTP does not. Silent stall matches VIBEOS_TIMEOUT.
 # Hits the UEFI e2e second boot (COM1 is an open pipe; marker boot is not).
 OVMF_BOOT_ARGS: tuple[str, ...] = (
@@ -1347,13 +1563,53 @@ def fw_cfg_cmdline_words(cfg: QemuConfig) -> str:
 PANIC_ACTION = ("-action", "panic=pause")
 
 
+# AAVMF 2025.11 takes a synchronous exception at 0x47EFE008 on TCG
+# `-cpu max` and on `max,lpa2=off`. QEMU leaves PARange at 52 bits and
+# has no property to clear it (EDK2 #11962, Debian #1124168).
+# Neoverse-V1 has SVE and a 48-bit PARange, so `ptrue` is real and BDS
+# still comes up. Neoverse-N1 has no SVE, so `ptrue` is UNDEFINED.
+AARCH64_TCG_CPU = "neoverse-v1"
+
+
+def _aarch64_cpu(cfg: QemuConfig) -> str:
+    """HVF's unset default is `host`. TCG's unset `max` is `neoverse-v1`.
+
+    An explicit model, including `max`, is passed through (`cpu_explicit`,
+    or any `cpu` other than the unset default).
+    """
+    if cfg.cpu_explicit or cfg.cpu != DEFAULT_CPU:
+        return cfg.cpu
+    if _accel_name(cfg.accel) == "hvf":
+        return "host"
+    return AARCH64_TCG_CPU
+
+
+def guest_cpu(cfg: QemuConfig) -> str:
+    """The `-cpu` argument `qemu_argv` passes for `cfg`."""
+    if cfg.arch == "aarch64":
+        return _aarch64_cpu(cfg)
+    return cfg.cpu
+
+
+def _aarch64_iso_args(iso: str) -> list[str]:
+    """virtio-scsi CD-ROM: `virt` has no IDE, and virtio-blk would be `vda`."""
+    return [
+        "-device", "virtio-scsi-pci,id=scsi0",
+        "-drive",
+        f"if=none,id=cd0,format=raw,media=cdrom,readonly=on,file={_drive_file(iso)}",
+        "-device", "scsi-cd,drive=cd0,bootindex=0",
+    ]
+
+
 def qemu_argv(
     cfg: QemuConfig, monitor_sock: str | None, *, qmp_sock: str | None = None
 ) -> list[str]:
     """QEMU's argv for `cfg`. `qmp_sock` adds a QMP server there and `-S`:
     the CPUs wait for the harness's `cont` (`qmp.Session.start`)."""
+    if cfg.arch == "aarch64":
+        return _qemu_argv_aarch64(cfg, monitor_sock, qmp_sock=qmp_sock)
     argv = [
-        "qemu-system-x86_64",
+        qemu_system(cfg.arch),
         "-cdrom", cfg.iso,
         "-m", cfg.mem,
         "-smp", str(cfg.smp),
@@ -1390,11 +1646,67 @@ def qemu_argv(
     return argv
 
 
+def _aarch64_machine(cfg: QemuConfig) -> str:
+    """DESIGN §8.4 / ROADMAP §11.7: `virt,acpi=off,gic-version=` unless overridden."""
+    if cfg.machine:
+        return cfg.machine
+    return f"virt,acpi=off,gic-version={cfg.gic_version}"
+
+
+def _qemu_argv_aarch64(
+    cfg: QemuConfig, monitor_sock: str | None, *, qmp_sock: str | None = None
+) -> list[str]:
+    """ROADMAP §11.7 / DESIGN §8.4: `virt,acpi=off` with AAVMF and a SCSI CD."""
+    if cfg.gic_version not in ("2", "3"):
+        raise HarnessError(f"gic_version={cfg.gic_version!r}: not 2 or 3")
+    if cfg.firmware is None:
+        raise HarnessError(
+            "aarch64 boot needs UEFI firmware (probe or VIBEOS_FW_AARCH64)"
+        )
+    argv = [
+        qemu_system("aarch64"),
+        "-machine", _aarch64_machine(cfg),
+        # QEMU 8.2 `virt` builds virtio-mmio with force-legacy=on
+        # (Version=1). Firecracker and virtio 1.2 §4.2 are Version=2;
+        # ROADMAP §11.5 F047 needs QueueNotify to take the queue index.
+        "-global", "virtio-mmio.force-legacy=off",
+        "-m", cfg.mem,
+        "-smp", str(cfg.smp),
+        "-cpu", _aarch64_cpu(cfg),
+    ]
+    if cfg.expect != "reset":
+        argv += ["-no-reboot"]
+    if not cfg.display:
+        argv += ["-display", "none"]
+    argv += ["-serial", "stdio"]
+    if monitor_sock is not None:
+        argv += ["-monitor", f"unix:{monitor_sock},server=on,wait=off"]
+    if qmp_sock is not None:
+        argv += ["-qmp", f"unix:{qmp_sock},server=on,wait=off", "-S"]
+    argv += _accel_args(cfg)
+    if cfg.gdb:
+        argv += ["-s", "-S"]
+    argv += pflash_args(cfg.firmware, new_vars_copy(cfg.firmware))
+    argv += list(OVMF_BOOT_ARGS)
+    words = fw_cfg_cmdline_words(cfg)
+    if words:
+        argv += ["-fw_cfg", f"name={FW_CFG_CMDLINE},string={words.replace(',', ',,')}"]
+    argv += list(AARCH64_FORENSICS)
+    argv += list(PANIC_ACTION)
+    argv += _aarch64_iso_args(cfg.iso)
+    argv += list(cfg.extra)
+    ensure_qemu_pinned(argv[0], cfg.qemu_version)
+    return argv
+
+
 def _panic_sigs(
     cfg: QemuConfig,
-    base: tuple[str, ...],
+    base: tuple[str, ...] | None,
     extra: tuple[str, ...],
 ) -> tuple[str, ...]:
+    """`base` (default: `cfg.arch`'s signatures) with `cfg`'s and `extra`'s."""
+    if base is None:
+        base = panic_signatures_for(cfg.arch)
     more = cfg.extra_panic + extra
     if not more:
         return base
@@ -1421,7 +1733,7 @@ def run_qemu_and_check(
     cfg: QemuConfig,
     markers: list[Marker],
     timeout_s: float = 45.0,
-    panic_signatures: tuple[str, ...] = PANIC_SIGNATURES,
+    panic_signatures: tuple[str, ...] | None = None,
     extra_panic: tuple[str, ...] = (),
     dump_needles: tuple[str | tuple[str, ...], ...] = (),
     line_source: LineSource | None = None,
@@ -1524,7 +1836,11 @@ def run_qemu_and_check(
         if dump_at is None and ufail is not None:
             result.panic_line = line
             fail(f"user failure {ufail!r} in: {text!r}")
-        return text, (text if framed else None), panic_signature(line, panic_signatures)
+        return (
+            text,
+            (text if framed else None),
+            panic_signature(line, panic_signatures, arch=cfg.arch),
+        )
 
     def take(i: int, line: str, text: str, ktext: str | None, sig: str | None) -> bool:
         """Line `i` against the dump, the counts and the markers; True once
@@ -1774,7 +2090,7 @@ def run_qemu_inject_mce(
     from tests.harness import qmp as qmpmod
 
     cfg = replace(cfg, expect="panic")
-    panic_signatures = _panic_sigs(cfg, PANIC_SIGNATURES, ())
+    panic_signatures = _panic_sigs(cfg, None, ())
     session = qmpmod.Session(cfg, "mce")
     src = _start_qemu(cfg, time.monotonic() + timeout_s, qmp_sock=session.sock)
     argv = _argv_of(src)
@@ -1810,7 +2126,7 @@ def run_qemu_inject_mce(
                     f"{len(result.lines)} lines{_qemu_report(result, exited=True)}",
                 )
             result.lines.append(line)
-            why = run_failure(line, stream, panic_signatures)
+            why = run_failure(line, stream, panic_signatures, arch=cfg.arch)
             if why is not None:
                 result.panic_line = line
                 msg = f"{why[0]} in: {why[1]!r}{result.tail()}"
@@ -1859,6 +2175,17 @@ def run_qemu_inject_mce(
 
 SERIAL_ECHO_TOKEN = "serial-ok"
 PS2_ECHO_TOKEN = "ps2-ok"
+KBD_ECHO_TOKEN = "kbd-ok"
+
+
+def kbd_echo_token(arch: str) -> str:
+    """The second echo token: PS/2 on x86_64, virtio-keyboard on aarch64."""
+    return KBD_ECHO_TOKEN if arch == "aarch64" else PS2_ECHO_TOKEN
+
+
+def kbd_echo_name(arch: str) -> str:
+    """`RunResult.matched` name for the sendkey echo."""
+    return "kbd_echo" if arch == "aarch64" else "ps2_echo"
 SHELL_READY_NEEDLE = "vibeOS: shell ready"
 # `/bin/sh`'s fd-2 line for `false` (ROADMAP §10.5): `/bin/false` found
 # through `PATH`, and its exit status reported.
@@ -1885,7 +2212,7 @@ def _console_line(
     a panic signature through the session's event rule, which takes the
     core after the dump; the line then goes to the session."""
     result.lines.append(line)
-    why = run_failure(line, stream, sigs)
+    why = run_failure(line, stream, sigs, arch=session.cfg.arch)
     if why is None:
         msg = None
     elif tail_s is None:
@@ -1896,7 +2223,7 @@ def _console_line(
         result.panic_line = line
     d = session.line(
         line,
-        panic=panic_signature(line, sigs) is not None,
+        panic=panic_signature(line, sigs, arch=session.cfg.arch) is not None,
         halted=PANIC_DONE in (kernel_text(line) or ""),
     )
     if d:
@@ -1999,17 +2326,19 @@ def run_qemu_console_input(
 ) -> RunResult:
     """Boot, then type into `/bin/sh` via COM1 and via PS/2 (`sendkey`).
 
-    In order: `echo serial-ok` on COM1 must print `serial-ok` (`/bin/echo`,
-    found through `PATH`); `false` must print `SH_STATUS_LINE`; `ps` must
-    print pid 1's line; `echo ps2-ok` typed through PS/2 must print
-    `ps2-ok`. Then serial is read for `CONSOLE_TAIL_S`, and the shell's
-    `sh_power_command` must make QEMU exit with status 0 within
-    `SH_POWER_EXIT_S`. `result.matched` gains `shell_ready`, `serial_echo`,
-    `sh_status`, `sh_ps`, `ps2_echo`, `sh_poweroff` or `sh_reboot`, and
-    `console_input_sh` last.
+    In order: `echo serial-ok` on COM1 (PL011 on aarch64) must print
+    `serial-ok` (`/bin/echo`, found through `PATH`); `false` must print
+    `SH_STATUS_LINE`; `ps` must print pid 1's line; `echo ps2-ok` typed
+    through PS/2, or `echo kbd-ok` through virtio-keyboard on aarch64,
+    must print that token. Then serial is read for `CONSOLE_TAIL_S`, and
+    the shell's `sh_power_command` must make QEMU exit with status 0
+    within `SH_POWER_EXIT_S`. `result.matched` gains `shell_ready`,
+    `serial_echo`, `sh_status`, `sh_ps`, `ps2_echo` or `kbd_echo`,
+    `sh_poweroff` or `sh_reboot`, and `console_input_sh` last.
 
-    `-display none` still has an i8042; QEMU `sendkey` injects set-1
-    scancodes on IRQ1, the same path as a focused QEMU window.
+    `-display none` still has an i8042 on x86_64; QEMU `sendkey` injects
+    set-1 scancodes on IRQ1, the same path as a focused QEMU window. On
+    aarch64 virt it injects evdev keys into virtio-keyboard.
     `line_source` and `qmp` replace QEMU as in `run_qemu_and_check`, and
     QMP drives the run the same way (`qmp.Session`).
 
@@ -2022,7 +2351,7 @@ def run_qemu_console_input(
     """
     from tests.harness import qmp as qmpmod
 
-    panic_signatures = _panic_sigs(cfg, PANIC_SIGNATURES, ())
+    panic_signatures = _panic_sigs(cfg, None, ())
     deadline = time.monotonic() + timeout_s
     if qmp is None and line_source is not None:
         qmp = qmpmod.FakeQmp([])
@@ -2057,6 +2386,8 @@ def run_qemu_console_input(
             return f"console input: missing {SH_STATUS_LINE!r} after `false`{report}"
         if not saw_ps:
             return f"console input: missing pid 1's `ps` line '1 0 ...'{report}"
+        if cfg.arch == "aarch64":
+            return f"console input: virtio-keyboard sendkey echo missing{report}"
         return f"console input: PS/2 sendkey echo missing (i8042){report}"
 
     try:
@@ -2112,11 +2443,13 @@ def run_qemu_console_input(
             if saw_status and not saw_ps and is_pid1_ps_line(reply):
                 saw_ps = True
                 result.matched.append("sh_ps")
-                src.monitor("sendkey " + sendkey_chars(f"echo {PS2_ECHO_TOKEN}\n"))
+                src.monitor(
+                    "sendkey " + sendkey_chars(f"echo {kbd_echo_token(cfg.arch)}\n")
+                )
                 continue
-            if saw_ps and not saw_ps2 and reply == PS2_ECHO_TOKEN:
+            if saw_ps and not saw_ps2 and reply == kbd_echo_token(cfg.arch):
                 saw_ps2 = True
-                result.matched.append("ps2_echo")
+                result.matched.append(kbd_echo_name(cfg.arch))
                 # A later reply step goes before the tail.
                 _console_tail(
                     session, src, result, argv, panic_signatures, CONSOLE_TAIL_S, stream
@@ -2139,6 +2472,13 @@ def run_qemu_console_input(
 # isa-debug-exit at 0xf4: host status = (value << 1) | 1. DESIGN §8.2.
 ISA_DEBUG_PASS = 33  # write 0x10
 ISA_DEBUG_FAIL = 35  # write 0x11
+# PSCI SYSTEM_OFF: QEMU exits 0 (ROADMAP §11.7).
+PSCI_PASS = 0
+
+
+def ktest_pass_status(cfg: QemuConfig) -> int:
+    """The QEMU exit status a passing ktest boot leaves."""
+    return PSCI_PASS if cfg.arch == "aarch64" else ISA_DEBUG_PASS
 
 
 # ktest protocol (DESIGN §8.2, C-KTEST-PROTO): one kernel line per event.
@@ -2377,6 +2717,7 @@ def check_ktest_output(
     exit_code: int | None,
     *,
     pass_status: int = ISA_DEBUG_PASS,
+    arch: str | None = None,
 ) -> RunResult:
     """Require `begin <n>`, exactly `n` runs each with its one result, then
     `end`; reject any FAIL line; require the pass exit status.
@@ -2409,7 +2750,7 @@ def check_ktest_output(
     seen: list[str] = []
     for raw in lines:
         result.lines.append(raw)
-        why = run_failure(raw, stream)
+        why = run_failure(raw, stream, arch=arch)
         if why is not None and declared.is_declared(count.open_run, why[1]):
             seen.append(why[1])
             continue
@@ -2441,10 +2782,17 @@ def check_ktest_output(
         raise HarnessError(f"ktest FAIL: {fails[0]}")
     count.check_count()
     if exit_code != pass_status:
-        raise HarnessError(
-            f"isa-debug-exit status {exit_code}, expected {pass_status}"
-        )
+        raise HarnessError(f"{exit_verdict_name(pass_status)} {exit_code}, expected {pass_status}")
     return result
+
+
+def exit_verdict_name(pass_status: int) -> str:
+    """What sets QEMU's exit status on a boot whose pass is `pass_status`:
+    x86_64's `isa-debug-exit` write, or aarch64's PSCI `SYSTEM_OFF`, where a
+    panic's pvpanic event exits otherwise."""
+    if pass_status == PSCI_PASS:
+        return "QEMU exit status (PSCI SYSTEM_OFF passes, pvpanic fails)"
+    return "isa-debug-exit status"
 
 
 class KtestDeadlines:
@@ -2560,7 +2908,7 @@ class _ProcSource:
 def run_qemu_until_exit(
     cfg: QemuConfig,
     timeout_s: float = 60.0,
-    panic_signatures: tuple[str, ...] = PANIC_SIGNATURES,
+    panic_signatures: tuple[str, ...] | None = None,
     extra_panic: tuple[str, ...] = (),
     kill_after: Callable[[str], float | None] | None = None,
     *,
@@ -2568,7 +2916,7 @@ def run_qemu_until_exit(
     progress: KtestDeadlines | None = None,
     qmp: QmpLike | None = None,
 ) -> RunResult:
-    """Boot the ISO and wait for QEMU to exit (isa-debug-exit).
+    """Boot the ISO and wait for QEMU to exit (isa-debug-exit or PSCI).
 
     Without `progress` the whole boot has `timeout_s`. With it, the ktest
     progress deadline replaces that: `progress` sets the deadline of each
@@ -2591,8 +2939,7 @@ def run_qemu_until_exit(
     """
     from tests.harness import qmp as qmpmod
 
-    if not shutil.which("qemu-system-x86_64"):
-        raise HarnessError("qemu-system-x86_64 not on PATH")
+    _require_qemu(cfg.arch)
     if not os.path.exists(cfg.iso):
         raise HarnessError(f"ISO missing: {cfg.iso}")
 
@@ -2621,7 +2968,7 @@ def run_qemu_until_exit(
 
     def take(line: str) -> None:
         result.lines.append(line)
-        why = run_failure(line, stream, panic_signatures)
+        why = run_failure(line, stream, panic_signatures, arch=cfg.arch)
         # A line the running test declares; `check_ktest_output` judges it.
         mine = why is not None and declared_in_run(progress, why[1])
         if mine:
@@ -2631,7 +2978,7 @@ def run_qemu_until_exit(
                 result.panic_line = line
         elif why is not None:
             result.panic_line = line
-        sig = not mine and panic_signature(line, panic_signatures) is not None
+        sig = not mine and panic_signature(line, panic_signatures, arch=cfg.arch) is not None
         # A run that declares a panic's end expects its signatures; the
         # event rule judges it (DESIGN §8.3).
         expected = expect_fail or (sig and cfg.expect != "none")
@@ -2753,21 +3100,34 @@ def boot_contract_markers(
     gp: bool = False,
     smp: int | None = None,
     panic_variant: str = "",
+    arch: str = "x86_64",
+    machine: str = "",
 ) -> list[Marker]:
     """Live e2e contract. Pins the LAPIC timer mode and SMP AP count.
 
-    `panic_variant` (`nest` or `stop`) selects that panic-path build's contract,
-    which ends at its armed line (`VIBEOS_PANIC_VARIANT`, run_e2e)."""
+    `panic_variant` (`nest`, `stop` or `overflow`) selects that panic-path build's contract,
+    which ends at its armed line (`VIBEOS_PANIC_VARIANT`, run_e2e). On aarch64,
+    `machine` with `virtualization=on` pins `<el>` to `2 vhe` and `<timer>` to
+    the EL2 timer that machine wires (`expected_el2`)."""
     if smp is None:
-        smp = env_int("VIBEOS_SMP", DEFAULT_SMP)
+        smp = env_int("VIBEOS_SMP", 1 if arch == "aarch64" else DEFAULT_SMP)
+    el, arm_timer = "", ""
+    if arch == "aarch64":
+        pinned = expected_el2(machine)
+        if pinned is not None:
+            el, arm_timer = pinned
     cfg = registry.BootConfig(
         hpet=hpet,
         smp=smp,
         lapic_mode=expected_lapic_mode(cpu=cpu, hpet=hpet, accel=accel),
-        clocksource=expected_clocksource(hpet=hpet, accel=accel),
+        clocksource=expected_clocksource(hpet=hpet, accel=accel, arch=arch),
         gp_test=gp,
         panic_nest_test=panic_variant == "nest",
         panic_stop_test=panic_variant == "stop",
+        kstack_overflow_test=panic_variant == "overflow",
+        arch=arch,
+        el=el,
+        arm_timer=arm_timer,
     )
     return contract_markers(cfg)
 
@@ -2778,13 +3138,21 @@ PHASE0_MARKERS: list[Marker] = boot_contract_markers()
 PHASE0_PIT_MARKERS: list[Marker] = boot_contract_markers(hpet=False)
 
 
-def halt_test_markers() -> list[Marker]:
+def halt_test_markers(*, arch: str = "x86_64") -> list[Marker]:
     """The markers that come before the deliberate panic in the panic-test
     build, which panics right after the Limine handshake: the contract rows
     that hold under `panic_test`."""
     return contract_markers(
-        registry.BootConfig(hpet=True, smp=1, lapic_mode="", panic_test=True)
+        registry.BootConfig(hpet=True, smp=1, lapic_mode="", panic_test=True, arch=arch)
     )
+
+
+def early_fault_markers(*, arch: str = "x86_64") -> list[Marker]:
+    """The markers before the early-fault build's undefined instruction, right
+    after the Limine handshake (ROADMAP §11.1, F136): the panic-test build's
+    rows but its armed line, then the early-fault armed line."""
+    rows = [m for m in halt_test_markers(arch=arch) if m.name != "panic_test_armed"]
+    return [*rows, Marker("vibeOS: boot: early-fault armed", "early_fault_armed")]
 
 
 # gp-test boots all the way through IDT, then a deliberate #GP dumps and

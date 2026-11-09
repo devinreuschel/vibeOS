@@ -137,7 +137,7 @@ pub(crate) fn test_block_ramdisk_rw() -> Outcome {
         Err(BlockError::Inval) => {}
         _ => return Outcome::Fail("discard past"),
     }
-    if !crate::shell::ktest::has_command("blk") {
+    if !crate::shell_init::has_command("blk") {
         return Outcome::Fail("no blk");
     }
     if crate::shell_init::dispatch_line("blk").is_err() {

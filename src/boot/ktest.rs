@@ -22,9 +22,61 @@ pub(crate) fn test_bootinfo_consistent() -> Outcome {
         Some((pa, _, _)) if k.contains(&pa.as_u64()) => {}
         _ => return Outcome::Fail("text outside kernel span"),
     }
-    let map_end = paging_init::map_end();
-    if info.framebuffers().any(|fb| fb.phys + fb.size > map_end) {
-        return Outcome::Fail("fb outside physmap");
+    for fb in info.framebuffers() {
+        let mut p = fb.phys & !0xFFFu64;
+        let end = fb.phys.saturating_add(fb.size);
+        while p < end {
+            let hhdm = VirtAddr(paging_init::hhdm_offset().wrapping_add(p));
+            let n = end.saturating_sub(p).min(0x1000);
+            let mapped = paging_init::translate(hhdm).is_some()
+                || crate::fb_init::va_for_phys(p, n)
+                    .is_some_and(|v| paging_init::translate(VirtAddr(v)).is_some());
+            if !mapped {
+                return Outcome::Fail("fb page unmapped");
+            }
+            p = p.saturating_add(0x1000);
+        }
+    }
+    if !vibeos::physmap::hhdm_in_slot(info.hhdm_offset, physmap_slot()) {
+        return Outcome::Fail("hhdm offset outside slot");
+    }
+    if info.hhdm_offset != paging_init::hhdm_offset() {
+        return Outcome::Fail("hhdm offset not the one paging uses");
+    }
+    Outcome::Ok
+}
+
+/// This architecture's physmap slot (DESIGN §4.1).
+fn physmap_slot() -> vibeos::physmap::PhysmapSlot {
+    #[cfg(target_arch = "x86_64")]
+    {
+        vibeos::physmap::PHYSMAP_X86_64
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        vibeos::physmap::PHYSMAP_AARCH64
+    }
+}
+
+/// An `.opt_in()` row for the `ktest-hhdm` image, whose Limine randomises
+/// the HHDM base (ROADMAP §11.1, `make test-kernel-hhdm`): the offset this
+/// boot runs on is not the base Limine uses unrandomised, the start of the
+/// physmap slot on both architectures (4-level paging on x86_64, a 48-bit
+/// VA on aarch64), so a translation that assumed that base would miss.
+///
+/// A correct kernel fails this about once in 2^15 boots: Limine adds
+/// `rand64() & ~(1 GiB - 1) & ((1 << (va_bits - 3)) - 1)` to the base, 15
+/// random bits at a 48-bit VA, and a draw of all zeros is the unrandomised
+/// base itself. The inequality stays, since it is what makes the boot fail
+/// on an image whose Limine does not randomise, and no retry is added
+/// (AGENTS.md); ROADMAP §10.2 records the false failure as a flake line.
+pub(crate) fn test_hhdm_randomised() -> Outcome {
+    let off = crate::boot::info().hhdm_offset;
+    if off == physmap_slot().start {
+        return crate::fail_fmt!("hhdm offset {off:#x} is the unrandomised base");
+    }
+    if off != paging_init::hhdm_offset() {
+        return Outcome::Fail("hhdm offset not the one paging uses");
     }
     Outcome::Ok
 }
@@ -107,7 +159,7 @@ pub(crate) fn test_fw_cfg_dma() -> Outcome {
     if fw_cfg_init::read(f, &mut port[..len]) != len {
         return Outcome::Fail("short port read");
     }
-    let Some(buf) = dma_init::alloc(DmaAlloc::new(4096)) else {
+    let Some(buf) = dma_init::alloc(DmaAlloc::new(4096, fw_cfg_init::dma_coherent())) else {
         return Outcome::Fail("no dma buffer");
     };
     let r = fw_cfg_init::transfer(FW_CFG_DMA_READ, f.select, &buf, len as u32);
@@ -175,6 +227,7 @@ pub(crate) fn test_strace_flag_matches_cmdline() -> Outcome {
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
     test("bootinfo_consistent", test_bootinfo_consistent),
+    test("hhdm_randomised", test_hhdm_randomised).opt_in(),
     test("fw_cfg_probe", test_fw_cfg_probe),
     test("fw_cfg_dma", test_fw_cfg_dma),
     test("cmdline_captured", test_cmdline_captured),

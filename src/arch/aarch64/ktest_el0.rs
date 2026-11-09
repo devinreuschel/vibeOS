@@ -1,0 +1,1087 @@
+//! EL0 TLS, FP, and SVE proofs (ROADMAP §11.6, F022, F069, F130).
+
+use core::arch::asm;
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+
+use vibeos::fs::{O_CREAT, O_TRUNC, O_WRONLY};
+use vibeos::limits::PID_MAX;
+use vibeos::proc::{SIGILL, SIGKILL, wait_signaled};
+use vibeos::thread::{Tcb, ThreadId};
+
+use crate::arch;
+use crate::arch::current::syscall_nr;
+use crate::ktest::user::{self, DEFAULT, Image, TLS_MAGIC, elf_bytes, user_code};
+use crate::ktest::{Outcome, fid, second_cpu, sleep_until, spawn_thread_on};
+use crate::per_cpu_init;
+use crate::proc_init;
+use crate::syscall_init;
+use crate::thread_init;
+use crate::time_init;
+
+user_code!(
+    TLS_LOOP,
+    "
+    mov w19, #80
+1:
+    mrs x0, tpidr_el0
+    ldr x1, [x0, #16]
+    movz x2, #0x7788
+    movk x2, #0x5566, lsl #16
+    movk x2, #0x3344, lsl #32
+    movk x2, #0x1122, lsl #48
+    cmp x1, x2
+    b.ne 9f
+    mov x8, #124
+    svc #0
+    subs w19, w19, #1
+    b.ne 1b
+    mov x0, xzr
+    mov x8, #93
+    svc #0
+9:
+    mov x0, #2
+    mov x8, #93
+    svc #0
+    "
+);
+
+// Offset 64 is variant I for `p_align` 64 (`TLS_PALIGN_64` in `ktest/user.rs`).
+user_code!(
+    TLS_ALIGN64,
+    "
+    mrs x0, tpidr_el0
+    ldr x1, [x0, #64]
+    movz x2, #0x7788
+    movk x2, #0x5566, lsl #16
+    movk x2, #0x3344, lsl #32
+    movk x2, #0x1122, lsl #48
+    cmp x1, x2
+    b.ne 9f
+    mov x0, xzr
+    mov x8, #93
+    svc #0
+9:
+    mov x0, #1
+    mov x8, #93
+    svc #0
+    "
+);
+
+user_code!(
+    TLS_ZERO,
+    "
+    mov w19, #80
+1:
+    mrs x0, tpidr_el0
+    cbnz x0, 9f
+    mov x8, #124
+    svc #0
+    subs w19, w19, #1
+    b.ne 1b
+    mov x0, xzr
+    mov x8, #93
+    svc #0
+9:
+    mov x0, #1
+    mov x8, #93
+    svc #0
+    "
+);
+
+user_code!(
+    TLS_MSR_A,
+    "
+    movz x19, #0xa000
+    msr tpidr_el0, x19
+    mov w20, #80
+1:
+    mrs x0, tpidr_el0
+    cmp x0, x19
+    b.ne 9f
+    mov x8, #124
+    svc #0
+    subs w20, w20, #1
+    b.ne 1b
+    mov x0, xzr
+    mov x8, #93
+    svc #0
+9:
+    mov x0, #1
+    mov x8, #93
+    svc #0
+    "
+);
+
+user_code!(
+    TLS_MSR_B,
+    "
+    movz x19, #0xb000
+    msr tpidr_el0, x19
+    mov w20, #80
+1:
+    mrs x0, tpidr_el0
+    cmp x0, x19
+    b.ne 9f
+    mov x8, #124
+    svc #0
+    subs w20, w20, #1
+    b.ne 1b
+    mov x0, xzr
+    mov x8, #93
+    svc #0
+9:
+    mov x0, #1
+    mov x8, #93
+    svc #0
+    "
+);
+
+user_code!(
+    TLS_FORK,
+    "
+    movz x19, #0xa000
+    msr tpidr_el0, x19
+    mov x0, #17
+    mov x1, xzr
+    mov x2, xzr
+    mov x3, xzr
+    mov x4, xzr
+    mov x8, #220
+    svc #0
+    tbnz x0, #63, 9f
+    cbz x0, 1f
+    mov x20, x0
+    sub sp, sp, #16
+    mov x0, x20
+    mov x1, sp
+    mov x2, xzr
+    mov x3, xzr
+    mov x8, #260
+    svc #0
+    cmp x0, x20
+    b.ne 9f
+    ldr w0, [sp]
+    cbnz w0, 9f
+    mov x0, xzr
+    mov x8, #93
+    svc #0
+1:
+    mrs x0, tpidr_el0
+    cmp x0, x19
+    b.ne 8f
+    mov x0, xzr
+    mov x8, #93
+    svc #0
+8:
+    mov x0, #1
+    mov x8, #93
+    svc #0
+9:
+    mov x0, #2
+    mov x8, #93
+    svc #0
+    "
+);
+
+user_code!(
+    YIELD_FOREVER,
+    "
+1:
+    mov x8, #124
+    svc #0
+    b 1b
+    "
+);
+
+user_code!(
+    EXIT0,
+    "
+    mov x0, xzr
+    mov x8, #93
+    svc #0
+    "
+);
+
+user_code!(
+    EXEC_NOTLS,
+    "
+    adr x0, 1f
+    mov x1, xzr
+    mov x2, xzr
+    mov x8, #221
+    svc #0
+    mov x0, #3
+    mov x8, #93
+    svc #0
+1:
+    .asciz \"/tmp/vibeos_notls\"
+    "
+);
+
+user_code!(
+    FP_YIELD,
+    "
+    // movi v0..v31.16b, #0x5a (soft-float kernel cannot write `vN`)
+    .inst 0x4f02e740
+    .inst 0x4f02e741
+    .inst 0x4f02e742
+    .inst 0x4f02e743
+    .inst 0x4f02e744
+    .inst 0x4f02e745
+    .inst 0x4f02e746
+    .inst 0x4f02e747
+    .inst 0x4f02e748
+    .inst 0x4f02e749
+    .inst 0x4f02e74a
+    .inst 0x4f02e74b
+    .inst 0x4f02e74c
+    .inst 0x4f02e74d
+    .inst 0x4f02e74e
+    .inst 0x4f02e74f
+    .inst 0x4f02e750
+    .inst 0x4f02e751
+    .inst 0x4f02e752
+    .inst 0x4f02e753
+    .inst 0x4f02e754
+    .inst 0x4f02e755
+    .inst 0x4f02e756
+    .inst 0x4f02e757
+    .inst 0x4f02e758
+    .inst 0x4f02e759
+    .inst 0x4f02e75a
+    .inst 0x4f02e75b
+    .inst 0x4f02e75c
+    .inst 0x4f02e75d
+    .inst 0x4f02e75e
+    .inst 0x4f02e75f
+    mov w19, #20000
+1:
+    mov x8, #124
+    svc #0
+    subs w19, w19, #1
+    b.ne 1b
+    .inst 0x4e083c00
+    movz x1, #0x5a5a
+    movk x1, #0x5a5a, lsl #16
+    movk x1, #0x5a5a, lsl #32
+    movk x1, #0x5a5a, lsl #48
+    cmp x0, x1
+    b.ne 9f
+    mov x0, xzr
+    mov x8, #93
+    svc #0
+9:
+    mov x0, #1
+    mov x8, #93
+    svc #0
+    "
+);
+
+// Spill V0-V31 whole (128 bits each) to 512 bytes at sp, then exit 1 if any
+// of its 64 doublewords is P's pattern, and 0 otherwise. The soft-float kernel
+// cannot assemble `str qN`, so each store is its encoding (as in fp_save).
+user_code!(
+    FP_PROBE,
+    "
+    sub sp, sp, #512
+    .inst 0x3d8003e0   // str q0, [sp, #0]
+    .inst 0x3d8007e1   // str q1, [sp, #16]
+    .inst 0x3d800be2   // str q2, [sp, #32]
+    .inst 0x3d800fe3   // str q3, [sp, #48]
+    .inst 0x3d8013e4   // str q4, [sp, #64]
+    .inst 0x3d8017e5   // str q5, [sp, #80]
+    .inst 0x3d801be6   // str q6, [sp, #96]
+    .inst 0x3d801fe7   // str q7, [sp, #112]
+    .inst 0x3d8023e8   // str q8, [sp, #128]
+    .inst 0x3d8027e9   // str q9, [sp, #144]
+    .inst 0x3d802bea   // str q10, [sp, #160]
+    .inst 0x3d802feb   // str q11, [sp, #176]
+    .inst 0x3d8033ec   // str q12, [sp, #192]
+    .inst 0x3d8037ed   // str q13, [sp, #208]
+    .inst 0x3d803bee   // str q14, [sp, #224]
+    .inst 0x3d803fef   // str q15, [sp, #240]
+    .inst 0x3d8043f0   // str q16, [sp, #256]
+    .inst 0x3d8047f1   // str q17, [sp, #272]
+    .inst 0x3d804bf2   // str q18, [sp, #288]
+    .inst 0x3d804ff3   // str q19, [sp, #304]
+    .inst 0x3d8053f4   // str q20, [sp, #320]
+    .inst 0x3d8057f5   // str q21, [sp, #336]
+    .inst 0x3d805bf6   // str q22, [sp, #352]
+    .inst 0x3d805ff7   // str q23, [sp, #368]
+    .inst 0x3d8063f8   // str q24, [sp, #384]
+    .inst 0x3d8067f9   // str q25, [sp, #400]
+    .inst 0x3d806bfa   // str q26, [sp, #416]
+    .inst 0x3d806ffb   // str q27, [sp, #432]
+    .inst 0x3d8073fc   // str q28, [sp, #448]
+    .inst 0x3d8077fd   // str q29, [sp, #464]
+    .inst 0x3d807bfe   // str q30, [sp, #480]
+    .inst 0x3d807fff   // str q31, [sp, #496]
+    movz x1, #0x5a5a
+    movk x1, #0x5a5a, lsl #16
+    movk x1, #0x5a5a, lsl #32
+    movk x1, #0x5a5a, lsl #48
+    mov x2, sp
+    mov x3, #64
+1:
+    ldr x4, [x2], #8
+    cmp x4, x1
+    b.eq 9f
+    subs x3, x3, #1
+    b.ne 1b
+    mov x0, xzr
+    mov x8, #93
+    svc #0
+9:
+    mov x0, #1
+    mov x8, #93
+    svc #0
+    "
+);
+
+// The aarch64 form of `fp_migrate_counter` (ROADMAP §10.6): the counter is
+// the low doubleword of v0, added to v1 = {1, 0} each iteration, checked
+// against a counter in memory; getpid every 4,096 iterations so a kill lands.
+// The `.inst` words are `movi`, `mov v1.d[0], x1`, `add v0.2d, v0.2d, v1.2d`
+// and `mov x3, v0.d[0]`.
+user_code!(
+    FP_MIGRATE_COUNTER,
+    "
+    sub sp, sp, #16
+    str xzr, [sp]
+    mov x1, #1
+    .inst 0x6f00e400
+    .inst 0x6f00e401
+    .inst 0x4e081c21
+    mov x12, xzr
+1:
+    .inst 0x4ee18400
+    ldr x2, [sp]
+    add x2, x2, #1
+    str x2, [sp]
+    .inst 0x4e083c03
+    cmp x3, x2
+    b.ne 9f
+    add x12, x12, #1
+    tst x12, #0xfff
+    b.ne 1b
+    mov x8, #172
+    svc #0
+    b 1b
+9:
+    mov x0, #1
+    mov x8, #93
+    svc #0
+    "
+);
+
+/// ROADMAP §10.6, aarch64 form: a thread the requeue hook moves each time
+/// it is preempted keeps its V state across every migration (F069).
+pub(crate) fn test_el0_fp_migrate_counter() -> Outcome {
+    crate::sched::ktest::fp_migrate_counter_run(FP_MIGRATE_COUNTER)
+}
+
+user_code!(
+    SVE_PTRUE,
+    "
+    .inst 0x2518e3e0
+    mov x0, xzr
+    mov x8, #93
+    svc #0
+    "
+);
+
+// Same page, different code: the second load reuses the first's frames.
+user_code!(
+    RECYCLE_A,
+    "
+    mov x0, #3
+    mov x8, #93
+    svc #0
+    "
+);
+
+user_code!(
+    RECYCLE_B,
+    "
+    mov x0, #5
+    mov x8, #93
+    svc #0
+    "
+);
+
+fn exited0(st: u32) -> bool {
+    vibeos::proc::wifexited(st) && vibeos::proc::wexitstatus(st) == 0
+}
+
+fn tls_base_of(pid: u32) -> Option<u64> {
+    let tid = proc_init::tid_of(pid)?;
+    let t = thread_init::tcb_ptr(ThreadId(tid));
+    if t.is_null() {
+        None
+    } else {
+        // SAFETY: invariant I9: the TCB lives until wait reaps it;
+        // established by `proc_init::tid_of`.
+        Some(unsafe { (*t).tls_base })
+    }
+}
+
+fn write_notls() -> Result<(), Outcome> {
+    let elf = elf_bytes(&Image::Code(EXIT0, DEFAULT));
+    let f = fid::open("/tmp/vibeos_notls", O_WRONLY | O_CREAT | O_TRUNC, 0o755)
+        .map_err(|_| Outcome::Fail("creat notls"))?;
+    let mut off = 0;
+    while off < elf.len() {
+        let n = fid::write(f, &elf[off..]).map_err(|_| Outcome::Fail("write notls"))?;
+        if n == 0 {
+            let _ = fid::close(f);
+            return Err(Outcome::Fail("short write"));
+        }
+        off += n;
+    }
+    fid::close(f).map_err(|_| Outcome::Fail("close notls"))?;
+    Ok(())
+}
+
+fn unlink_notls() {
+    let _ = fid::unlink_path("/tmp/vibeos_notls", false);
+}
+
+/// A `PT_TLS` process keeps its TLS across another process's exit, kill,
+/// execve of a non-TLS image, and a non-TLS first entry (F022).
+pub(crate) fn test_el0_tls_survive() -> Outcome {
+    let out = tls_survive_body();
+    unlink_notls();
+    out
+}
+
+fn tls_survive_body() -> Outcome {
+    if let Err(e) = write_notls() {
+        return e;
+    }
+    let a = match user::spawn(&Image::TlsCode(TLS_LOOP, DEFAULT), &["tls_p"]) {
+        Ok(p) => p,
+        Err(e) => return crate::fail_fmt!("spawn p: {}", e.as_str()),
+    };
+    if tls_base_of(a).unwrap_or(0) == 0 {
+        let _ = user::wait(a);
+        return Outcome::Fail("pt_tls base 0");
+    }
+    match user::run(&Image::Code(EXIT0, DEFAULT), &["tls_exit"]) {
+        Ok(st) if exited0(st) => {}
+        Ok(st) => {
+            let _ = user::wait(a);
+            return crate::fail_fmt!("exit status {st:#x}");
+        }
+        Err(e) => {
+            let _ = user::wait(a);
+            return crate::fail_fmt!("exit spawn: {}", e.as_str());
+        }
+    }
+    let q = match user::spawn(&Image::Code(YIELD_FOREVER, DEFAULT), &["tls_kill"]) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = user::wait(a);
+            return crate::fail_fmt!("kill spawn: {}", e.as_str());
+        }
+    };
+    let _ = proc_init::dispatch(
+        syscall_nr::SYS_KILL,
+        [u64::from(q), u64::from(SIGKILL), 0, 0, 0, 0],
+    );
+    let kst = user::wait(q);
+    if kst != wait_signaled(SIGKILL) {
+        let _ = user::wait(a);
+        return crate::fail_fmt!("kill status {kst:#x}");
+    }
+    match user::run(&Image::Code(EXEC_NOTLS, DEFAULT), &["tls_exec"]) {
+        Ok(st) if exited0(st) => {}
+        Ok(st) => {
+            let _ = user::wait(a);
+            return crate::fail_fmt!("exec status {st:#x}");
+        }
+        Err(e) => {
+            let _ = user::wait(a);
+            return crate::fail_fmt!("exec spawn: {}", e.as_str());
+        }
+    }
+    match user::run(&Image::Code(EXIT0, DEFAULT), &["tls_first"]) {
+        Ok(st) if exited0(st) => {}
+        Ok(st) => {
+            let _ = user::wait(a);
+            return crate::fail_fmt!("first status {st:#x}");
+        }
+        Err(e) => {
+            let _ = user::wait(a);
+            return crate::fail_fmt!("first spawn: {}", e.as_str());
+        }
+    }
+    let st = user::wait(a);
+    if !exited0(st) {
+        return crate::fail_fmt!("pt_tls status {st:#x}");
+    }
+    Outcome::Ok
+}
+
+/// A `PT_TLS` process and a TP=0 process each keep their thread pointer
+/// across `sched_yield` (F022).
+pub(crate) fn test_el0_tls_yield() -> Outcome {
+    let p = match user::spawn(&Image::TlsCode(TLS_LOOP, DEFAULT), &["tls_y_p"]) {
+        Ok(p) => p,
+        Err(e) => return crate::fail_fmt!("spawn p: {}", e.as_str()),
+    };
+    let r = match user::spawn(&Image::Code(TLS_ZERO, DEFAULT), &["tls_y_r"]) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = user::wait(p);
+            return crate::fail_fmt!("spawn r: {}", e.as_str());
+        }
+    };
+    thread_init::sleep_ms(20);
+    if tls_base_of(p).unwrap_or(0) == 0 || tls_base_of(r).unwrap_or(1) != 0 {
+        let _ = user::wait(p);
+        let _ = user::wait(r);
+        return Outcome::Fail("bases crossed");
+    }
+    let (sp, sr) = (user::wait(p), user::wait(r));
+    if exited0(sp) && exited0(sr) {
+        Outcome::Ok
+    } else {
+        crate::fail_fmt!("status {sp:#x} {sr:#x}")
+    }
+}
+
+/// An align-64 TLS word is the initial image at `TP + 64` (variant I).
+pub(crate) fn test_el0_tls_align64() -> Outcome {
+    match user::run(&Image::TlsAlign64(TLS_ALIGN64, DEFAULT), &["tls_a64"]) {
+        Ok(st) if exited0(st) => Outcome::Ok,
+        Ok(st) => crate::fail_fmt!("status {st:#x}"),
+        Err(e) => crate::fail_fmt!("spawn: {}", e.as_str()),
+    }
+}
+
+/// Two processes that each `msr tpidr_el0` keep their own value (F022).
+pub(crate) fn test_el0_tls_tpidr() -> Outcome {
+    let a = match user::spawn(&Image::Code(TLS_MSR_A, DEFAULT), &["tls_a"]) {
+        Ok(p) => p,
+        Err(e) => return crate::fail_fmt!("spawn a: {}", e.as_str()),
+    };
+    let b = match user::spawn(&Image::Code(TLS_MSR_B, DEFAULT), &["tls_b"]) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = user::wait(a);
+            return crate::fail_fmt!("spawn b: {}", e.as_str());
+        }
+    };
+    let (sa, sb) = (user::wait(a), user::wait(b));
+    if exited0(sa) && exited0(sb) {
+        Outcome::Ok
+    } else {
+        crate::fail_fmt!("status {sa:#x} {sb:#x}")
+    }
+}
+
+/// `msr tpidr_el0` then `clone` before any yield: the child reads that
+/// value. The saved base is forced off the live register first, because
+/// the fork copy is preempted and that switch would refresh it.
+pub(crate) fn test_el0_tls_fork() -> Outcome {
+    crate::proc::ktest::arm_fork_tls_diverge();
+    let st = user::run(&Image::Code(TLS_FORK, DEFAULT), &["tls_fork"]);
+    crate::proc::ktest::disarm_fork_tls_diverge();
+    match st {
+        Ok(st) if exited0(st) => Outcome::Ok,
+        Ok(st) => crate::fail_fmt!("status {st:#x}"),
+        Err(e) => crate::fail_fmt!("spawn: {}", e.as_str()),
+    }
+}
+
+static FP_PIDS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+static FP_SPAWNED: AtomicBool = AtomicBool::new(false);
+
+fn fp_spawner() {
+    let spawn = |code, name| match user::spawn(&Image::Code(code, DEFAULT), &[name]) {
+        Ok(pid) => u64::from(pid),
+        Err(_) => u64::MAX,
+    };
+    // Relaxed: pairs with nothing.
+    FP_PIDS[0].store(spawn(FP_YIELD, "fp_p"), Ordering::Relaxed);
+    thread_init::sleep_ms(20);
+    // Relaxed: pairs with nothing.
+    FP_PIDS[1].store(spawn(FP_PROBE, "fp_q"), Ordering::Relaxed);
+    // Release: pairs with the Acquire load in `test_el0_fp_no_leak`.
+    FP_SPAWNED.store(true, Ordering::Release);
+}
+
+/// No V register Q reads at its first instruction holds P's pattern in any
+/// of its 128 bits (F069); `FP_PROBE` checks every doubleword of V0-V31.
+pub(crate) fn test_el0_fp_no_leak() -> Outcome {
+    // Release: pairs with the Acquire load below.
+    FP_SPAWNED.store(false, Ordering::Release);
+    spawn_thread_on("fp_spawner", fp_spawner, thread_init::current_cpu());
+    // Acquire: pairs with the Release store in `fp_spawner`.
+    if !crate::ktest::sleep_until(|| FP_SPAWNED.load(Ordering::Acquire), 5_000) {
+        return Outcome::Fail("spawner");
+    }
+    // Relaxed: pairs with nothing.
+    let pids = [0, 1].map(|i| u32::try_from(FP_PIDS[i].load(Ordering::Relaxed)).ok());
+    let sts = pids.map(|p| p.map(user::wait));
+    match sts {
+        [Some(p), Some(q)] if exited0(p) && exited0(q) => Outcome::Ok,
+        [Some(p), Some(q)] => crate::fail_fmt!("P {p:#x} Q {q:#x}"),
+        _ => Outcome::Fail("spawn"),
+    }
+}
+
+fn id_aa64pfr1_el1() -> u64 {
+    let v: u64;
+    // SAFETY: ID_AA64PFR1_EL1 is readable at EL1 and at EL2 under VHE; established here.
+    unsafe {
+        asm!(
+            "mrs {0}, ID_AA64PFR1_EL1",
+            out(reg) v,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    v
+}
+
+/// `ptrue` at EL0 is `SIGILL` (F130). ZEN clear traps it; ZEN left enabled
+/// lets it exit 0, so this fails. No SVE skips: `ptrue` is then UNDEFINED
+/// either way. SME absent does not: `ptrue` is still SVE, and no named
+/// model that has SME boots AAVMF 2025.11.
+pub(crate) fn test_el0_sve_sigill() -> Outcome {
+    let sve = vibeos::arch::aarch64::sysreg::pfr0_sve(arch::aarch64::cpu::id_aa64pfr0_el1());
+    let sme = vibeos::arch::aarch64::sysreg::pfr1_sme(id_aa64pfr1_el1());
+    if sve == 0 {
+        return Outcome::Skip(if sme == 0 { "no SVE or SME" } else { "no SVE" });
+    }
+    match user::run(&Image::Code(SVE_PTRUE, DEFAULT), &["sve"]) {
+        Ok(st) if vibeos::proc::wifsignaled(st) && vibeos::proc::wtermsig(st) == SIGILL => {
+            Outcome::Ok
+        }
+        Ok(st) => crate::fail_fmt!("status {st:#x}"),
+        Err(e) => crate::fail_fmt!("spawn: {}", e.as_str()),
+    }
+}
+
+const _: () = assert!(TLS_MAGIC == 0x1122_3344_5566_7788);
+
+/// ROADMAP §10.3 (F039): `current` is read in one instruction that
+/// preemption cannot split. The registry, with IF=1, reads its id and pid
+/// through `thread_init`, which must not trip the IF=0 assertion of
+/// `per_cpu_init::current`, and finds them equal to its TCB's; in a debug
+/// build `per_cpu_init::current()` itself trips it.
+pub(crate) fn current_at_if1() -> Outcome {
+    if !crate::arch::current::interrupts_enabled() {
+        return Outcome::Fail("registry runs with IF off");
+    }
+    if !per_cpu_init::if_checks_armed() {
+        return Outcome::Fail("IF=0 checks not armed");
+    }
+    let mut got = (ThreadId::NONE, 0u32);
+    let hit = arch::catch::catch_panic(|| {
+        got = (thread_init::current_id(), thread_init::current_pid());
+    });
+    if hit {
+        return Outcome::Fail("two-step current read tripped the IF=0 assertion");
+    }
+    let t = arch::current_tcb();
+    if t.is_null() {
+        return Outcome::Fail("current_tcb null");
+    }
+    // SAFETY: invariant I9: the current thread's `Tcb` stays in `SCHED`,
+    // `id` changes only while its slot is Dead, and `pid` only under SCHED
+    // by `set_pid_cr3`, a word this read cannot tear; established by
+    // `thread_init::spawn_inner`.
+    let want = unsafe { ((*t).id, (*t).pid) };
+    if got != want {
+        return crate::fail_fmt!(
+            "current_id/current_pid ({}, {}), TCB ({}, {})",
+            got.0.0,
+            got.1,
+            want.0.0,
+            want.1
+        );
+    }
+    if cfg!(debug_assertions) {
+        let hit = arch::catch::catch_panic(|| {
+            core::hint::black_box(per_cpu_init::current());
+        });
+        if !hit {
+            return Outcome::Fail("per_cpu_init::current() at IF=1 did not assert");
+        }
+        if !crate::arch::current::interrupts_enabled() || per_cpu_init::irq_nest() != 0 {
+            return Outcome::Fail("the caught assertion left IF or irq_nest changed");
+        }
+    }
+    Outcome::Ok
+}
+
+/// `current_migrate_if1`'s threads.
+const MIGRATE_THREADS: usize = 4;
+/// How long each thread reads with IF=1.
+const MIGRATE_MS: u64 = 2_000;
+static MIGRATE_START: AtomicBool = AtomicBool::new(false);
+static MIGRATE_EXIT: AtomicBool = AtomicBool::new(false);
+static MIGRATE_TCB: [AtomicPtr<Tcb>; MIGRATE_THREADS] =
+    [const { AtomicPtr::new(core::ptr::null_mut()) }; MIGRATE_THREADS];
+static MIGRATE_PID: [AtomicU32; MIGRATE_THREADS] = [const { AtomicU32::new(0) }; MIGRATE_THREADS];
+/// Each thread's verdict: one of the `MIG_*` values.
+static MIGRATE_RESULT: [AtomicU32; MIGRATE_THREADS] =
+    [const { AtomicU32::new(MIG_RUNNING) }; MIGRATE_THREADS];
+const MIG_RUNNING: u32 = 0;
+const MIG_OK: u32 = 1;
+const MIG_WRONG_TCB: u32 = 2;
+const MIG_WRONG_PID: u32 = 3;
+const MIG_NEVER_MOVED: u32 = 4;
+
+fn migrate_body(i: usize) {
+    // Acquire: pairs with the Release store of MIGRATE_START in `current_migrate_if1`.
+    while !MIGRATE_START.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+    let (Some(tcb), Some(pid), Some(out)) = (
+        MIGRATE_TCB.get(i),
+        MIGRATE_PID.get(i),
+        MIGRATE_RESULT.get(i),
+    ) else {
+        return;
+    };
+    // Acquire: pairs with the Release stores of MIGRATE_TCB and MIGRATE_PID
+    // in `current_migrate_if1`.
+    let (tcb, pid) = (tcb.load(Ordering::Acquire), pid.load(Ordering::Acquire));
+    let first = arch::cpu_id_hint();
+    let mut moved = false;
+    let end = time_init::uptime_ms().saturating_add(MIGRATE_MS);
+    let mut verdict = MIG_OK;
+    while time_init::uptime_ms() < end {
+        if arch::current_tcb() != tcb {
+            verdict = MIG_WRONG_TCB;
+            break;
+        }
+        if thread_init::current_pid() != pid {
+            verdict = MIG_WRONG_PID;
+            break;
+        }
+        moved |= arch::cpu_id_hint() != first;
+    }
+    if verdict == MIG_OK && !moved {
+        verdict = MIG_NEVER_MOVED;
+    }
+    // Release: pairs with the Acquire load of MIGRATE_RESULT in `current_migrate_if1`.
+    out.store(verdict, Ordering::Release);
+    // Acquire: pairs with the Release store of MIGRATE_EXIT in `current_migrate_if1`.
+    while !MIGRATE_EXIT.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+}
+
+fn migrate_0() {
+    migrate_body(0);
+}
+
+fn migrate_1() {
+    migrate_body(1);
+}
+
+fn migrate_2() {
+    migrate_body(2);
+}
+
+fn migrate_3() {
+    migrate_body(3);
+}
+
+/// ROADMAP §10.3 (F039): four `CpuAffinity::Any` threads, each with its
+/// own fake pid above `PID_MAX`, read `arch::current_tcb()` and
+/// `current_pid()` with IF=1 for 2 s while C-REQUEUE-HOOK moves each
+/// preempted one to the next online CPU; any value not its own fails, and
+/// so does a thread that never changed CPU.
+pub(crate) fn current_migrate_if1() -> Outcome {
+    if second_cpu().is_none() {
+        return Outcome::Skip("needs 2 CPUs");
+    }
+    // Release: pairs with the Acquire load of MIGRATE_START in `migrate_body`.
+    MIGRATE_START.store(false, Ordering::Release);
+    // Release: pairs with the Acquire load of MIGRATE_EXIT in `migrate_body`.
+    MIGRATE_EXIT.store(false, Ordering::Release);
+    let entries: [fn(); MIGRATE_THREADS] = [migrate_0, migrate_1, migrate_2, migrate_3];
+    let mut ids = [ThreadId::NONE; MIGRATE_THREADS];
+    for (i, entry) in entries.into_iter().enumerate() {
+        let h = match thread_init::spawn("current-migrate", entry) {
+            Ok(h) => h,
+            Err(e) => {
+                // Release: pairs with the Acquire load of MIGRATE_EXIT in `migrate_body`.
+                MIGRATE_EXIT.store(true, Ordering::Release);
+                // Release: pairs with the Acquire load of MIGRATE_START in `migrate_body`.
+                MIGRATE_START.store(true, Ordering::Release);
+                return crate::fail_fmt!("spawn: {}", e.as_str());
+            }
+        };
+        let id = h.id();
+        ids[i] = id;
+        let pid = PID_MAX.saturating_add(1).saturating_add(i as u32);
+        thread_init::set_pid_cr3(id, pid, 0, 0);
+        // Release: pairs with the Acquire load of MIGRATE_TCB in `migrate_body`.
+        MIGRATE_TCB[i].store(thread_init::tcb_ptr(id), Ordering::Release);
+        // Release: pairs with the Acquire load of MIGRATE_PID in `migrate_body`.
+        MIGRATE_PID[i].store(pid, Ordering::Release);
+        // Release: pairs with the Acquire load of MIGRATE_RESULT below.
+        MIGRATE_RESULT[i].store(MIG_RUNNING, Ordering::Release);
+    }
+    let done = {
+        let _g = thread_init::testing::RequeueGuard;
+        thread_init::testing::set_requeue_next_cpu(true);
+        // Release: pairs with the Acquire load of MIGRATE_START in `migrate_body`.
+        MIGRATE_START.store(true, Ordering::Release);
+        sleep_until(
+            || {
+                // Acquire: pairs with the Release store of MIGRATE_RESULT in `migrate_body`.
+                MIGRATE_RESULT
+                    .iter()
+                    .all(|r| r.load(Ordering::Acquire) != MIG_RUNNING)
+            },
+            MIGRATE_MS.saturating_mul(3),
+        )
+    };
+    for id in ids {
+        thread_init::set_pid_cr3(id, 0, 0, 0);
+    }
+    // Release: pairs with the Acquire load of MIGRATE_EXIT in `migrate_body`.
+    MIGRATE_EXIT.store(true, Ordering::Release);
+    let joined = sleep_until(|| ids.iter().all(|&id| thread_init::exited(id)), 2_000);
+    if !done {
+        return Outcome::Fail("a thread did not finish its 2 s");
+    }
+    for (i, r) in MIGRATE_RESULT.iter().enumerate() {
+        // Acquire: pairs with the Release store of MIGRATE_RESULT in `migrate_body`.
+        match r.load(Ordering::Acquire) {
+            MIG_OK => {}
+            MIG_WRONG_TCB => return crate::fail_fmt!("thread {i}: current_tcb not its own"),
+            MIG_WRONG_PID => return crate::fail_fmt!("thread {i}: current_pid not its own"),
+            MIG_NEVER_MOVED => return crate::fail_fmt!("thread {i}: never changed CPU"),
+            v => return crate::fail_fmt!("thread {i}: verdict {v}"),
+        }
+    }
+    if !joined {
+        return Outcome::Fail("a thread did not exit");
+    }
+    Outcome::Ok
+}
+
+static PAN_OK: AtomicU32 = AtomicU32::new(0);
+static PAN_DONE: AtomicBool = AtomicBool::new(false);
+
+fn pan_on_cpu() {
+    let ok = u32::from(crate::arch::aarch64::cpu::pan_is_set());
+    // Relaxed: pairs with nothing.
+    PAN_OK.store(ok, Ordering::Relaxed);
+    // Release: pairs with the Acquire load in `test_el0_pan_every_cpu`.
+    PAN_DONE.store(true, Ordering::Release);
+}
+
+/// PSTATE.PAN is set on every online CPU (ROADMAP §11.6).
+pub(crate) fn test_el0_pan_every_cpu() -> Outcome {
+    let n = per_cpu_init::cpu_count().min(64);
+    if n == 0 {
+        return Outcome::Fail("no cpus");
+    }
+    let mut i = 0u32;
+    while (i as usize) < n {
+        if !per_cpu_init::is_online(i) {
+            i += 1;
+            continue;
+        }
+        // Release: pairs with the Acquire load below.
+        PAN_DONE.store(false, Ordering::Release);
+        spawn_thread_on("pan_cpu", pan_on_cpu, i);
+        // Acquire: pairs with the Release store in `pan_on_cpu`.
+        if !sleep_until(|| PAN_DONE.load(Ordering::Acquire), 5_000) {
+            return crate::fail_fmt!("cpu{i} did not report");
+        }
+        // Relaxed: pairs with nothing.
+        if PAN_OK.load(Ordering::Relaxed) == 0 {
+            return crate::fail_fmt!("cpu{i} PAN clear");
+        }
+        i += 1;
+    }
+    Outcome::Ok
+}
+
+static TPIDRRO_BAD: AtomicU64 = AtomicU64::new(0);
+static TPIDRRO_SEEN: AtomicU64 = AtomicU64::new(0);
+
+fn tpidrro_on_ap(_: *mut ()) {
+    let id = per_cpu_init::current().cpu_id;
+    if id >= 64 {
+        return;
+    }
+    if arch::aarch64::cpu::tpidrro_el0() != 0 {
+        // Release: pairs with the Acquire load in `test_tpidrro_zero`.
+        TPIDRRO_BAD.fetch_or(1u64 << id, Ordering::Release);
+    }
+    // Release: pairs with the Acquire load in `test_tpidrro_zero`.
+    TPIDRRO_SEEN.fetch_or(1u64 << id, Ordering::Release);
+}
+
+/// `TPIDRRO_EL0` is zero on this CPU and on every AP: the overflow stub's
+/// stash must not outlive the catch that reads it (DESIGN §11.5 rule 6).
+/// Red only if `kstack_overflow` ran earlier in this boot; QEMU resets the register to 0, so boot and AP clears go unseen.
+pub(crate) fn test_tpidrro_zero() -> Outcome {
+    if arch::aarch64::cpu::tpidrro_el0() != 0 {
+        return Outcome::Fail("bsp tpidrro set");
+    }
+    TPIDRRO_BAD.store(0, Ordering::SeqCst);
+    TPIDRRO_SEEN.store(0, Ordering::SeqCst);
+    let aps = super::ktest::ap_mask();
+    if aps == 0 {
+        return Outcome::Skip("no AP");
+    }
+    crate::ipi_init::call_mask(aps, tpidrro_on_ap, core::ptr::null_mut(), true);
+    // Acquire: pairs with the Release stores in `tpidrro_on_ap`.
+    if TPIDRRO_SEEN.load(Ordering::Acquire) != aps {
+        return Outcome::Fail("ap did not read tpidrro");
+    }
+    // Acquire: pairs with the Release stores in `tpidrro_on_ap`.
+    if TPIDRRO_BAD.load(Ordering::Acquire) != 0 {
+        return Outcome::Fail("ap tpidrro set");
+    }
+    Outcome::Ok
+}
+
+static ENV_ST: AtomicU32 = AtomicU32::new(0);
+static ENV_DONE: AtomicBool = AtomicBool::new(false);
+
+fn env_on_cpu() {
+    let st =
+        user::run(&Image::UserBin("tests"), &["tests", "--case", "user_env"]).unwrap_or(u32::MAX);
+    // Relaxed: pairs with nothing.
+    ENV_ST.store(st, Ordering::Relaxed);
+    // Release: pairs with the Acquire load in `test_el0_env_every_cpu`.
+    ENV_DONE.store(true, Ordering::Release);
+}
+
+/// The `/bin/tests` `user_env` case on every online CPU (issue #207).
+pub(crate) fn test_el0_env_every_cpu() -> Outcome {
+    let n = per_cpu_init::cpu_count().min(64);
+    if n == 0 {
+        return Outcome::Fail("no cpus");
+    }
+    let mut i = 0u32;
+    while (i as usize) < n {
+        if !per_cpu_init::is_online(i) {
+            i += 1;
+            continue;
+        }
+        // Release: pairs with the Acquire load below.
+        ENV_DONE.store(false, Ordering::Release);
+        spawn_thread_on("env_cpu", env_on_cpu, i);
+        // Acquire: pairs with the Release store in `env_on_cpu`.
+        if !sleep_until(|| ENV_DONE.load(Ordering::Acquire), 15_000) {
+            return crate::fail_fmt!("cpu{i} did not finish");
+        }
+        // Relaxed: pairs with nothing.
+        let st = ENV_ST.load(Ordering::Relaxed);
+        if !exited0(st) {
+            return crate::fail_fmt!("cpu{i} status {st:#x}");
+        }
+        i += 1;
+    }
+    Outcome::Ok
+}
+
+/// A process loaded over frames a dead one's code just left runs its own
+/// code, not the old (ROADMAP §11.2: I-cache maintenance on ELF load). TCG
+/// refetches after any guest write, so this cannot see a missing `ic ivau`;
+/// on HVF or hardware with `DIC` clear it can. Here it proves the loader's
+/// maintenance runs without faulting, and the host test of
+/// `tlb::sync_range` proves the sequence.
+pub(crate) fn test_el0_code_recycle() -> Outcome {
+    for round in 0..4 {
+        let (code, want) = if round % 2 == 0 {
+            (RECYCLE_A, 3)
+        } else {
+            (RECYCLE_B, 5)
+        };
+        match user::run(&Image::Code(code, DEFAULT), &["recycle"]) {
+            Ok(st) if vibeos::proc::wifexited(st) && vibeos::proc::wexitstatus(st) == want => {}
+            Ok(st) => return crate::fail_fmt!("round {round}: status {st:#x}"),
+            Err(e) => return crate::fail_fmt!("round {round}: spawn: {}", e.as_str()),
+        }
+    }
+    Outcome::Ok
+}
+
+user_code!(
+    EL0_EXIT0,
+    "
+    mov x0, #0
+    mov x8, #93
+    svc #0
+    "
+);
+
+/// A saved SPSR naming EL1h kills the process with SIGSEGV before the
+/// `eret`, so EL0 never chooses its own exception level.
+pub(crate) fn test_el0_bad_pstate() -> Outcome {
+    // Armed before the spawn, as `test_el0_bad_elr` arms its hook.
+    syscall_init::testing::arm_bad_pstate();
+    // Relaxed: a count; pairs with nothing.
+    let kills = crate::proc_init::BAD_ELR_KILLS.load(core::sync::atomic::Ordering::Relaxed);
+    let pid = match user::spawn(&Image::Code(EL0_EXIT0, DEFAULT), &["el0_bad_pstate"]) {
+        Ok(p) => p,
+        Err(e) => {
+            syscall_init::testing::take_bad_pstate();
+            return crate::fail_fmt!("spawn: {}", e.as_str());
+        }
+    };
+    let st = user::wait(pid);
+    if syscall_init::testing::take_bad_pstate() {
+        return Outcome::Fail("bad pstate hook not taken");
+    }
+    // Relaxed: pairs with nothing; `user::wait` above ordered the exit.
+    let now = crate::proc_init::BAD_ELR_KILLS.load(core::sync::atomic::Ordering::Relaxed);
+    if now.wrapping_sub(kills) != 1 {
+        return Outcome::Fail("bad pstate not killed by return_ok");
+    }
+    if super::ktest::signaled(st, vibeos::proc::SIGSEGV) {
+        Outcome::Ok
+    } else {
+        crate::fail_fmt!("status {st:#x}")
+    }
+}
+
+/// A saved ELR of 2^48 kills the process with SIGSEGV; the kernel runs.
+pub(crate) fn test_el0_bad_elr() -> Outcome {
+    // Armed before the spawn. The child is pinned to this CPU and made
+    // ready inside `spawn`, so a tick can run it before an arm after the
+    // spawn would land. The hook is one-shot, taken by the next return to
+    // EL0 on any CPU, which here is the child's first.
+    syscall_init::testing::arm_bad_elr();
+    // Relaxed: a count; pairs with nothing.
+    let kills = crate::proc_init::BAD_ELR_KILLS.load(core::sync::atomic::Ordering::Relaxed);
+    let pid = match user::spawn(&Image::Code(EL0_EXIT0, DEFAULT), &["el0_bad_elr"]) {
+        Ok(p) => p,
+        Err(e) => {
+            syscall_init::testing::take_bad_elr();
+            return crate::fail_fmt!("spawn: {}", e.as_str());
+        }
+    };
+    let st = user::wait(pid);
+    // The child's return to EL0 took the hook before it exited. A hook still
+    // armed here never fired, and is taken so a later test does not get it.
+    if syscall_init::testing::take_bad_elr() {
+        return Outcome::Fail("bad elr hook not taken");
+    }
+    // The status is SIGSEGV whether `elr_ok` or the MMU stopped the return,
+    // so the kill is counted: only `kill_bad_return` moves the counter.
+    // Relaxed: pairs with nothing; `user::wait` above ordered the exit.
+    let now = crate::proc_init::BAD_ELR_KILLS.load(core::sync::atomic::Ordering::Relaxed);
+    if now.wrapping_sub(kills) != 1 {
+        return Outcome::Fail("bad elr not killed by return_ok");
+    }
+    if super::ktest::signaled(st, vibeos::proc::SIGSEGV) {
+        Outcome::Ok
+    } else {
+        crate::fail_fmt!("status {st:#x}")
+    }
+}

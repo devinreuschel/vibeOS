@@ -29,8 +29,9 @@ static HANG: SpinMutex<()> = SpinMutex::with_rank((), RANK_DEVICE);
 static ARMED: AtomicBool = AtomicBool::new(false);
 
 /// Never set. `hold` spins until it is, an exit the compiler cannot rule
-/// out, so `arm` drops its guard after the call: the call stays a call,
-/// never a tail jump, and `arm`'s frame stays in the backtrace.
+/// out (`hold` reads it through `black_box`), so `arm` drops its guard
+/// after the call: the call stays a call, never a tail jump or a
+/// function's last instruction, and `arm`'s frame stays in the backtrace.
 static RELEASE: AtomicBool = AtomicBool::new(false);
 
 /// Spawn one waiter pinned to each other online CPU, take `HANG` (IF=0 from
@@ -64,11 +65,15 @@ pub(crate) fn arm() {
     hold();
 }
 
-/// Spin with `HANG` held and interrupts off, forever.
+/// Spin with `HANG` held and interrupts off, forever. `RELEASE` is read
+/// through `black_box`: a static nothing stores to is a constant to the
+/// optimizer, which then makes `hold` noreturn and `arm`'s call its last
+/// instruction (aarch64's build did), so `arm`'s return address would
+/// name `hold`.
 #[inline(never)]
 fn hold() {
-    // Relaxed: nothing is published through `RELEASE`, which no code sets.
-    while !RELEASE.load(Ordering::Relaxed) {
+    // Relaxed: nothing is published through `RELEASE`, which no code sets; pairs with nothing.
+    while !core::hint::black_box(&RELEASE).load(Ordering::Relaxed) {
         core::hint::spin_loop();
     }
 }

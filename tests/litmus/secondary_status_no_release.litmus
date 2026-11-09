@@ -1,0 +1,14 @@
+AArch64 vibeos-secondary-status-no-release
+(* secondary_status with the stub's STLR made a plain STR. Its load may
+   then be satisfied after its status store is seen, so the bad outcome is
+   allowed. *)
+{
+0:X1=status; 0:X2=param;
+1:X1=status; 1:X2=param;
+}
+ P0              | P1              ;
+ LDR W3,[X2]     | LDR W4,[X1]     ;
+ MOV W0,#1       | DMB ISHLD       ;
+ STR W0,[X1]     | MOV W0,#2       ;
+                 | STR W0,[X2]     ;
+exists (0:X3=2 /\ 1:X4=1)

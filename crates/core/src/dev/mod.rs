@@ -303,6 +303,15 @@ pub struct Device {
     pub resources: [Resource; MAX_BARS],
     pub irq: IrqBind,
     pub caps: CapSet,
+    /// Platform GIC INTID for a virtio-mmio transport; 0 if none.
+    pub intid: u32,
+    /// `intid` is edge-triggered, per its device-tree specifier.
+    pub intid_edge: bool,
+    /// The device snoops the CPU's caches for DMA: `dma-coherent` on its
+    /// device-tree node or a parent bus (ROADMAP §11.5), and every device
+    /// on x86_64. A device with neither is non-coherent, as Linux treats it
+    /// (DESIGN §4.7).
+    pub dma_coherent: bool,
 }
 
 impl Device {
@@ -318,6 +327,9 @@ impl Device {
             resources: [Resource::EMPTY; MAX_BARS],
             irq: IrqBind { pin: 0, line: 0 },
             caps: CapSet::empty(),
+            intid: 0,
+            intid_edge: false,
+            dma_coherent: false,
         }
     }
 
@@ -342,6 +354,9 @@ impl Device {
                 line: info.irq_line,
             },
             caps: info.caps,
+            intid: 0,
+            intid_edge: false,
+            dma_coherent: false,
         }
     }
 

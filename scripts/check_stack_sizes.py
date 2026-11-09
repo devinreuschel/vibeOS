@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import os
 import re
 import struct
 import subprocess
@@ -75,7 +76,12 @@ SYSCALL_ROOTS: tuple[str, ...] = ("vibeos_syscall_entry",)
 NOT_ROOTS: tuple[str, ...] = ("vibeos::boot_rest",)
 
 # The default variant's ELF (C-BUILD-OUTPUTS); `make check` builds it first.
-DEFAULT_ELF = ROOT / "build/kernels/vibeos-default.elf"
+# Under VIBEOS_ARCH=aarch64 the Makefile's BUILD_OUT is build/aarch64 (spec R9e).
+DEFAULT_ELF = (
+    ROOT
+    / ("build/aarch64" if os.environ.get("VIBEOS_ARCH") == "aarch64" else "build")
+    / "kernels/vibeos-default.elf"
+)
 
 SECTION = ".stack_sizes"
 

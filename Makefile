@@ -2,7 +2,21 @@
 #
 # `make help` is the live target inventory (DESIGN §8.5).
 
+# ARCH= selects the kernel target. Default keeps every existing recipe,
+# `make check` included, on x86_64. aarch64 is ROADMAP §11.3 / §11.7.
+ARCH ?= x86_64
+ifeq ($(ARCH),aarch64)
+TARGET := aarch64-unknown-none-softfloat
+else ifeq ($(ARCH),x86_64)
 TARGET := x86_64-unknown-none
+else
+$(error ARCH must be x86_64 or aarch64)
+endif
+export VIBEOS_ARCH := $(ARCH)
+# Kernel ELFs, user programs, the initrd and the ISOs go under BUILD_OUT: build/
+# for x86_64 (the paths the tests pin) and build/aarch64/ for aarch64, so an
+# x86 run and an aarch64 run never overwrite each other's boot images (spec R9e).
+BUILD_OUT := $(if $(filter aarch64,$(ARCH)),build/aarch64,build)
 CARGO  := cargo
 export CARGO_TARGET_DIR := $(CURDIR)/target
 # Host triple for vibeos-core tests and mkfs/fsck. Parent cargo config
@@ -33,19 +47,23 @@ CARGO_FLAGS   :=
 endif
 
 # Every build product lives under build/ (ROADMAP §10.2): the named kernel
-# ELFs in build/kernels/, the ISOs and their staging roots beside them.
-ISO              := build/vibeos.iso
-ISO_PANIC        := build/vibeos-panic.iso
-ISO_GP           := build/vibeos-gp.iso
-ISO_PANIC_NEST   := build/vibeos-panic-nest.iso
-ISO_PANIC_STOP   := build/vibeos-panic-stop.iso
-ISO_KTEST        := build/vibeos-ktest.iso
-ISO_VIBEFS_CRASH := build/vibeos-vibefs-crash.iso
-ISO_IRQOFF       := build/vibeos-irqoff.iso
-ISO_KTEST_IRQOFF := build/vibeos-ktest-irqoff.iso
-ISO_INIT_FAULT   := build/vibeos-init-fault.iso
-ISO_NOSH         := build/vibeos-nosh.iso
-ISO_HANG         := build/vibeos-hang.iso
+# ELFs in $(BUILD_OUT)/kernels/, the ISOs and their staging roots beside them.
+ISO              := $(BUILD_OUT)/vibeos.iso
+ISO_PANIC        := $(BUILD_OUT)/vibeos-panic.iso
+ISO_GP           := $(BUILD_OUT)/vibeos-gp.iso
+ISO_EARLY_FAULT  := $(BUILD_OUT)/vibeos-early-fault.iso
+ISO_PANIC_NEST   := $(BUILD_OUT)/vibeos-panic-nest.iso
+ISO_PANIC_STOP   := $(BUILD_OUT)/vibeos-panic-stop.iso
+ISO_KSTACK_OVERFLOW := $(BUILD_OUT)/vibeos-kstack-overflow.iso
+ISO_KTEST        := $(BUILD_OUT)/vibeos-ktest.iso
+ISO_VIBEFS_CRASH := $(BUILD_OUT)/vibeos-vibefs-crash.iso
+ISO_IRQOFF       := $(BUILD_OUT)/vibeos-irqoff.iso
+ISO_KTEST_IRQOFF := $(BUILD_OUT)/vibeos-ktest-irqoff.iso
+ISO_INIT_FAULT   := $(BUILD_OUT)/vibeos-init-fault.iso
+ISO_NOSH         := $(BUILD_OUT)/vibeos-nosh.iso
+ISO_HANG         := $(BUILD_OUT)/vibeos-hang.iso
+# The ktest ELF under a Limine that randomises the HHDM base (ROADMAP §11.1).
+ISO_KTEST_HHDM   := $(BUILD_OUT)/vibeos-ktest-hhdm.iso
 
 LIMINE_DIR := ./limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
@@ -59,14 +77,14 @@ KERNEL_SRCS := $(shell find src crates/core/src -type f \( -name '*.rs' -o -name
 # (ROADMAP §10.2, F143).
 HOSTLIB_DEPS := $(KERNEL_SRCS) Cargo.lock Cargo.toml crates/core/Cargo.toml tests/hostlib/Cargo.toml \
 	$(wildcard tests/hostlib/src/bin/*.rs)
-INITRD := $(CURDIR)/build/initrd.fat
+INITRD := $(CURDIR)/$(BUILD_OUT)/initrd.fat
 # The production initrd with `/sbin/init` from `user/src/bin/init_fault.rs`,
 # for `make test-e2e-init-fault` only (AGENTS.md rule 9).
-INITRD_INIT_FAULT := $(CURDIR)/build/initrd-init_fault.fat
+INITRD_INIT_FAULT := $(CURDIR)/$(BUILD_OUT)/initrd-init_fault.fat
 # The production initrd without `/bin/sh` and with `/bin/false` as
 # `/bin/tests`, for `make test-e2e-init-fault`'s `init_no_sh` case only.
-INITRD_NOSH := $(CURDIR)/build/initrd-nosh.fat
-KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.ld Makefile rust-toolchain.toml \
+INITRD_NOSH := $(CURDIR)/$(BUILD_OUT)/initrd-nosh.fat
+KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.ld linker-aarch64.ld Makefile rust-toolchain.toml \
 	scripts/gen_ksyms.py scripts/mkiso.sh \
 	.cargo/config.toml Cargo.lock
 # What mkiso.sh's /LICENSES/ notices are generated from (ROADMAP §10.9); the
@@ -105,26 +123,26 @@ CARGO_SHIP = CARGO_INCREMENTAL=0 $(CARGO) -Ztrim-paths -Zunstable-options --conf
 # $$ so $(CARGO_SHIP) is expanded when the recipe runs, not at $(eval) time.
 # `cp`, not `mv`: cargo may hard-link the artifact to its own copy.
 define KERNEL_VARIANT
-KERNEL_ELFS += build/kernels/vibeos-$(1).elf
+KERNEL_ELFS += $(BUILD_OUT)/kernels/vibeos-$(1).elf
 ISOS += $(3)
 ifneq ($(VIBEOS_PREBUILT),1)
-build/kernels/vibeos-$(1).elf: $(KERNEL_DEPS) $(PROFILE_STAMP)
-	rm -rf $$@ build/kernels/vibeos-$(1).ksyms.rs build/kernels/.vibeos-$(1)
-	$$(CARGO_SHIP) build $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
-	python3 scripts/gen_ksyms.py --nm "$$(NM)" build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
-	VIBEOS_KSYMS=$(CURDIR)/build/kernels/vibeos-$(1).ksyms.rs $$(CARGO_SHIP) build $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
-	python3 scripts/gen_ksyms.py --nm "$$(NM)" --check build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
-	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" build/kernels/.vibeos-$(1)/vibeos
-	cp build/kernels/.vibeos-$(1)/vibeos $$@
-$(3): build/kernels/vibeos-$(1).elf $(INITRD) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
-	LIMINE_DIR=$$(LIMINE_DIR) OBJCOPY=$$(OBJCOPY) scripts/mkiso.sh $$< $(INITRD) $$@ build/iso_root_$(1)
+$(BUILD_OUT)/kernels/vibeos-$(1).elf: $(KERNEL_DEPS) $(PROFILE_STAMP)
+	rm -rf $$@ $(BUILD_OUT)/kernels/vibeos-$(1).ksyms.rs $(BUILD_OUT)/kernels/.vibeos-$(1)
+	$$(CARGO_SHIP) build --target $$(TARGET) $$(CARGO_FLAGS) $(2) --artifact-dir $(BUILD_OUT)/kernels/.vibeos-$(1)
+	python3 scripts/gen_ksyms.py --nm "$$(NM)" $(BUILD_OUT)/kernels/.vibeos-$(1)/vibeos $(BUILD_OUT)/kernels/vibeos-$(1).ksyms.rs
+	VIBEOS_KSYMS=$(CURDIR)/$(BUILD_OUT)/kernels/vibeos-$(1).ksyms.rs $$(CARGO_SHIP) build --target $$(TARGET) $$(CARGO_FLAGS) $(2) --artifact-dir $(BUILD_OUT)/kernels/.vibeos-$(1)
+	python3 scripts/gen_ksyms.py --nm "$$(NM)" --check $(BUILD_OUT)/kernels/.vibeos-$(1)/vibeos $(BUILD_OUT)/kernels/vibeos-$(1).ksyms.rs
+	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" $(BUILD_OUT)/kernels/.vibeos-$(1)/vibeos
+	cp $(BUILD_OUT)/kernels/.vibeos-$(1)/vibeos $$@
+$(3): $(BUILD_OUT)/kernels/vibeos-$(1).elf $(INITRD) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
+	LIMINE_DIR=$$(LIMINE_DIR) OBJCOPY=$$(OBJCOPY) scripts/mkiso.sh $$< $(INITRD) $$@ $(BUILD_OUT)/iso_root_$(1)
 endif
 endef
 
 # The named ELFs do not name the profile, so each depends on a stamp that
 # changes only when CARGO_PROFILE does: a release build after a dev build
 # relinks instead of reusing the dev ELF.
-PROFILE_STAMP := build/kernels/profile.stamp
+PROFILE_STAMP := $(BUILD_OUT)/kernels/profile.stamp
 $(PROFILE_STAMP): FORCE
 	@mkdir -p $(dir $@)
 	@[ "$$(cat $@ 2>/dev/null)" = "$(CARGO_PROFILE)" ] || echo "$(CARGO_PROFILE)" > $@
@@ -138,34 +156,47 @@ ISOS :=
 $(eval $(call KERNEL_VARIANT,default,,$(ISO)))
 # panic: deliberate panic-test dump
 $(eval $(call KERNEL_VARIANT,panic,--features panic_test,$(ISO_PANIC)))
-# gp: deliberate #GP after IDT
+# early-fault: an exception before the full exception setup, on both arches
+$(eval $(call KERNEL_VARIANT,early-fault,--features early_fault_test,$(ISO_EARLY_FAULT)))
+# x86-only ISO variants: #GP and the nest dump. aarch64 `make prebuilt`
+# must not compile them (gp_test_trip is x86-only). The stop dump builds on
+# both: ROADMAP §11.3 runs it under GICv3 and GICv2. Keep this order so x86
+# KERNEL_ELFS matches tests/harness/test_build_outputs.py VARIANTS.
+ifeq ($(ARCH),x86_64)
 $(eval $(call KERNEL_VARIANT,gp,--features gp_test,$(ISO_GP)))
-# panic-nest: an `irq_nest` underflow after boot, dumped without a guard
 $(eval $(call KERNEL_VARIANT,panic-nest,--features panic_nest_test,$(ISO_PANIC_NEST)))
-# panic-stop: two CPUs panic at -smp 5; the dump stops the other three
+endif
 $(eval $(call KERNEL_VARIANT,panic-stop,--features panic_stop_test,$(ISO_PANIC_STOP)))
+# kstack-overflow: a thread overflows its guarded stack, on both arches (§11.3)
+$(eval $(call KERNEL_VARIANT,kstack-overflow,--features kstack_overflow_test,$(ISO_KSTACK_OVERFLOW)))
 # ktest: in-guest registry, never packaged as production
 $(eval $(call KERNEL_VARIANT,ktest,--features kernel_tests,$(ISO_KTEST)))
-# vibefs-crash: write-loop kernel for QEMU-kill fsck
+ifeq ($(ARCH),x86_64)
 $(eval $(call KERNEL_VARIANT,vibefs-crash,--features vibefs_crash,$(ISO_VIBEFS_CRASH)))
-# hang: every CPU hangs after smp: done, for the forensics tier's cores
+endif
+# hang: the forensics tier's hang (ROADMAP §10.7), on both ports (§11.7).
 $(eval $(call KERNEL_VARIANT,hang,--features hang_test,$(ISO_HANG)))
-# irqoff: production features plus the IF-off tracer (ROADMAP §10.3); measurement only
+ifeq ($(ARCH),x86_64)
 $(eval $(call KERNEL_VARIANT,irqoff,--features irqoff,$(ISO_IRQOFF)))
-# ktest-irqoff: the in-guest registry plus the IF-off tracer; measurement only
 $(eval $(call KERNEL_VARIANT,ktest-irqoff,--features kernel_tests --features irqoff,$(ISO_KTEST_IRQOFF)))
+endif
 
-KERNEL_ELF := build/kernels/vibeos-default.elf
+KERNEL_ELF := $(BUILD_OUT)/kernels/vibeos-default.elf
 
 ifneq ($(VIBEOS_PREBUILT),1)
 # The production ELF with the faulting init's initrd (ROADMAP §10.5): its
 # panic ends the run through pvpanic, as every production panic does.
 $(ISO_INIT_FAULT): $(KERNEL_ELF) $(INITRD_INIT_FAULT) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
-	LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD_INIT_FAULT) $@ build/iso_root_init-fault
+	LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD_INIT_FAULT) $@ $(BUILD_OUT)/iso_root_init-fault
 # The production ELF with the initrd that has no `/bin/sh` (ROADMAP §10.5):
 # init's three failed shell starts end in its exit and the pid 1 panic.
 $(ISO_NOSH): $(KERNEL_ELF) $(INITRD_NOSH) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
-	LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD_NOSH) $@ build/iso_root_nosh
+	LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD_NOSH) $@ $(BUILD_OUT)/iso_root_nosh
+# The ktest ELF with limine.conf's `randomise_hhdm_base: yes` (ROADMAP §11.1):
+# `make test-kernel-hhdm` boots it to show every translation follows the
+# HHDM offset Limine reports. A test image: no release publishes it.
+$(ISO_KTEST_HHDM): $(BUILD_OUT)/kernels/vibeos-ktest.elf $(INITRD) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
+	VIBEOS_HHDM_RANDOM=1 LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD) $@ $(BUILD_OUT)/iso_root_ktest-hhdm
 endif
 
 # The Rust user programs (ROADMAP §10.5, C-USERBINS): each user/src/bin/<name>.rs
@@ -175,10 +206,14 @@ endif
 # still applies (F147); the list repeats -D warnings anyway. Opt-level comes from
 # the profile override, since member manifests' profiles are ignored.
 # check_user_elf.py reads each ELF before the strip, which drops .symtab.
+ifeq ($(ARCH),aarch64)
+USER_TRIPLE := aarch64-unknown-linux-musl
+else
 USER_TRIPLE := x86_64-unknown-linux-musl
+endif
 USER_BIN_NAMES := $(sort $(basename $(notdir $(wildcard user/src/bin/*.rs))))
 VIBEOS_USER_BINS ?= $(USER_BIN_NAMES)
-USER_OUT := $(CURDIR)/build/user
+USER_OUT := $(CURDIR)/$(BUILD_OUT)/user
 USER_STAMP := $(USER_OUT)/.stamp
 USER_SRCS := $(shell find user/src user/mem -type f 2>/dev/null)
 USER_ELF_DIR := $(CARGO_TARGET_DIR)/$(USER_TRIPLE)/$(if $(filter release,$(CARGO_PROFILE)),release,debug)
@@ -207,31 +242,33 @@ $(USER_STAMP): $(USER_SRCS) user/Cargo.toml user/mem/Cargo.toml Cargo.toml Cargo
 
 # kernel_tests kernels embed the programs VIBEOS_USER_BINS names (build.rs), so
 # only the ktest ELF's build sees the two variables.
-build/kernels/vibeos-ktest.elf: $(USER_STAMP)
-build/kernels/vibeos-ktest.elf: export VIBEOS_USER_BINS := $(VIBEOS_USER_BINS)
-build/kernels/vibeos-ktest.elf: export VIBEOS_USER_DIR := $(USER_OUT)
-build/kernels/vibeos-ktest-irqoff.elf: $(USER_STAMP)
-build/kernels/vibeos-ktest-irqoff.elf: export VIBEOS_USER_BINS := $(VIBEOS_USER_BINS)
-build/kernels/vibeos-ktest-irqoff.elf: export VIBEOS_USER_DIR := $(USER_OUT)
+$(BUILD_OUT)/kernels/vibeos-ktest.elf: $(USER_STAMP)
+$(BUILD_OUT)/kernels/vibeos-ktest.elf: export VIBEOS_USER_BINS := $(VIBEOS_USER_BINS)
+$(BUILD_OUT)/kernels/vibeos-ktest.elf: export VIBEOS_USER_DIR := $(USER_OUT)
+$(BUILD_OUT)/kernels/vibeos-ktest-irqoff.elf: $(USER_STAMP)
+$(BUILD_OUT)/kernels/vibeos-ktest-irqoff.elf: export VIBEOS_USER_BINS := $(VIBEOS_USER_BINS)
+$(BUILD_OUT)/kernels/vibeos-ktest-irqoff.elf: export VIBEOS_USER_DIR := $(USER_OUT)
 endif
 
-.PHONY: help check check-python check-msrv all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
-        test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test \
-        test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
-        test-smp-stress test-vibefs-crash test-vibefs-crash-1 test-vibefs-crash-2 test-vibefs-crash-plants test-e2e-uefi test-qmp test-forensics test-irqoff
+.PHONY: help check check-python check-msrv check-hooks all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
+        test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-panic-stop-gic2 test-e2e-isa-floor test-e2e-gp test-e2e-early-fault test-e2e-kstack-overflow test-e2e-mce test \
+        test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback test-kernel-hhdm \
+        test-smp-stress test-vibefs-crash test-vibefs-crash-1 test-vibefs-crash-2 test-vibefs-crash-plants test-e2e-uefi test-qmp test-forensics test-irqoff \
+        test-aarch64 test-gic-fallback litmus
 
 help:
 	@printf '%s\n' \
 	  'vibeOS make targets:' \
 	  '  check                 fast local gate (clippy/unit/harness/python)' \
 	  '  check-python          ruff and mypy (VIBEOS_ALLOW_MISSING_TOOLS=1 skips a missing one)' \
+	  '  check-hooks           production-feature kernel link for ARCH, no test hook in its symbols' \
 	  '  check-msrv            vibeos-core with its MSRV toolchain (rust-version), host and kernel target' \
 	  '  fuzz-check            tests/fuzz: fmt, clippy, build every target, replay every committed input' \
 	  '  fuzz                  every cargo-fuzz target for FUZZ_TIME s (FUZZ_TARGETS=, FUZZ_SANITIZER=none|address)' \
-	  '  all / iso             kernel + build/vibeos.iso (hybrid BIOS/UEFI)' \
-	  '  kernel                kernel ELF only (build/kernels/vibeos-default.elf)' \
-	  '  user                  Rust user programs, as build/user/<name> (ROADMAP §10.5)' \
-	  '  isos                  every ISO variant, as build/vibeos*.iso' \
+	  '  all / iso             kernel + $(BUILD_OUT)/vibeos.iso (hybrid BIOS/UEFI)' \
+	  '  kernel                kernel ELF only ($(BUILD_OUT)/kernels/vibeos-default.elf)' \
+	  '  user                  Rust user programs, as $(BUILD_OUT)/user/<name> (ROADMAP §10.5)' \
+	  '  isos                  every ISO variant, as $(BUILD_OUT)/vibeos*.iso' \
 	  '  release-artifacts     v* release images (release profile) into OUT=<dir>' \
 	  '  repro                 build this commit twice; fail unless byte-identical (REPRO_ARGS=--share-rustup)' \
 	  '  ci-budget             scheduled lanes under 60% busy and tier medians under 60 s (ci-history)' \
@@ -251,10 +288,14 @@ help:
 	  '  test-e2e-panic        panic-test dump contract' \
 	  '  test-e2e-panic-nest   irq_nest underflow: one dump, no reentered' \
 	  '  test-e2e-panic-stop   -smp 5: the dump stops every other CPU' \
+	  '  test-e2e-panic-stop-gic2  aarch64: the same under virt,gic-version=2' \
+	  '  test-e2e-isa-floor    aarch64: -cpu cortex-a72 under TCG prints the ISA floor refusal' \
 	  '  test-e2e-gp           #GP dump+halt contract' \
+	  '  test-e2e-early-fault  exception before the full exception setup' \
+	  '  test-e2e-kstack-overflow  a thread overflows its stack: the overflow line, then the halt' \
 	  '  test-e2e-mce          injected #MC dump+halt contract' \
 	  '  test-e2e-pit          PIT calibration fallback' \
-	  '  test-e2e-highmem      boot contract with 9 GiB, past the physmap cap' \
+	  '  test-e2e-highmem      boot contract with 9 GiB; pmm counts RAM above 8 GiB' \
 	  '  test-e2e-init-fault   /sbin/init faults, or finds no /bin/sh: pid 1 line, then the panic' \
 	  '  test-e2e-strace       vibeos.strace=1 via fw_cfg: cmdline echo + syscall trace' \
 	  '  test-ps2              QEMU sendkey echo (also part of test-e2e)' \
@@ -265,13 +306,17 @@ help:
 	  '  test-lapic-fallback   in-guest tests, TSC-deadline off' \
 	  '  test-kernel-<k>       the per-push shards of those three, which test runs:' \
 	  '                        test-kernel-smp4-<k> and test-lapic-fallback-<k> too' \
+	  '  test-kernel-hhdm      ktest image with a randomised HHDM base: boot and mm rows' \
 	  '  test-irqoff           test-kernel and test-e2e in the IF-off tracer build (nightly)' \
 	  '  test-vibefs-crash     QEMU-kill + host fsck-vibefs' \
-	  '  test-smp-stress       -smp 4 in-guest tier (weekly CI)' \
+	  '  test-smp-stress       -smp 4 in-guest tier (weekly CI); aarch64 also boots weak_order_probe' \
+	  '  test-aarch64          aarch64 e2e + kernel + smp4 + GICv2 fallback shards' \
+	  '  test-gic-fallback     in-guest tests with VIBEOS_GIC=2 (aarch64)' \
+	  '  litmus                herd7 on tests/litmus/ (needs herdtools7)' \
 	  '  test                  all of the above except test-smp-stress and test-ps2' \
 	  '  test-vibefs-crash-plants  each vibeos.crash_plant= defect caught, then a clean round' \
 	  '  gate PHASE=N          phase exit gate: gate-map entries and box rules (RECORD=1: dev-host records)' \
-	  '  prebuilt              every ISO and host tool a tier uses, as build/prebuilt.tar;' \
+	  '  prebuilt              the ISOs and host tools that architecture'\''s tiers use;' \
 	  '                        VIBEOS_PREBUILT=1 make test-* then uses them (CI tier jobs)' \
 	  '  clean / distclean     build products; distclean also drops limine/'
 
@@ -312,9 +357,9 @@ MSRV_TOOLCHAIN ?= $(MSRV)
 CARGO_DENY_PIN := $(shell sed -n 's/^ *CARGO_DENY_VERSION: *//p' .github/workflows/ci.yml | head -n1)
 
 # Fast local / CI `check` job gate (T3). It lints the kernel with its default
-# features and vibeos-core's no_std build for the kernel target, so kernel-target
-# code compiles before every commit; CI's ladder lints each other ISO feature
-# set and kernel_shell (ROADMAP §10.1, F147).
+# features for $(TARGET) and vibeos-core's no_std build for the kernel target,
+# so kernel-target code compiles before every commit; CI's ladder lints each
+# other ISO feature set and kernel_shell (ROADMAP §10.1, F147).
 # Guard scripts (scripts/check_*.py) run when present (A4, Q5, A1). The
 # `hookcheck` link gives check_test_hooks.py a production-feature ELF (Q2's
 # nm check) without replacing the production kernel; it needs no initrd,
@@ -328,14 +373,14 @@ check:
 	cargo build -p vibeos-core --lib --target $(HOST_TRIPLE)
 	cargo clippy -p vibeos-core --target $(TARGET) -- -D warnings
 	$(MAKE) check-msrv
-	cargo clippy --bin vibeos -- -D warnings
+	cargo clippy --bin vibeos --target $(TARGET) -- -D warnings
 	$(MAKE) test-unit
 	cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE) --config 'profile.test.debug-assertions=false' -- release_assert_
 	$(MAKE) models-quick
 	$(MAKE) test-harness
 	$(MAKE) fuzz-check
 	$(MAKE) check-python
-	$(CARGO) build --bin vibeos --profile hookcheck --config 'profile.hookcheck.inherits="dev"'
+	$(MAKE) check-hooks
 	python3 scripts/gen_syscalls.py --check
 	# The default kernel ELF, whose .stack_sizes check_stack_sizes.py reads.
 	$(MAKE) kernel
@@ -354,6 +399,12 @@ check:
 	    $(call missing_tool,cargo-deny,cargo deny check licenses bans sources,cargo install cargo-deny --locked --version $(CARGO_DENY_PIN)); \
 	fi
 	@echo "check: ok"
+
+# The production-feature link for $(TARGET), then the nm check on it; the CI
+# aarch64 leg runs this alone, since it does not run the whole `check`.
+check-hooks:
+	$(CARGO) build --bin vibeos --target $(TARGET) --profile hookcheck --config 'profile.hookcheck.inherits="dev"'
+	python3 scripts/check_test_hooks.py
 
 # ruff and mypy over tests/ and scripts/ (DX1, F147).
 check-python:
@@ -509,8 +560,12 @@ miri:
 	MIRIFLAGS=-Zmiri-ignore-leaks cargo miri test -p vibeos-core --lib --features std --target $(HOST_TRIPLE)
 	MIRIFLAGS=-Zmiri-ignore-leaks cargo miri test -p vibeos-core --doc --features std --target $(HOST_TRIPLE)
 
+# The harness units describe both arches themselves, so they run without the
+# caller's ARCH: `make ARCH=aarch64 check` exports VIBEOS_ARCH and passes ARCH to
+# every make the tests start through MAKEFLAGS.
 test-harness:
-	VIBEOS_TIER=$@ GITHUB_STEP_SUMMARY= python3 -m unittest discover -s tests/harness -t . -v
+	env -u VIBEOS_ARCH -u MAKEFLAGS -u MFLAGS -u ARCH VIBEOS_TIER=$@ GITHUB_STEP_SUMMARY= \
+	    python3 -m unittest discover -s tests/harness -t . -v
 
 # Host mkfs/fsck share crates/core/src/fs/vibefs/. Artifacts land under
 # $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/ (A2). Defined above the tiers that
@@ -540,8 +595,20 @@ vmcore: $(VMCORE)
 # variables' paths. The tar keeps the executable bit, which upload-artifact
 # drops, and holds paths relative to $(CURDIR). The named ELFs go too: a failed
 # run's guest core keeps the ELF behind its ISO (ROADMAP §10.7).
-PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_PANIC_NEST) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) $(ISO_INIT_FAULT) $(ISO_NOSH) \
+ifeq ($(ARCH),aarch64)
+# The ISOs aarch64 per-push tiers run (ROADMAP §11.7): e2e, the panic dump,
+# the stop dump under both GICs (§11.3), ktest shards, the forensics tier's
+# hang, and the §11.1 early-fault ISO.
+PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_KTEST_HHDM) $(ISO_HANG) $(ISO_EARLY_FAULT) \
+	$(ISO_KSTACK_OVERFLOW) $(BUILD_OUT)/kernels/vibeos-kstack-overflow.elf \
+	$(BUILD_OUT)/kernels/vibeos-default.elf $(BUILD_OUT)/kernels/vibeos-panic.elf \
+	$(BUILD_OUT)/kernels/vibeos-panic-stop.elf $(BUILD_OUT)/kernels/vibeos-ktest.elf \
+	$(BUILD_OUT)/kernels/vibeos-hang.elf \
+	$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT) $(VMCORE)
+else
+PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_EARLY_FAULT) $(ISO_GP) $(ISO_PANIC_NEST) $(ISO_PANIC_STOP) $(ISO_KSTACK_OVERFLOW) $(ISO_KTEST) $(ISO_KTEST_HHDM) $(ISO_VIBEFS_CRASH) $(ISO_INIT_FAULT) $(ISO_NOSH) \
 	$(ISO_HANG) $(KERNEL_ELFS) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT) $(VMCORE)
+endif
 
 prebuilt: $(PREBUILT_FILES)
 	mkdir -p build
@@ -574,6 +641,12 @@ test-e2e-uefi: $(ISO)
 	    *) exit 2 ;; \
 	esac
 
+# The aarch64 ISA floor (ROADMAP §11.1): the production ISO on
+# `-cpu cortex-a72` (Armv8.0: no FEAT_LSE, no FEAT_PAN) under TCG prints the
+# refusal as its first kernel line, with no early exception before it.
+test-e2e-isa-floor: $(ISO)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) python3 -c 'from tests.harness.run_e2e import isa_floor_main; raise SystemExit(isa_floor_main())'
+
 test-e2e-panic: $(ISO_PANIC)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_PANIC) VIBEOS_EXPECT_PANIC=1 python3 tests/harness/run_e2e.py
 
@@ -587,6 +660,22 @@ test-e2e-panic-nest: $(ISO_PANIC_NEST)
 test-e2e-panic-stop: $(ISO_PANIC_STOP)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_PANIC_STOP) VIBEOS_SMP=5 VIBEOS_PANIC_VARIANT=stop python3 tests/harness/run_e2e.py
 
+# An undefined instruction right after the Limine handshake: the early
+# exception handler's line, on either architecture (ROADMAP §11.1, F136).
+test-e2e-early-fault: $(ISO_EARLY_FAULT)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_EARLY_FAULT) VIBEOS_EARLY_FAULT=1 python3 tests/harness/run_e2e.py
+
+# A kernel thread overflows its guarded stack with no catch armed: the
+# registered overflow line with the thread's guard, then the halt, on either
+# architecture (ROADMAP §11.3).
+test-e2e-kstack-overflow: $(ISO_KSTACK_OVERFLOW)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KSTACK_OVERFLOW) VIBEOS_PANIC_VARIANT=overflow python3 tests/harness/run_e2e.py
+
+# The same scenario on aarch64's GICv2 (ROADMAP §11.3): its SGIs are
+# `GICD_SGIR` stores rather than `ICC_SGI1R_EL1` writes. aarch64 only.
+test-e2e-panic-stop-gic2: $(ISO_PANIC_STOP)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_PANIC_STOP) VIBEOS_SMP=5 VIBEOS_GIC=2 VIBEOS_PANIC_VARIANT=stop python3 tests/harness/run_e2e.py
+
 test-e2e-gp: $(ISO_GP)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_GP) VIBEOS_GP_TEST=1 python3 tests/harness/run_e2e.py
 
@@ -599,7 +688,7 @@ test-e2e-mce: $(ISO)
 test-e2e-pit: $(ISO)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_EXPECT_PIT=1 python3 tests/harness/run_e2e.py
 
-# RAM past the 8 GiB physmap cap (DESIGN §4.1) must stay out of the buddy.
+# 9 GiB guest: the buddy includes RAM above 8 GiB (DESIGN §4.1).
 test-e2e-highmem: $(ISO)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_MEM=9G python3 tests/harness/run_e2e.py
 
@@ -631,7 +720,9 @@ test-qmp: $(ISO)
 # -smp 4, its core 5 s after the armed marker, and the core tool's report,
 # trace export and virtual core; the BUILD-ID refusal, a #GP core, and a
 # 9 GiB guest's core through the pipe. Its cores stay in build/forensics/.
-test-forensics: $(ISO_HANG) $(ISO_GP) $(VMCORE)
+# ARCH=aarch64 (ROADMAP §11.7) runs it on `virt`, refusing the hang core with
+# the production ELF, and has no #GP case, as it has no gp_test build.
+test-forensics: $(ISO_HANG) $(if $(filter x86_64,$(ARCH)),$(ISO_GP),$(KERNEL_ELF)) $(VMCORE)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_HANG) VIBEOS_VMCORE=$(VMCORE) python3 tests/harness/run_forensics.py
 
 # The in-guest tiers (DESIGN §8.2). Each variant's target runs the whole
@@ -645,14 +736,21 @@ test-forensics: $(ISO_HANG) $(ISO_GP) $(VMCORE)
 KTEST_ENV =
 KTEST_RUN = VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) $(KTEST_ENV) python3 tests/harness/run_ktest.py
 KERNEL_SHARDS := test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6
+KERNEL_A64_PROOF := test-kernel-7 test-kernel-8 test-kernel-9
 KERNEL_SMP4_SHARDS := test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5
+KERNEL_SMP4_A64_PROOF := test-kernel-smp4-6 test-kernel-smp4-7 test-kernel-smp4-8
 LAPIC_FALLBACK_SHARDS := test-lapic-fallback-1 test-lapic-fallback-2 test-lapic-fallback-3 test-lapic-fallback-4 test-lapic-fallback-5 test-lapic-fallback-6
-.PHONY: $(KERNEL_SHARDS) $(KERNEL_SMP4_SHARDS) $(LAPIC_FALLBACK_SHARDS)
+.PHONY: $(KERNEL_SHARDS) $(KERNEL_A64_PROOF) $(KERNEL_SMP4_SHARDS) $(KERNEL_SMP4_A64_PROOF) $(LAPIC_FALLBACK_SHARDS)
 
 # The nightly KVM leg adds +invtsc, so its invariant-TSC check still applies
 # (DESIGN §8.4).
 LAPIC_FALLBACK_CPU ?= qemu64,-tsc-deadline
-test-kernel-smp4 $(KERNEL_SMP4_SHARDS): KTEST_ENV = VIBEOS_SMP=4
+# aarch64 env_config defaults VIBEOS_SMP to 1 (`make run`). The in-guest
+# `-smp 2` tiers must set it: AP tests skip with `no AP` at 1 CPU, and
+# those skips have no aarch64 skips.toml row (ROADMAP §11.7). A caller's
+# VIBEOS_SMP overrides the default of 2 or 4 these tiers set.
+test-kernel $(KERNEL_SHARDS) $(KERNEL_A64_PROOF): KTEST_ENV = VIBEOS_SMP=$(or $(VIBEOS_SMP),2)
+test-kernel-smp4 $(KERNEL_SMP4_SHARDS) $(KERNEL_SMP4_A64_PROOF): KTEST_ENV = VIBEOS_SMP=$(or $(VIBEOS_SMP),4)
 test-lapic-fallback $(LAPIC_FALLBACK_SHARDS): KTEST_ENV = VIBEOS_QEMU_CPU=$(LAPIC_FALLBACK_CPU)
 
 test-kernel: $(ISO_KTEST)
@@ -676,6 +774,15 @@ test-kernel-5: $(ISO_KTEST)
 test-kernel-6: $(ISO_KTEST)
 	$(KTEST_RUN) --shard $@
 
+test-kernel-7: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-8: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-9: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
 test-kernel-smp4: $(ISO_KTEST)
 	$(KTEST_RUN)
 
@@ -692,6 +799,15 @@ test-kernel-smp4-4: $(ISO_KTEST)
 	$(KTEST_RUN) --shard $@
 
 test-kernel-smp4-5: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-smp4-6: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-smp4-7: $(ISO_KTEST)
+	$(KTEST_RUN) --shard $@
+
+test-kernel-smp4-8: $(ISO_KTEST)
 	$(KTEST_RUN) --shard $@
 
 test-lapic-fallback: $(ISO_KTEST)
@@ -714,6 +830,48 @@ test-lapic-fallback-5: $(ISO_KTEST)
 
 test-lapic-fallback-6: $(ISO_KTEST)
 	$(KTEST_RUN) --shard $@
+
+# GICv2 fallback (ROADMAP §11.7): the test-kernel shards, registry and
+# proof boots, with VIBEOS_GIC=2. Not in `make test` (x86); `make test-aarch64`
+# and the aarch64 CI tiers run them.
+GIC_FALLBACK_SHARDS := test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6 test-gic-fallback-7 test-gic-fallback-8 test-gic-fallback-9
+.PHONY: test-gic-fallback $(GIC_FALLBACK_SHARDS)
+test-gic-fallback $(GIC_FALLBACK_SHARDS): KTEST_ENV = VIBEOS_GIC=2 VIBEOS_SMP=2
+test-gic-fallback: $(ISO_KTEST)
+	$(KTEST_RUN)
+test-gic-fallback-1: $(ISO_KTEST)
+	$(KTEST_RUN) --shard test-kernel-1
+test-gic-fallback-2: $(ISO_KTEST)
+	$(KTEST_RUN) --shard test-kernel-2
+test-gic-fallback-3: $(ISO_KTEST)
+	$(KTEST_RUN) --shard test-kernel-3
+test-gic-fallback-4: $(ISO_KTEST)
+	$(KTEST_RUN) --shard test-kernel-4
+test-gic-fallback-5: $(ISO_KTEST)
+	$(KTEST_RUN) --shard test-kernel-5
+test-gic-fallback-6: $(ISO_KTEST)
+	$(KTEST_RUN) --shard test-kernel-6
+test-gic-fallback-7: $(ISO_KTEST)
+	$(KTEST_RUN) --shard test-kernel-7
+test-gic-fallback-8: $(ISO_KTEST)
+	$(KTEST_RUN) --shard test-kernel-8
+test-gic-fallback-9: $(ISO_KTEST)
+	$(KTEST_RUN) --shard test-kernel-9
+
+# The HHDM boot (ROADMAP §11.1): the ktest ELF under a Limine that
+# randomises the HHDM base, at -smp 2, running run_ktest.HHDM_KTEST alone:
+# `bootinfo_consistent`, `hhdm_randomised` (the offset is not Limine's
+# unrandomised base) and the mm and boot rows that map and read through it.
+test-kernel-hhdm: $(ISO_KTEST_HHDM)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST_HHDM) VIBEOS_SMP=$(or $(VIBEOS_SMP),2) python3 tests/harness/run_ktest.py --hhdm
+
+# aarch64 per-push ladder (ROADMAP §11.7). x86-only e2e (PIT, #GP, #MC,
+# 9 GiB, LAPIC fallback, vibefs-crash) stays on `make test`.
+test-aarch64: test-e2e test-e2e-early-fault test-e2e-kstack-overflow test-e2e-isa-floor test-kernel-hhdm test-e2e-panic test-e2e-panic-stop test-e2e-panic-stop-gic2 test-forensics test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-7 test-kernel-8 test-kernel-9 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-kernel-smp4-6 test-kernel-smp4-7 test-kernel-smp4-8 test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6 test-gic-fallback-7 test-gic-fallback-8 test-gic-fallback-9
+
+.PHONY: litmus
+litmus:
+	python3 scripts/check_litmus.py --run
 
 # Over the volatile-cache device (DESIGN §8.3): nbd-cache serves the disk,
 # vibefs-cat reads /w from each image rebuilt from its trace. The 8 rounds
@@ -749,11 +907,15 @@ test-irqoff: $(ISO_KTEST_IRQOFF) $(ISO_IRQOFF) $(MKFS_VIBEFS)
 	VIBEOS_TIER=$@ $(IRQOFF_ENV) VIBEOS_ISO=$(ISO_KTEST_IRQOFF) python3 tests/harness/run_ktest.py
 	VIBEOS_TIER=$@ $(IRQOFF_ENV) VIBEOS_RESULTS_APPEND=1 VIBEOS_ISO=$(ISO_IRQOFF) VIBEOS_MKFS=$(MKFS_VIBEFS) python3 tests/harness/run_e2e.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-qmp test-forensics test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-lapic-fallback-1 test-lapic-fallback-2 test-lapic-fallback-3 test-lapic-fallback-4 test-lapic-fallback-5 test-lapic-fallback-6 test-vibefs-crash-1 test-vibefs-crash-2 test-vibefs-crash-plants
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-early-fault test-e2e-kstack-overflow test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-qmp test-forensics test-kernel-hhdm test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-lapic-fallback-1 test-lapic-fallback-2 test-lapic-fallback-3 test-lapic-fallback-4 test-lapic-fallback-5 test-lapic-fallback-6 test-vibefs-crash-1 test-vibefs-crash-2 test-vibefs-crash-plants
 
 # The -smp 4 in-guest tier, weekly in CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 python3 tests/harness/run_ktest.py
+	@if [ "$(ARCH)" = aarch64 ]; then \
+	    VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 VIBEOS_KTEST=weak_order_probe \
+	        VIBEOS_RESULTS_APPEND=1 python3 tests/harness/run_ktest.py; \
+	fi
 
 # Phase exit gate (ROADMAP §10.9): the gate map's entries and the box rules.
 .PHONY: gate
@@ -763,8 +925,8 @@ gate:
 
 # Keeps build/results/.
 clean:
-	rm -rf build/kernels build/iso_root_* $(ISOS) $(addsuffix .xorriso-version,$(ISOS)) \
-	    $(INITRD) $(USER_OUT) $(ISO_INIT_FAULT) $(INITRD_INIT_FAULT) $(ISO_NOSH) $(INITRD_NOSH)
+	rm -rf $(BUILD_OUT)/kernels $(BUILD_OUT)/iso_root_* $(ISOS) $(addsuffix .xorriso-version,$(ISOS)) \
+	    $(INITRD) $(USER_OUT) $(ISO_INIT_FAULT) $(INITRD_INIT_FAULT) $(ISO_NOSH) $(INITRD_NOSH) $(ISO_KTEST_HHDM)
 	$(CARGO) clean
 
 distclean: clean

@@ -30,7 +30,12 @@ A local run gates `HEAD` of a clean work tree (tracked files): `--commit`
 must name `HEAD`. `--dry-run` prints the rows and the box problems and runs
 nothing. `--record` (RECORD=1) runs only on macOS arm64: it runs each record
 entry in a clean worktree of the commit and writes one scrubbed record per
-entry through `ci_history.py --record`'s writer.
+entry through `ci_history.py --record`'s writer. A phase-map record entry
+runs once; a `tests/gates/common.toml` entry (from Phase 11) runs in a loop
+for `COMMON_LOOP_S` (30 minutes), stopping at its first failed run, and its
+record's `numbers` hold `runs`, `passes` and `loop_seconds` (ROADMAP §11.7):
+any failed run fails it, and `make gate` passes such an entry only on a
+record that looped for the whole time with every run passing.
 
 Exit codes: 0 pass, 1 fail, 2 usage.
 
@@ -72,6 +77,8 @@ STRETCH = re.compile(r"^### \d+\.\d+ Stretch:")
 SECTION_HEADING = re.compile(r"^#{1,3} ")
 SERIAL = re.compile(r'"IOPlatformSerialNumber"\s*=\s*"([^"]*)"')
 ROW_TEXT = 100
+# How long `RECORD=1` loops each `common.toml` entry (ROADMAP §11.7).
+COMMON_LOOP_S = 30 * 60
 
 
 class GateUsage(Exception):
@@ -472,10 +479,29 @@ def eval_job(
     return EntryResult(e, False, "; ".join([detail, *notes]))
 
 
-def eval_record(e: Entry, key: str, commit: str, phase: int, history: History) -> EntryResult:
+def looped(rec: dict[str, Any], loop_s: int) -> bool:
+    """A record's run loop covered `loop_s` with every run passing (ROADMAP
+    §11.7): `numbers` holds `loop_seconds` of at least `loop_s`, `seconds` of
+    at least that, and `passes` equal to `runs`, at least 1."""
+    n = rec.get("numbers")
+    if not isinstance(n, dict):
+        return False
+    vals: list[float] = []
+    for k in ("loop_seconds", "seconds", "runs", "passes"):
+        v = n.get(k)
+        if not isinstance(v, int | float) or isinstance(v, bool):
+            return False
+        vals.append(v)
+    loop, secs, runs, passes = vals
+    return loop >= loop_s and secs >= loop_s and runs >= 1 and passes == runs
+
+
+def eval_record(e: Entry, key: str, commit: str, phase: int, history: History,
+                loop_s: int = 0) -> EntryResult:
     """Passes only on a `ci-history` dev-host record of this entry at
     `commit`: event `dev-host`, commit, phase, line and command equal, every
-    required field present, and result `pass`. Its command never runs."""
+    required field present, and result `pass`; with `loop_s`, a record whose
+    run loop covered it (`looped`). Its command never runs."""
     try:
         records = history.dev_host_records()
     except ci_history.HistoryError as err:
@@ -490,11 +516,14 @@ def eval_record(e: Entry, key: str, commit: str, phase: int, history: History) -
             and r.get("command") == e.cmd
             and all(f in r for f in ci_history.REQUIRED_RECORD_FIELDS)
             and r.get("result") == "pass"
+            and (not loop_s or looped(r, loop_s))
         ):
-            return EntryResult(e, True, f"dev-host record from {r.get('finished')}")
-    return EntryResult(e, False, f"ci-history holds no passing dev-host record of it at "
-                                 f"{commit[:12]}; run make gate PHASE={phase} RECORD=1 on the "
-                                 "dev host")
+            passes = f", {r['numbers']['passes']} passes" if loop_s else ""
+            return EntryResult(e, True, f"dev-host record from {r.get('finished')}{passes}")
+    looping = f" that looped {loop_s // 60} minutes" if loop_s else ""
+    return EntryResult(e, False, f"ci-history holds no passing dev-host record of it"
+                                 f"{looping} at {commit[:12]}; run make gate PHASE={phase} "
+                                 "RECORD=1 on the dev host")
 
 
 def line_verdict(results: list[EntryResult]) -> bool:
@@ -582,6 +611,32 @@ def run_gate(
         out(f"{'PASS' if passed else 'FAIL'}  L{g.line}  {short(g.text)}")
         for r in rows:
             out(r)
+    if phase >= 11:
+        common_path = root / "tests" / "gates" / "common.toml"
+        if not common_path.is_file():
+            out("COMMON no tests/gates/common.toml: from Phase 11 on make gate "
+                "checks its named entries")
+            ok = False
+        else:
+            try:
+                common = check_gates.load_common(
+                    common_path.read_text(encoding="utf-8"),
+                    str(common_path.relative_to(root)),
+                )
+            except check_gates.MapError as err:
+                out(f"COMMON {err}")
+                ok = False
+                common = []
+            for ce in common:
+                rec = Entry("record", ce.cmd, "", "", False)
+                if dry_run:
+                    out(f"COMMON {ce.name}  record {ce.cmd}  (not run)")
+                    continue
+                cr = eval_record(rec, ce.name, commit, phase, tools.history, COMMON_LOOP_S)
+                out(f"{'PASS' if cr.ok else 'FAIL'}  COMMON {ce.name}")
+                if cr.detail:
+                    out(f"      {'ok  ' if cr.ok else 'FAIL'}  {cr.detail}")
+                ok = ok and cr.ok
     for bp in box_problems(roadmap, phase):
         ok = False
         out(f"BOX   ROADMAP.md:{bp.line}  rule {bp.rule}: {short(bp.text)}")
@@ -679,14 +734,25 @@ def build_record(
     started: float,
     finished: float,
     results: list[dict[str, Any]],
+    runs: int = 1,
+    passes: int | None = None,
+    loop_s: int = 0,
 ) -> dict[str, Any]:
     """A dev-host record (ROADMAP §10.9, C-HISTORY): `numbers` holds
-    `seconds` and every `numbers` section of the run's results files."""
-    numbers: dict[str, Any] = {"seconds": round(finished - started, 1)}
+    `seconds`, `runs` and `passes`, `loop_seconds` for a looped entry
+    (ROADMAP §11.7), and every `numbers` section of the runs' results files.
+    A single run's results files win over `seconds`, `runs` and `passes`, as
+    before; a looped entry's loop counts win, since `make gate` reads them."""
+    own: dict[str, Any] = {"seconds": round(finished - started, 1), "runs": runs,
+                           "passes": (runs if ok else 0) if passes is None else passes}
+    if loop_s:
+        own["loop_seconds"] = loop_s
+    extra: dict[str, Any] = {}
     for r in results:
-        extra = r.get("numbers")
-        if isinstance(extra, dict):
-            numbers.update(extra)
+        sec = r.get("numbers")
+        if isinstance(sec, dict):
+            extra.update(sec)
+    numbers = {**extra, **own} if loop_s else {**own, **extra}
     return {
         "schema": ci_history.SCHEMA,
         "event": ci_history.DEV_HOST,
@@ -715,6 +781,39 @@ def worktree_results(checkout: Path) -> list[dict[str, Any]]:
     return out
 
 
+@dataclass
+class LoopRun:
+    rc: int
+    runs: int
+    passes: int
+    results: list[dict[str, Any]]
+
+
+def run_loop(
+    runner: Runner, cmd: str, checkout: Path, log: Callable[[int], Path], loop_s: int,
+    clock: Callable[[], float],
+) -> LoopRun:
+    """Run `cmd` in `checkout` once, or with `loop_s` again while less than
+    `loop_s` has passed since the first started, stopping at the first failed
+    run (ROADMAP §11.7). Each run starts with no `build/results/` and adds
+    its results files to the record's."""
+    start = clock()
+    runs = passes = 0
+    rc = 0
+    results: list[dict[str, Any]] = []
+    while True:
+        shutil.rmtree(checkout / "build" / "results", ignore_errors=True)
+        runs += 1
+        rc = runner(cmd, checkout, log(runs))
+        results += worktree_results(checkout)
+        if rc != 0:
+            break
+        passes += 1
+        if clock() - start >= loop_s:
+            break
+    return LoopRun(rc, runs, passes, results)
+
+
 def record_gate(
     phase: int,
     commit: str,
@@ -722,9 +821,11 @@ def record_gate(
     tools: Tools,
     host: Host,
     out: Callable[[str], None] = print,
+    clock: Callable[[], float] = time.time,
 ) -> int:
     """RECORD=1: run each record entry of the map at `commit` in a clean
-    worktree of `commit` and write its record. 0 when all passed."""
+    worktree of `commit` and write its record, looping each `common.toml`
+    entry for `COMMON_LOOP_S` (`run_loop`). 0 when all passed."""
     if host.system() != "Darwin" or host.machine() != "arm64":
         out(f"gate: RECORD=1 runs only on the Apple Silicon dev host (macOS arm64), "
             f"not {host.system()} {host.machine()}")
@@ -739,8 +840,18 @@ def record_gate(
     except check_gates.MapError as err:
         out(f"gate: {err}")
         return 1
-    todo = [(ml.key, e) for ml in lines for e in ml.entries if e.kind == "record"]
-    ids = [ci_history.record_entry_id(phase, k, e.cmd) for k, e in todo]
+    todo = [(ml.key, e, 0) for ml in lines for e in ml.entries if e.kind == "record"]
+    if phase >= 11:
+        common_rel = "tests/gates/common.toml"
+        common_text = git_show(root, commit, common_rel)
+        if common_text is not None:
+            try:
+                for ce in check_gates.load_common(common_text, common_rel):
+                    todo.append((ce.name, Entry("record", ce.cmd, "", "", False), COMMON_LOOP_S))
+            except check_gates.MapError as err:
+                out(f"gate: {err}")
+                return 1
+    ids = [ci_history.record_entry_id(phase, k, e.cmd) for k, e, _ in todo]
     if len(set(ids)) != len(ids):
         out("gate: two record entries share one record path (same line and command); "
             "fix the map before recording")
@@ -751,19 +862,25 @@ def record_gate(
     forbidden = forbidden_values(host)
     logs = root / "build" / "gate" / f"phase-{phase}"
     failed = 0
-    for i, ((key, e), entry_id) in enumerate(zip(todo, ids, strict=True), start=1):
+    for i, ((key, e, loop_s), entry_id) in enumerate(zip(todo, ids, strict=True), start=1):
         with tempfile.TemporaryDirectory(prefix="vibeos-gate-") as tmp_s:
             tmp = Path(tmp_s)
             checkout = tmp / "checkout"
             gatelib.git(root, "worktree", "add", "--detach", "-q", str(checkout), commit)
             try:
                 head = gatelib.git(checkout, "rev-parse", "HEAD").strip()
-                started = time.time()
-                rc = tools.runner(e.cmd, checkout, logs / f"record-{i}.log")
-                finished = time.time()
+                started = clock()
+
+                def log(run: int, i: int = i, loop_s: int = loop_s) -> Path:
+                    return logs / (f"record-{i}-{run}.log" if loop_s else f"record-{i}.log")
+
+                lr = run_loop(tools.runner, e.cmd, checkout, log, loop_s, clock)
+                rc = lr.rc
+                finished = clock()
                 rec = build_record(host=host, commit=commit, head_sha=head, phase=phase,
                                    key=key, command=e.cmd, ok=rc == 0, started=started,
-                                   finished=finished, results=worktree_results(checkout))
+                                   finished=finished, results=lr.results, runs=lr.runs,
+                                   passes=lr.passes, loop_s=loop_s)
             finally:
                 gatelib.git(root, "worktree", "remove", "--force", str(checkout), check=False)
                 shutil.rmtree(checkout, ignore_errors=True)
@@ -785,7 +902,8 @@ def record_gate(
             failed += 1
             continue
         out(f"{'PASS' if rc == 0 else 'FAIL'}  record {e.cmd}  "
-            f"{ci_history.dev_host_record_path(rec)} ({pushed or 'unchanged'})")
+            f"{ci_history.dev_host_record_path(rec)} ({pushed or 'unchanged'})"
+            + (f", {lr.passes} of {lr.runs} runs passed" if loop_s else ""))
         failed += rc != 0
     out(f"gate: phase {phase} records at {commit}: {'pass' if not failed else 'fail'}")
     return 1 if failed else 0

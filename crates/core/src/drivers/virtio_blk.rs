@@ -4,7 +4,9 @@
 //! OASIS virtio-blk constants. Kernel MMIO / VQ / IRQ live in
 //! `virtio_blk_init`.
 
+use crate::arch::Barriers;
 use crate::block::{BlockError, Op};
+use crate::dma::{self, DmaBuffer};
 use crate::virtio::{self, F_EVENT_IDX, F_INDIRECT_DESC, F_VERSION_1};
 
 /// virtio-blk feature bits (device-specific, not transport).
@@ -77,6 +79,33 @@ pub fn disk_name(index: u8, out: &mut [u8; 4]) -> Option<&str> {
 
 pub fn pick_features(device: u64) -> Result<u64, virtio::VirtioError> {
     virtio::pick_features(device, OFFER)
+}
+
+/// The shortest device config the driver reads: `capacity`, the one field
+/// it reads whatever the features.
+pub const CFG_MIN_LEN: u32 = CFG_CAPACITY as u32 + 8;
+
+/// `device`'s features less each one whose config field lies past `cfg_len`
+/// bytes: [`F_BLK_SIZE`] (`blk_size`), [`F_TOPOLOGY`] (the topology block),
+/// [`F_MQ`] (`num_queues`) and [`F_DISCARD`] (`max_discard_sectors`). The
+/// driver reads each field only under its feature. `None` below
+/// [`CFG_MIN_LEN`].
+pub fn fit_config(device: u64, cfg_len: u32) -> Option<u64> {
+    if cfg_len < CFG_MIN_LEN {
+        return None;
+    }
+    let fields = [
+        (F_BLK_SIZE, CFG_BLK_SIZE as u32 + 4),
+        (F_TOPOLOGY, CFG_TOPOLOGY as u32 + 8),
+        (F_MQ, CFG_NUM_QUEUES as u32 + 2),
+        (F_DISCARD, CFG_MAX_DISCARD_SECTORS as u32 + 4),
+    ];
+    Some(
+        fields
+            .iter()
+            .filter(|&&(_, end)| cfg_len < end)
+            .fold(device, |f, &(bit, _)| f & !bit),
+    )
 }
 
 /// Logical block size: 512 without [`F_BLK_SIZE`], else config's
@@ -182,6 +211,50 @@ pub fn nq_from_config(feat: u64, cfg_num_queues: u16, common_num_queues: u16) ->
     offered.min(hw)
 }
 
+/// A request slot's bytes ahead of its bounce area: the header at 0, the
+/// status byte at [`SLOT_STATUS`], a discard segment at [`SLOT_DISCARD`].
+pub const SLOT_META: usize = 64;
+/// Where the device writes a slot's status byte.
+pub const SLOT_STATUS: usize = 16;
+/// Where a slot's discard segment lies.
+pub const SLOT_DISCARD: usize = 32;
+/// A slot's bounce area, after [`SLOT_META`]: the most one request moves.
+pub const BOUNCE: usize = 8192;
+
+const _: () = assert!(
+    HDR_LEN <= SLOT_STATUS && SLOT_STATUS < SLOT_DISCARD && SLOT_DISCARD + DISCARD_LEN <= SLOT_META
+);
+
+/// One request slot's stride in the driver's slot buffer: [`SLOT_META`]
+/// and [`BOUNCE`] sized in `granule`-byte granules (the port's
+/// [`Barriers::dma_granule`]), so slots start on granule boundaries and no
+/// two in-flight requests' regions share a granule (DESIGN §4.7). `None`
+/// when `granule` is not a power of two.
+pub const fn slot_stride(granule: usize) -> Option<usize> {
+    dma::granule_round(SLOT_META + BOUNCE, granule)
+}
+
+/// Slot `si`'s byte range in the slot buffer, `(offset, len)`.
+pub const fn slot_region(si: usize, stride: usize) -> (u64, u64) {
+    ((si as u64).saturating_mul(stride as u64), stride as u64)
+}
+
+/// Hand slot `si`, which the CPU has filled, to the device before its chain
+/// is published: for a non-coherent device every line of the slot is
+/// cleaned to the Point of Coherency (DESIGN §4.7).
+pub fn hand_slot<A: Barriers>(slots: &DmaBuffer, si: usize, stride: usize) {
+    let (off, len) = slot_region(si, stride);
+    slots.sync_range_for_device::<A>(off, len);
+}
+
+/// Take slot `si` back once its completion is harvested, before the CPU
+/// reads its status or bounce bytes: for a non-coherent device every line
+/// of the slot is invalidated (DESIGN §4.7).
+pub fn take_slot<A: Barriers>(slots: &DmaBuffer, si: usize, stride: usize) {
+    let (off, len) = slot_region(si, stride);
+    slots.sync_range_for_cpu::<A>(off, len);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +339,20 @@ mod tests {
     }
 
     #[test]
+    fn config_length_masks_only_the_features_it_cannot_cover() {
+        let all = F_VERSION_1 | F_BLK_SIZE | F_TOPOLOGY | F_DISCARD | F_MQ;
+        assert_eq!(fit_config(all, CFG_MIN_LEN - 1), None);
+        let none = all & !(F_BLK_SIZE | F_TOPOLOGY | F_MQ | F_DISCARD);
+        assert_eq!(fit_config(all, CFG_MIN_LEN), Some(none));
+        assert_eq!(fit_config(all, 24), Some(none | F_BLK_SIZE));
+        assert_eq!(fit_config(all, 32), Some(none | F_BLK_SIZE | F_TOPOLOGY));
+        assert_eq!(fit_config(all, 36), Some(all & !F_DISCARD));
+        assert_eq!(fit_config(all, 39), Some(all & !F_DISCARD));
+        assert_eq!(fit_config(all, 40), Some(all));
+        assert_eq!(fit_config(all, 0x1000), Some(all));
+    }
+
+    #[test]
     fn version1_required_and_ro_accepted() {
         assert_eq!(
             pick_features(F_FLUSH | F_BLK_SIZE),
@@ -338,5 +425,35 @@ mod tests {
         assert_eq!(disk_name(25, &mut out), Some("vdz"));
         assert_eq!(disk_name(26, &mut out), None);
         assert_eq!(disk_name(u8::MAX, &mut out), None);
+    }
+
+    #[test]
+    fn slots_never_share_a_granule() {
+        let mut g = 1usize;
+        while g <= crate::arch::aarch64::tlb::MAX_CWG as usize {
+            let stride = slot_stride(g).unwrap();
+            assert!(stride >= SLOT_META + BOUNCE);
+            assert_eq!(stride % g, 0, "granule {g}");
+            let mut a = 0usize;
+            while a < 16 {
+                let (ao, al) = slot_region(a, stride);
+                assert_eq!(ao % g as u64, 0);
+                let mut b = a + 1;
+                while b < 16 {
+                    let (bo, _) = slot_region(b, stride);
+                    // `a`'s last granule ends at or before `b`'s first.
+                    let a_last = (ao + al - 1) / g as u64;
+                    let b_first = bo / g as u64;
+                    assert!(a_last < b_first, "granule {g}: slots {a} and {b}");
+                    b += 1;
+                }
+                a += 1;
+            }
+            g *= 2;
+        }
+        // A 64-byte granule keeps today's stride; the 2 KiB maximum grows it.
+        assert_eq!(slot_stride(64), Some(SLOT_META + BOUNCE));
+        assert_eq!(slot_stride(2048), Some(10240));
+        assert_eq!(slot_stride(48), None);
     }
 }

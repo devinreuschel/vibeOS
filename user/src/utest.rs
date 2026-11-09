@@ -59,6 +59,8 @@ pub struct Runner {
     failed: u32,
     // Every case's name, from the count pass.
     names: Vec<&'static str>,
+    /// When set, only this case name runs.
+    only: Option<&'static [u8]>,
 }
 
 impl Runner {
@@ -69,7 +71,13 @@ impl Runner {
             count: 0,
             failed: 0,
             names: Vec::new(),
+            only: None,
         }
+    }
+
+    /// Run only the case whose name is `name`.
+    pub fn only_case(&mut self, name: &'static [u8]) {
+        self.only = Some(name);
     }
 
     /// Count the cases of `suites`, then print `begin <n>`, run every case,
@@ -98,6 +106,9 @@ impl Runner {
     /// [`Runner::case`] with a deadline of `deadline_ms` on its `run` line,
     /// for a case that needs longer than [`DEFAULT_DEADLINE_MS`].
     pub fn case_ms(&mut self, name: &'static str, deadline_ms: u32, f: impl FnOnce() -> Outcome) {
+        if self.only.is_some_and(|only| name.as_bytes() != only) {
+            return;
+        }
         if self.counting {
             self.count += 1;
             // A failed push only makes `is_registered` miss the name.
@@ -120,6 +131,11 @@ impl Runner {
     /// How many cases failed.
     pub fn failed(&self) -> u32 {
         self.failed
+    }
+
+    /// How many cases the count pass registered.
+    pub fn counted(&self) -> u32 {
+        self.count
     }
 
     /// Whether a case named `name` runs in this run: complete once the

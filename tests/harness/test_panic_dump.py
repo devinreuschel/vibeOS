@@ -29,6 +29,102 @@ NEST_DUMP = k(
 )
 
 
+EARLY = k(
+    "vibeOS: serial online",
+    "vibeOS: limine: base revision ok",
+    "vibeOS: boot: early-fault armed",
+    "vibeOS: panic: early vec=0x6 err=0x0 pc=0xffffffff80012345 addr=0x0 sp=0xffff800000fff000",
+    "vibeOS: panic: halted",
+)
+
+
+class TestCheckEarly(unittest.TestCase):
+    def test_good_line_passes(self) -> None:
+        panic_dump.check_early(EARLY, "x86_64")
+
+    def test_wrong_vector_fails(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "vec=0x6, expected 0x0"):
+            panic_dump.check_early(EARLY, "aarch64")
+
+    def test_missing_line_fails(self) -> None:
+        bad = [ln for ln in EARLY if "early vec" not in ln]
+        with self.assertRaisesRegex(HarnessError, "0 early-handler lines"):
+            panic_dump.check_early(bad, "x86_64")
+
+    def test_line_before_armed_does_not_count(self) -> None:
+        bad = [EARLY[0], EARLY[3], EARLY[1], EARLY[2], EARLY[4]]
+        with self.assertRaisesRegex(HarnessError, "0 early-handler lines"):
+            panic_dump.check_early(bad, "x86_64")
+
+    def test_full_dump_fails(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "2 dump banners"):
+            panic_dump.check_early(EARLY[:4] + k("vibeOS: panic:") + EARLY[4:], "x86_64")
+
+
+OVF_ARMED = (
+    "vibeOS: boot: kstack-overflow armed guard=0xffffd000004a4000 base=0xffffd000004a8000 "
+    "thread=0xffffc0000016abf0"
+)
+OVF_X86 = k(
+    "vibeOS: serial online",
+    OVF_ARMED,
+    "vibeOS: panic: stack overflow far=0xffffd000004a7d78 esr=0x0 elr=0xffffffff8005cf90 "
+    "sp=0xffffd000004a7d80 thread=0xffffc0000016abf0",
+    "vibeOS: backtrace:",
+    "vibeOS: panic: halted",
+)
+OVF_A64 = k(
+    "vibeOS: serial online",
+    "vibeOS: el: 1",
+    OVF_ARMED,
+    "vibeOS: panic: stack overflow far=0xffffd000004a7fc0 esr=0x96000047 "
+    "elr=0xffffffff80037d3c sp=0xffffd000004a7fc0 thread=0xffffc0000016abf0",
+    "vibeOS: panic: halted",
+)
+
+
+class TestCheckOverflow(unittest.TestCase):
+    def test_good_dumps_pass(self) -> None:
+        panic_dump.check_overflow(OVF_X86, "x86_64")
+        panic_dump.check_overflow(OVF_A64, "aarch64")
+
+    def test_no_overflow_line_fails(self) -> None:
+        bad = [ln for ln in OVF_X86 if "stack overflow" not in ln]
+        with self.assertRaisesRegex(HarnessError, "0 overflow lines"):
+            panic_dump.check_overflow(bad, "x86_64")
+
+    def test_line_before_armed_fails(self) -> None:
+        bad = [OVF_X86[0], OVF_X86[2], OVF_X86[1], *OVF_X86[3:]]
+        with self.assertRaisesRegex(HarnessError, "after the armed line"):
+            panic_dump.check_overflow(bad, "x86_64")
+
+    def test_far_outside_guard_fails(self) -> None:
+        bad = [ln.replace("far=0xffffd000004a7d78", "far=0xffffd000004a8008") for ln in OVF_X86]
+        with self.assertRaisesRegex(HarnessError, "outside the guard"):
+            panic_dump.check_overflow(bad, "x86_64")
+
+    def test_other_thread_fails(self) -> None:
+        bad = [ln.replace("sp=0xffffd000004a7d80 thread=0xffffc0000016abf0",
+                          "sp=0xffffd000004a7d80 thread=0xffffc00000000001") for ln in OVF_X86]
+        with self.assertRaisesRegex(HarnessError, "thread="):
+            panic_dump.check_overflow(bad, "x86_64")
+
+    def test_esr_not_a_data_abort_fails(self) -> None:
+        bad = [ln.replace("esr=0x96000047", "esr=0x2000000") for ln in OVF_A64]
+        with self.assertRaisesRegex(HarnessError, "not a current-EL data abort"):
+            panic_dump.check_overflow(bad, "aarch64")
+
+    def test_esr_is_checked_for_the_named_arch(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "not a current-EL data abort"):
+            panic_dump.check_overflow(OVF_X86, "aarch64")
+        with self.assertRaisesRegex(HarnessError, "#DF's error code is 0"):
+            panic_dump.check_overflow(OVF_A64, "x86_64")
+
+    def test_no_halt_fails(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "0 'vibeOS: panic: halted' lines"):
+            panic_dump.check_overflow(OVF_X86[:-1], "x86_64")
+
+
 class TestCheckNest(unittest.TestCase):
     def test_good_dump_passes(self) -> None:
         panic_dump.check_nest(BOOT + NEST_DUMP)
@@ -147,6 +243,25 @@ class TestCheckStop(unittest.TestCase):
         dump = [ln for ln in stop_dump(0) if "owner nmi" not in ln]
         with self.assertRaisesRegex(HarnessError, "owner nmi returned"):
             panic_dump.check_stop(STOP_BOOT + dump)
+
+    def test_aarch64_good_dump_passes(self) -> None:
+        boot = k(
+            "vibeOS: serial online",
+            "vibeOS: el: 1",
+            "vibeOS: gic: v3",
+            "vibeOS: boot: panic-stop armed",
+            "vibeOS: panic_stop: line 0",
+            "vibeOS: panic_stop: line 1",
+            "vibeOS: panic_stop: line 2",
+        )
+        cpus = {
+            1: "stopped (panic)",
+            2: "stopped (poll)",
+            3: "stopped (poll)",
+            4: "not stopped",
+        }
+        dump = [ln for ln in stop_dump(0, cpus) if "owner nmi" not in ln]
+        panic_dump.check_stop(boot + dump)
 
     def test_owner_not_zero_or_one_fails(self) -> None:
         dump = [ln.replace("thread cpu=0", "thread cpu=2") for ln in stop_dump(0)]

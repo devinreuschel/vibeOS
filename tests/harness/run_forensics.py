@@ -14,9 +14,11 @@ forensics on real cores, the way the panic e2e tests the panic path:
    `build/forensics/hang/`, and quits. `vmcore report --virt --trace` must
    print the report `check_report` wants, the export `check_export` wants
    and a virtual core `check_virt` accepts.
-2. `build-id`: the hang core with the `gp` build's ELF exits 3 with
+2. `build-id`: the hang core with another build's ELF (the `gp` build's
+   on x86_64, the production one on aarch64) exits 3 with
    `vmcore: BUILD-ID mismatch`.
-3. `gp`: the `gp_test` ISO, declared `expect=panic`: at `GUEST_PANICKED` it
+3. `gp` (x86_64 only, as the `gp_test` build is): the `gp_test` ISO,
+   declared `expect=panic`: at `GUEST_PANICKED` it
    takes a core of the paused guest, then quits. The `sig:` message is the
    serial `#GP` line without `vibeOS: `, as `PanicLine` keeps it, with its
    numbers written as `N`; its frames are `gp_test_fault`, `gp_test_trip`
@@ -26,12 +28,19 @@ forensics on real cores, the way the panic e2e tests the panic path:
    `zstd -dc`; the same `sig:` line as `hang`, and at least 9 GiB of RAM in
    its `core:` line.
 
+Under `--arch aarch64` (`make test-forensics ARCH=aarch64`, ROADMAP §11.7)
+the same hang boots on `virt`, and the tool walks the core through the
+TTBR1 table VMCOREINFO names and reads AArch64's `NT_PRSTATUS`: the report,
+the export and the virtual core pass the same checks, the export ordered
+globally since `CNTVCT_EL0` is uniform across CPUs.
+
 Each check is a C-RESULTS `marker` row (`forensics_<case>`), each boot an
 `add_boot`. Standard library only.
 """
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import json
 import re
@@ -51,10 +60,12 @@ from tests.harness.harness import (
     RunResult,
     _reap,
     _start_qemu,
+    apply_arch_cli,
     contract_markers,
     default_iso,
     env_config,
     expected_clocksource,
+    expected_el2,
     expected_lapic_mode,
     panic_signature,
     run_failure,
@@ -120,15 +131,22 @@ class Boot:
     armed_at: float | None = None
 
 
-def hang_markers(smp: int) -> list[Marker]:
-    """The hang build's contract: the boot through `smp: done` and the
-    clocksource line, then the armed marker (tests/contract/markers.toml)."""
+def hang_markers(smp: int, arch: str = "x86_64", machine: str = "") -> list[Marker]:
+    """The hang build's contract on `arch`: the boot through `smp: done` and
+    the clocksource line, then the armed marker (tests/contract/markers.toml).
+    On aarch64 a `machine` with `virtualization=on` pins `<el>` and
+    `<timer>`, as the e2e contract does."""
+    pinned = expected_el2(machine) if arch == "aarch64" else None
+    el, arm_timer = pinned if pinned is not None else ("", "")
     cfg = registry.BootConfig(
         hpet=True,
         smp=smp,
-        lapic_mode=expected_lapic_mode(hpet=True),
-        clocksource=expected_clocksource(hpet=True),
+        lapic_mode=expected_lapic_mode(hpet=True) if arch == "x86_64" else "",
+        clocksource=expected_clocksource(hpet=True, arch=arch),
         hang_test=True,
+        arch=arch,
+        el=el,
+        arm_timer=arm_timer,
     )
     return contract_markers(cfg)
 
@@ -218,8 +236,8 @@ def boot_and_capture(
                     f"{result.tail()}",
                 )
             result.lines.append(line)
-            why = run_failure(line, stream)
-            sig = panic_signature(line)
+            why = run_failure(line, stream, arch=cfg.arch)
+            sig = panic_signature(line, arch=cfg.arch)
             halted = PANIC_DONE in (frame.kernel_text(line) or "")
             d = session.line(line, panic=sig is not None, halted=halted)
             if d and d.end != "pass":
@@ -454,13 +472,21 @@ def tool(core: Path, elf: Path, *extra: str) -> tuple[int, str, str]:
     return run_vmcore(core, elf, extra)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--arch", choices=("x86_64", "aarch64"))
+    args = parser.parse_args([] if argv is None else argv)
+    apply_arch_cli(args.arch)
     env = env_config(default_iso=default_iso("hang"), default_timeout=BOOT_ALLOWANCE_S)
-    res = results.Results(env.tier)
+    res = results.Results(env.tier, env.arch)
+    x86 = env.arch == "x86_64"
     hang_iso = env.iso
     gp_iso = default_iso("gp")
     hang_elf = qmp.kernel_elf_for(hang_iso)
     gp_elf = qmp.kernel_elf_for(gp_iso)
+    # Another build of the same machine, for the BUILD-ID refusal: aarch64
+    # has no `gp_test` build (ROADMAP §11.7), so its production ELF.
+    other_elf = gp_elf if x86 else qmp.kernel_elf_for(default_iso())
     failed = 0
 
     def run_case(name: str, body: Callable[[], None]) -> None:
@@ -492,9 +518,12 @@ def main() -> int:
                 file=sys.stderr,
             )
 
+    def markers(cfg: QemuConfig) -> list[Marker]:
+        return hang_markers(SMP, cfg.arch, cfg.machine)
+
     def hang() -> None:
         cfg = dataclasses.replace(env.qemu(), iso=hang_iso, smp=SMP, expect="none")
-        b = boot("hang", cfg, hang_markers(SMP))
+        b = boot("hang", cfg, markers(cfg))
         assert b.core is not None
         state["core"] = b.core
         virt, trace = OUT / "hang" / "core.virt", OUT / "hang" / "trace.json"
@@ -511,10 +540,10 @@ def main() -> int:
         core = state.get("core")
         if not isinstance(core, Path):
             raise HarnessError("no hang core to check")
-        rc, _out, err = tool(core, gp_elf)
+        rc, _out, err = tool(core, other_elf)
         if rc != 3 or "vmcore: BUILD-ID mismatch" not in err:
             raise HarnessError(
-                f"hang core with the gp ELF: exit {rc}, stderr {err.strip()!r}; "
+                f"hang core with {other_elf}: exit {rc}, stderr {err.strip()!r}; "
                 "want 3 and `vmcore: BUILD-ID mismatch`"
             )
 
@@ -530,7 +559,7 @@ def main() -> int:
 
     def highmem() -> None:
         cfg = dataclasses.replace(env.qemu(), iso=hang_iso, smp=SMP, mem=HIGHMEM, expect="none")
-        b = boot("highmem", cfg, hang_markers(SMP))
+        b = boot("highmem", cfg, markers(cfg))
         assert b.core is not None
         rc, out, err = tool(b.core, hang_elf)
         if rc != 0:
@@ -545,7 +574,11 @@ def main() -> int:
                 f"highmem: core holds {core_bytes(out)} bytes of RAM, want at least {HIGHMEM_BYTES}"
             )
 
-    for name, body in (("hang", hang), ("build_id", build_id), ("gp", gp), ("highmem", highmem)):
+    cases: list[tuple[str, Callable[[], None]]] = [("hang", hang), ("build_id", build_id)]
+    if x86:
+        cases.append(("gp", gp))
+    cases.append(("highmem", highmem))
+    for name, body in cases:
         run_case(name, body)
     return 1 if failed else 0
 

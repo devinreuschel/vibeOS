@@ -3,16 +3,15 @@
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use crate::arch::current::syscall_nr::SYS_KILL;
 use vibeos::addr_space::UserPerms;
 use vibeos::apic::TimerMode;
 use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL, star_value, sysret_selectors};
 use vibeos::kva::PAGE_SIZE;
 use vibeos::paging::PAGE_SIZE_4K;
 use vibeos::proc::{SIGBUS, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGTRAP, wait_signaled};
-use vibeos::syscall::SYS_KILL;
 use vibeos::vectors;
 
-use crate::acpi_init;
 use crate::addr_space_init;
 use crate::apic_init;
 use crate::arch;
@@ -21,16 +20,14 @@ use crate::ipi_init;
 use crate::irq_init;
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
 use crate::ktest::{Outcome, Test, spawn_thread_on, spin_until_ns, test};
-use crate::kva_init;
+use crate::machine_init;
 use crate::per_cpu_init;
 use crate::proc_init;
 use crate::thread_init;
 use crate::time_init;
-use crate::x86::{
-    self, CR0_AM, CR0_MP, CR0_NE, CR0_PE, CR0_PG, CR0_TS, CR0_WP, CR4_MCE, CR4_OSFXSR,
-    CR4_OSXMMEXCPT, CR4_PAE, CR4_PGE,
-};
+use crate::x86;
 
+mod control;
 mod idt;
 mod ipi;
 mod msr;
@@ -42,10 +39,6 @@ pub(crate) use idt::test_idt_set_handler_refuses_fixed;
 pub(crate) use ipi::test_ipi_icr_writes_if_off;
 pub(crate) use seam::test_arch_seam_core;
 pub(crate) use uaccess::*;
-
-const CR0_EM: u64 = 1 << 2;
-const CR0_NW: u64 = 1 << 29;
-const CR0_CD: u64 = 1 << 30;
 
 /// Whether the I/O APIC entry for `gsi` is masked; `None` when no I/O
 /// APIC serves it.
@@ -310,35 +303,58 @@ pub(crate) fn test_gp_catch() -> Outcome {
     }
 }
 
-pub(crate) fn test_df_on_ist() -> Outcome {
-    let Ok(stack) = kva_init::alloc_guarded_stack(1) else {
-        return Outcome::Fail("guarded stack");
+/// The running thread's stack guard as `(guard, base)`: the unmapped `S`
+/// bytes below its stack. None for a thread without a guarded stack.
+fn own_guard() -> Option<(u64, u64)> {
+    let t = crate::arch::current_tcb();
+    if t.is_null() {
+        return None;
+    }
+    // SAFETY: `t` is this CPU's running TCB, and its `stack` is written only
+    // by `thread_init::spawn_inner` and `thread_init::thread_exit`, neither
+    // of which runs for it while it runs here. established by
+    // `thread_init::switch_now`.
+    let st = unsafe { (*t).stack.as_ref()? };
+    Some((st.guard().as_u64(), st.base().as_u64()))
+}
+
+/// The registry thread overflows its own guarded stack, so the `#DF` sees
+/// the interrupted thread's guard, as a real overflow does, and `catch`
+/// reports the kind `double_fault` prints the overflow line for.
+pub(crate) fn test_kstack_overflow() -> Outcome {
+    let Some((guard, base)) = own_guard() else {
+        return Outcome::Fail("registry thread has no guarded stack");
     };
-    let poison = stack.guard().as_u64() + 0x800;
+    let poison = guard + 0x800;
     let g = x86::InterruptGuard::enter();
-    // SAFETY: `poison` lies in `stack`'s unmapped guard page, so the first
-    // push faults, the fault's own push faults again, and `#DF` runs on its
-    // IST stack, where `catch` longjmps back with IRQs off (`g`);
+    // SAFETY: `poison` lies in this thread's unmapped guard, so `ud2`
+    // delivery faults, the fault's own push faults again, and `#DF` runs
+    // on its IST stack, where `catch` longjmps back to this frame, on the
+    // mapped stack, with IRQs off (`g`); nothing is written below `base`.
     // established here.
     let caught = arch::catch::catch(vectors::DF, || unsafe {
         vibeos_fault_on_bad_stack(poison);
     });
     drop(g);
-    kva_init::free_stack(stack);
     let Some(c) = caught else {
         return Outcome::Fail("did not reach df handler");
     };
     let (lo, hi) = ist_span(IstSlot::DoubleFault);
-    if c.handler_rsp >= lo && c.handler_rsp < hi {
+    // `ud2` with RSP in the guard delivers `#UD` onto the unmapped page,
+    // so CR2 is the failed frame push, in the guard, not `poison` itself.
+    let in_guard = c.cr2 >= guard && c.cr2 < base;
+    if c.stack_overflow && in_guard && c.handler_rsp >= lo && c.handler_rsp < hi {
         Outcome::Ok
     } else {
         crate::marker!(
-            "vibeOS: ktest:   rsp={:#x} lo={:#x} hi={:#x}",
+            "vibeOS: ktest:   overflow={} cr2={:#x} want-in-guard rsp={:#x} lo={:#x} hi={:#x}",
+            c.stack_overflow,
+            c.cr2,
             c.handler_rsp,
             lo,
             hi
         );
-        Outcome::Fail("handler rsp not on ist1")
+        Outcome::Fail("overflow catch mismatch")
     }
 }
 
@@ -358,7 +374,7 @@ pub(crate) fn test_lapic_timer_mode() -> Outcome {
         }
         (false, TimerMode::Periodic) => Outcome::Ok,
         (false, TimerMode::Pit) => {
-            if acpi_init::info().is_some_and(|i| i.hpet_present()) {
+            if machine_init::info().is_some_and(|d| d.hpet_info().is_some()) {
                 Outcome::Fail("pit despite hpet")
             } else {
                 Outcome::Ok
@@ -372,13 +388,10 @@ pub(crate) fn test_ioapic_pit_gsi_masked() -> Outcome {
     match apic_init::timer_mode() {
         TimerMode::Pit => Outcome::Skip("pit owns tick"),
         TimerMode::TscDeadline | TimerMode::Periodic => {
-            let Some(info) = acpi_init::info() else {
-                return Outcome::Fail("no acpi");
+            let Some(desc) = machine_init::info() else {
+                return Outcome::Fail("no machine desc");
             };
-            let Some(madt) = info.madt.as_ref() else {
-                return Outcome::Fail("no madt");
-            };
-            let gsi = vibeos::apic::gsi_for_isa_irq(0, &madt.isos[..madt.iso_count]);
+            let gsi = vibeos::apic::gsi_for_isa_irq(0, desc.irq_overrides());
             match gsi_masked(gsi) {
                 Some(true) => Outcome::Ok,
                 Some(false) => Outcome::Fail("pit gsi unmasked"),
@@ -1245,18 +1258,22 @@ fn user_irqs(vecs: &[u8]) -> Outcome {
 }
 
 pub(crate) fn test_user_device_irq() -> Outcome {
-    let v = match irq_init::allocate_vector(0) {
+    let irq = match irq_init::allocate(0) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
-    if irq_init::set_handler(v, pool_hit).is_err() {
-        let _ = irq_init::free_vector(v);
+    if irq_init::set_handler(irq, pool_hit).is_err() {
+        let _ = irq_init::free_vector(irq);
         return Outcome::Fail("set_handler");
     }
+    let Some(v) = irq_init::vector(irq) else {
+        let _ = irq_init::free_vector(irq);
+        return Outcome::Fail("no hwirq");
+    };
     POOL_HITS.store(0, Ordering::Relaxed);
     POOL_OFF_CPU0.store(0, Ordering::Relaxed);
     let out = user_irqs(&[v, vectors::KBD]);
-    let freed = irq_init::free_vector(v);
+    let freed = irq_init::free_vector(irq);
     if !matches!(out, Outcome::Ok) {
         return out;
     }
@@ -1275,104 +1292,6 @@ pub(crate) fn test_user_device_irq() -> Outcome {
 
 pub(crate) fn test_user_ipi() -> Outcome {
     user_irqs(&[vectors::IPI_RESCHEDULE])
-}
-
-/// One CPU's CR0 and CR4. A zero CR0 (PE and PG clear) is an empty slot.
-struct CrSnapS16 {
-    cr0: AtomicU64,
-    cr4: AtomicU64,
-}
-
-fn snap_cr(arg: *mut ()) {
-    // SAFETY: `arg` is the `[CrSnapS16; 64]` that `cpu_control_regs` passes
-    // to itself and to a waiting `ipi_init::call_mask`, live until every
-    // target acks; established at `arch::ktest::cpu_control_regs`.
-    let snaps = unsafe { &*(arg as *const [CrSnapS16; 64]) };
-    let me = per_cpu_init::current().cpu_id as usize;
-    if let Some(s) = snaps.get(me) {
-        s.cr4.store(x86::read_cr4(), Ordering::Relaxed);
-        s.cr0.store(x86::read_cr0(), Ordering::Release);
-    }
-}
-
-const CR0_SET: [(u64, &str); 6] = [
-    (CR0_PE, "PE"),
-    (CR0_MP, "MP"),
-    (CR0_NE, "NE"),
-    (CR0_WP, "WP"),
-    (CR0_AM, "AM"),
-    (CR0_PG, "PG"),
-];
-
-const CR0_CLEAR: [(u64, &str); 4] = [
-    (CR0_EM, "EM"),
-    (CR0_TS, "TS"),
-    (CR0_CD, "CD"),
-    (CR0_NW, "NW"),
-];
-
-const CR4_SET: [(u64, &str); 5] = [
-    (CR4_PAE, "PAE"),
-    (CR4_MCE, "MCE"),
-    (CR4_PGE, "PGE"),
-    (CR4_OSFXSR, "OSFXSR"),
-    (CR4_OSXMMEXCPT, "OSXMMEXCPT"),
-];
-
-/// Every online CPU runs with the bits ROADMAP §10.6's control-register box
-/// names, and with exactly the CR0 and CR4 `arch::cpu::init_control_regs`
-/// computed.
-pub(crate) fn cpu_control_regs() -> Outcome {
-    let Some(want) = arch::cpu::stored_control_regs() else {
-        return Outcome::Fail("control registers never computed");
-    };
-    let snaps: [CrSnapS16; 64] = core::array::from_fn(|_| CrSnapS16 {
-        cr0: AtomicU64::new(0),
-        cr4: AtomicU64::new(0),
-    });
-    let mask = per_cpu_init::online_mask();
-    {
-        // `call_mask` skips the caller, so the local read and the calls
-        // must see the same CPU: no migration in between.
-        let _irq = x86::InterruptGuard::enter();
-        // `snap_cr` stores only to `snaps`' atomics, through `&`.
-        // PROVENANCE: nothing writes through the pointer.
-        snap_cr(&snaps as *const _ as *mut ());
-        // PROVENANCE: nothing writes through the pointer, as above.
-        ipi_init::call_mask(mask, snap_cr, &snaps as *const _ as *mut (), true);
-    }
-    for (c, s) in snaps.iter().enumerate() {
-        if mask & (1u64 << c) == 0 {
-            continue;
-        }
-        let cr0 = s.cr0.load(Ordering::Acquire);
-        let cr4 = s.cr4.load(Ordering::Relaxed);
-        if cr0 == 0 {
-            return crate::fail_fmt!("cpu {c}: no snapshot");
-        }
-        for (bit, name) in CR0_SET {
-            if cr0 & bit == 0 {
-                return crate::fail_fmt!("cpu {c}: CR0.{name} clear (cr0={cr0:#x})");
-            }
-        }
-        for (bit, name) in CR0_CLEAR {
-            if cr0 & bit != 0 {
-                return crate::fail_fmt!("cpu {c}: CR0.{name} set (cr0={cr0:#x})");
-            }
-        }
-        for (bit, name) in CR4_SET {
-            if cr4 & bit == 0 {
-                return crate::fail_fmt!("cpu {c}: CR4.{name} clear (cr4={cr4:#x})");
-            }
-        }
-        if cr0 != want.cr0 {
-            return crate::fail_fmt!("cpu {c}: cr0={cr0:#x}, routine computed {:#x}", want.cr0);
-        }
-        if cr4 != want.cr4 {
-            return crate::fail_fmt!("cpu {c}: cr4={cr4:#x}, routine computed {:#x}", want.cr4);
-        }
-    }
-    Outcome::Ok
 }
 
 static FK_TARGET: AtomicU32 = AtomicU32::new(0);
@@ -1452,7 +1371,7 @@ pub(crate) const TESTS: &[Test] = &[
         "idt_set_handler_refuses_fixed",
         test_idt_set_handler_refuses_fixed,
     ),
-    test("df_on_ist", test_df_on_ist),
+    test("kstack_overflow", test_kstack_overflow),
     test("lapic_timer_mode", test_lapic_timer_mode),
     test("lapic_timer_rearm", timer::test_lapic_timer_rearm),
     test("ioapic_pit_gsi_masked", test_ioapic_pit_gsi_masked),
@@ -1465,7 +1384,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("user_device_irq", test_user_device_irq).deadline(30_000),
     test("user_ipi", test_user_ipi).deadline(30_000),
     test("ipi_icr_writes_if_off", test_ipi_icr_writes_if_off),
-    test("cpu_control_regs", cpu_control_regs),
+    test("cpu_control_regs", control::cpu_control_regs),
+    test("cpu_control_clears", control::cpu_control_clears),
     test("catch_ignores_other_cpu", test_catch_ignores_other_cpu),
     test("catch_ignores_user_frame", test_catch_ignores_user_frame).deadline(30_000),
     test("force_kernel_irq_window", test_force_kernel_irq_window).deadline(30_000),

@@ -43,6 +43,11 @@ pub const TSC_INVARIANT: u32 = 2;
 pub const WARP_MEASURED: u32 = 4;
 /// Header flag: the warp test saw a backward step.
 pub const WARP_BACKWARD: u32 = 8;
+/// Header flag: every CPU reads the counter from one system counter with
+/// one offset (aarch64's `CNTVCT_EL0`: `CNTPCT_EL0` minus a `CNTVOFF_EL2`
+/// that every CPU holds equal), so it needs no warp test, and `freq_hz` is
+/// the `CNTFRQ_EL0` value the kernel recorded.
+pub const COUNTER_UNIFORM: u32 = 16;
 
 /// A tracepoint. Value 0 is never an event, so a zeroed slot is not one.
 #[repr(u32)]
@@ -293,7 +298,9 @@ impl<const N: usize> Ring<N> {
     }
 
     fn init(&self) {
+        // Relaxed: `Trace::init`'s Release store of `magic` publishes it; pairs with nothing.
         self.cap.store(N as u32, Ordering::Relaxed);
+        // Relaxed: as `cap`; pairs with nothing.
         self.record_size
             .store(RECORD_SIZE as u32, Ordering::Relaxed);
     }
@@ -307,22 +314,31 @@ impl<const N: usize> Ring<N> {
 
     /// Append one record. The caller is this ring's CPU, with interrupts
     /// off, so pushes to one ring never overlap (DESIGN §2.2).
+    /// tests/litmus/log_ring.litmus
     pub fn push(&self, cpu: u32, ev: Event, tsc: u64, a: u64, b: u64) {
         if N == 0 {
             return;
         }
+        // Relaxed: only this CPU stores `head`; pairs with nothing.
         let pos = self.head.load(Ordering::Relaxed);
         let Some(slot) = self.records.get((pos % N as u64) as usize) else {
             return;
         };
+        // Relaxed: the Release fence below orders it before the fields; pairs with nothing.
         slot.seq.store(0, Ordering::Relaxed);
-        // Release: a reader that sees any field below also sees `seq == 0`
-        // on its second `seq` read, so a slot caught mid-write is dropped.
+        // Release: pairs with the Acquire fence in `get`; a reader that sees
+        // any field below also sees `seq == 0` on its second `seq` read, so a
+        // slot caught mid-write is dropped.
         fence(Ordering::Release);
+        // Relaxed: the fence above and the `seq` store below order it; pairs with nothing.
         slot.tsc.store(tsc, Ordering::Relaxed);
+        // Relaxed: as `tsc`; pairs with nothing.
         slot.a.store(a, Ordering::Relaxed);
+        // Relaxed: as `tsc`; pairs with nothing.
         slot.b.store(b, Ordering::Relaxed);
+        // Relaxed: as `tsc`; pairs with nothing.
         slot.cpu.store(cpu, Ordering::Relaxed);
+        // Relaxed: as `tsc`; pairs with nothing.
         slot.event.store(ev.as_u32(), Ordering::Relaxed);
         let next = pos.wrapping_add(1);
         // Release: pairs with the Acquire `seq` load in `get`; the fields
@@ -334,6 +350,7 @@ impl<const N: usize> Ring<N> {
 
     /// A seqlock read of the slot for position `pos`: the record, or
     /// `None` when it is torn, stale or overwritten ([`valid_at`]).
+    /// tests/litmus/log_ring.litmus
     pub fn get(&self, pos: u64) -> Option<RecordData> {
         if N == 0 {
             return None;
@@ -341,6 +358,7 @@ impl<const N: usize> Ring<N> {
         let slot = self.records.get((pos % N as u64) as usize)?;
         // Acquire: pairs with the Release `seq` store in `push`.
         let seq = slot.seq.load(Ordering::Acquire);
+        // Relaxed: the `seq` loads and the fence order the fields; pairs with nothing.
         let r = RecordData {
             seq,
             tsc: slot.tsc.load(Ordering::Relaxed),
@@ -352,6 +370,7 @@ impl<const N: usize> Ring<N> {
         // Acquire: pairs with the Release fence in `push`, so a field
         // stored by a later push makes the re-read below see its `seq = 0`.
         fence(Ordering::Acquire);
+        // Relaxed: the Acquire fence above orders it after the fields; pairs with nothing.
         if slot.seq.load(Ordering::Relaxed) != seq {
             return None;
         }
@@ -443,10 +462,14 @@ impl<const CPUS: usize, const N: usize> Trace<CPUS, N> {
         for r in &self.rings {
             r.init();
         }
+        // Relaxed: the Release store of `magic` below publishes it; pairs with nothing.
         self.version.store(TRACE_VERSION, Ordering::Relaxed);
+        // Relaxed: as `version`; pairs with nothing.
         self.record_size
             .store(RECORD_SIZE as u32, Ordering::Relaxed);
+        // Relaxed: as `version`; pairs with nothing.
         self.cap.store(N as u32, Ordering::Relaxed);
+        // Relaxed: as `version`; pairs with nothing.
         self.cpus.store(CPUS as u32, Ordering::Relaxed);
         // Release: pairs with the Acquire load in `is_live`.
         self.magic
@@ -472,7 +495,9 @@ impl<const CPUS: usize, const N: usize> Trace<CPUS, N> {
     /// Publish the calibration and warp result for the core tool: the
     /// fields, then the flags that say they are there.
     pub fn publish_clock(&self, c: &ClockInfo) {
+        // Relaxed: the Release store of `flags` below publishes it; pairs with nothing.
         self.freq_hz.store(c.freq_hz, Ordering::Relaxed);
+        // Relaxed: as `freq_hz`; pairs with nothing.
         self.max_skew.store(c.max_skew, Ordering::Relaxed);
         // Release: pairs with the Acquire load in `flags`.
         self.flags.store(c.flags(), Ordering::Release);
@@ -481,6 +506,7 @@ impl<const CPUS: usize, const N: usize> Trace<CPUS, N> {
     /// The published clock, or `None` before [`Trace::publish_clock`].
     pub fn clock(&self) -> Option<ClockInfo> {
         let flags = self.flags();
+        // Relaxed: the Acquire load in `flags` above orders them; pairs with nothing.
         ClockInfo::from_header(
             self.freq_hz.load(Ordering::Relaxed),
             self.max_skew.load(Ordering::Relaxed),
@@ -521,7 +547,9 @@ impl WarpLine {
 
     /// Ready the line for the next AP. Only once neither side runs.
     pub fn reset(&self) {
+        // Relaxed: the Release store of `arrived` below publishes it; pairs with nothing.
         self.last.store(0, Ordering::Relaxed);
+        // Relaxed: as `last`; pairs with nothing.
         self.left.store(0, Ordering::Relaxed);
         // Release: pairs with the Acquire loads in `arrive`.
         self.arrived.store(0, Ordering::Release);
@@ -531,7 +559,9 @@ impl WarpLine {
     /// side waited `timeout` cycles of `now` alone and withdrew. Spins on
     /// the counter, never on a timer interrupt.
     pub fn arrive(&self, now: impl Fn() -> u64, timeout: u64) -> bool {
-        // AcqRel: the side that arrives second sees the first's `reset`.
+        // AcqRel: pairs with the Release store in `reset` and the other
+        // side's `fetch_add`, so the side that arrives second sees the
+        // first's `reset`.
         if self.arrived.fetch_add(1, Ordering::AcqRel) >= 1 {
             return true;
         }
@@ -543,6 +573,7 @@ impl WarpLine {
             }
             if now().saturating_sub(t0) >= timeout {
                 // Withdraw, unless the other side arrived meanwhile.
+                // AcqRel, Acquire on failure: pairs with the other side's AcqRel `fetch_add`.
                 return self
                     .arrived
                     .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
@@ -560,6 +591,7 @@ impl WarpLine {
         // side, so the read taken next comes after the one published.
         let prev = self.last.load(Ordering::Acquire);
         let now = read();
+        // AcqRel: pairs with the Acquire load and `fetch_max` in the other side's `step`.
         self.last.fetch_max(now, Ordering::AcqRel);
         (now, prev.saturating_sub(now))
     }
@@ -630,13 +662,19 @@ pub struct ClockInfo {
     pub warp_measured: bool,
     /// The largest backward step the warp test saw, in cycles; 0 for none.
     pub max_skew: u64,
+    /// The counter is uniform across CPUs by architecture
+    /// ([`COUNTER_UNIFORM`]).
+    pub uniform: bool,
 }
 
 impl ClockInfo {
     /// DESIGN §6.4: records order across CPUs only when the counter is
-    /// invariant and the warp test ran and saw no backward step.
+    /// uniform across CPUs by architecture, or invariant with a warp test
+    /// that ran and saw no backward step.
     pub const fn order(&self) -> Order {
-        if !self.invariant {
+        if self.uniform {
+            Order::Global
+        } else if !self.invariant {
             Order::PerCpu("tsc not invariant")
         } else if !self.warp_measured {
             Order::PerCpu("tsc warp test did not run")
@@ -659,6 +697,9 @@ impl ClockInfo {
         if self.max_skew != 0 {
             f |= WARP_BACKWARD;
         }
+        if self.uniform {
+            f |= COUNTER_UNIFORM;
+        }
         f
     }
 
@@ -673,6 +714,7 @@ impl ClockInfo {
             invariant: flags & TSC_INVARIANT != 0,
             warp_measured: flags & WARP_MEASURED != 0,
             max_skew,
+            uniform: flags & COUNTER_UNIFORM != 0,
         })
     }
 }
@@ -843,13 +885,18 @@ pub fn export_chrome<W: fmt::Write>(
         }
     }
     let (name, reason) = match order {
+        Order::Global if clock.uniform => ("global", "a counter uniform across cpus"),
         Order::Global => (
             "global",
             "invariant tsc and no backward step in the warp test",
         ),
         Order::PerCpu(why) => ("per-cpu", why),
     };
-    let clk = if clock.freq_hz == 0 { "cycles" } else { "tsc" };
+    let clk = match (clock.freq_hz, clock.uniform) {
+        (0, _) => "cycles",
+        (_, true) => "cntvct",
+        (_, false) => "tsc",
+    };
     write!(
         out,
         "],\"displayTimeUnit\":\"ns\",\"otherData\":{{\"clock\":\"{clk}\",\"freq_hz\":\"{}\",\"order\":\"{name}\",\"reason\":\"{reason}\",\"skew_cycles\":\"{}\"}}}}",

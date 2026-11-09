@@ -1,0 +1,17 @@
+AArch64 vibeos-seqlock-odd-llsc
+(* Same trailing fence as seqlock_odd, with the LDXR/STXR loop rustc
+   emits for a relaxed fetch_add when +lse is off. *)
+{
+0:X1=ver; 0:X2=data;
+1:X1=ver; 1:X2=data;
+}
+ P0                 | P1              ;
+ MOV W0,#1          | LDAR W3,[X1]    ;
+L0:                 |                 ;
+ LDXR W5,[X1]       | LDR W4,[X2]     ;
+ ADD W6,W5,#1       | DMB ISHLD       ;
+ STXR W7,W6,[X1]    | LDR W8,[X1]     ;
+ CBNZ W7,L0         |                 ;
+ DMB ISH            |                 ;
+ STR W0,[X2]        |                 ;
+exists (1:X4=1 /\ 1:X8=0)

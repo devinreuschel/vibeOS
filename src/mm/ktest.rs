@@ -4,22 +4,23 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::fmt;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+#[cfg(target_arch = "x86_64")]
+use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicU32, Ordering};
 
-use vibeos::arch::PageTable;
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::{KVA_END, KVA_START, PAGE_SIZE};
 use vibeos::limits::MAX_UNMAP_PAGES;
 use vibeos::paging::{self, PageFlags, PageSize, PhysAddr, VirtAddr, heap_flags};
 use vibeos::pmm::Frames;
 
-use crate::arch::current::Arch;
 use crate::diag;
 use crate::ktest::{
     Outcome, Test, alloc_frame, alloc_frames_owned, catch_alloc_error, catch_fault, free_frame,
-    free_frames, free_frames_owned, quiescent_free_frames, second_cpu, settle_threads,
-    spawn_thread_on, spin_until_ns, test,
+    free_frames, free_frames_owned, quiescent_free_frames, settle_threads, spin_until_ns, test,
 };
+#[cfg(target_arch = "x86_64")]
+use crate::ktest::{second_cpu, spawn_thread_on};
 use crate::kva_init;
 use crate::paging_init;
 use crate::per_cpu_init;
@@ -342,8 +343,7 @@ pub(crate) fn test_vmap() -> Outcome {
     Outcome::Ok
 }
 
-/// A `FrameAlloc` that has no frames: remapping a present leaf needs no
-/// table, so `mmio_uc_flags`' restore never asks it for one.
+/// A `FrameAlloc` that has no frames: a refused `Remap` writes no leaf.
 struct NoFrames;
 
 // SAFETY: `FrameAlloc`'s contract is on the frames it hands out, and this
@@ -355,60 +355,46 @@ unsafe impl paging::FrameAlloc for NoFrames {
 }
 
 pub(crate) fn test_mmio_uc_flags() -> Outcome {
-    // LAPIC (0xFEE0_0000) sits above QEMU's 128 MiB map_end, so the
-    // generic patch API is still proven on a leaf we know exists:
-    // 2 MiB, inside the identity rest / physmap. ACPI's real bases
-    // are checked by `acpi_discovery`.
+    // A live physmap leaf must refuse a type change (ROADMAP §11.2 BBM).
     let phys = PhysAddr(0x0020_0000);
-    let va = VirtAddr(paging_init::HHDM_BASE + phys.as_u64());
-    // The whole leaf the patch covers, and its flags, to restore after.
+    let va = VirtAddr(paging_init::hhdm_offset() + phys.as_u64());
     let Some((pa, size, saved)) = paging_init::translate(va) else {
         return Outcome::Fail("translate before");
     };
     let mask = size.bytes() - 1;
     let leaf_va = VirtAddr(va.as_u64() & !mask);
     let leaf_pa = PhysAddr(pa.as_u64() & !mask);
-    // SAFETY: `paging_init::patch_physmap_uc`'s contract; `install` has run and the physmap
-    // covers physical 2 MiB. Making that RAM leaf UC breaks invariant I17 on purpose, for this
-    // test, until the restore below: UC only slows its accesses; established here.
-    if unsafe { paging_init::patch_physmap_uc(phys, 4096) }.is_err() {
-        return Outcome::Fail("patch_physmap_uc");
-    }
-    let patched = paging_init::translate(va).map(|(_, _, f)| f);
-    let restored = {
+    let err = {
         let mut m = paging_init::current_mapper();
-        // SAFETY: `Mapper::map_page`'s contract; the leaf goes back to the
-        // physical range and flags `translate` read above, which the
-        // physmap mapped before this test, so no other mapping reaches it
-        // anew; the guard holds the page-table lock (invariant I48,
-        // established at `mm::paging_init::current_mapper`).
+        // SAFETY: host-style remap of an existing physmap leaf; we expect
+        // LiveChange and no store, so the leaf stays as `saved`;
+        // established here.
         unsafe {
             m.map_page(
                 leaf_va,
                 leaf_pa,
-                saved,
+                paging::mmio_flags(),
                 size,
                 paging::MapMode::Remap,
                 &mut NoFrames,
             )
         }
     };
-    <Arch as PageTable>::flush_local(leaf_va);
-    paging::tlb_shootdown_others(leaf_va);
-    if restored.is_err() {
-        return Outcome::Fail("restore map_page");
-    }
-    match patched {
-        None => return Outcome::Fail("translate after patch"),
-        Some(f) if !f.contains(PageFlags::PCD | PageFlags::PWT) => {
-            return Outcome::Fail("PCD/PWT not set on physmap leaf");
-        }
-        Some(_) => {}
+    if err != Err(paging::MapError::LiveChange) {
+        return crate::fail_fmt!("want LiveChange, got {err:?}");
     }
     match paging_init::translate(va) {
-        Some((_, s, f)) if s == size && f.0 == saved.0 => Outcome::Ok,
-        Some((_, _, f)) => crate::fail_fmt!("restored flags {:#x}, want {:#x}", f.0, saved.0),
-        None => Outcome::Fail("translate after restore"),
+        Some((_, s, f)) if s == size && f.0 == saved.0 => {}
+        Some((_, _, f)) => return crate::fail_fmt!("flags changed {:#x}", f.0),
+        None => return Outcome::Fail("translate after refuse"),
+    }
+    let Some(lapic) = crate::acpi_init::lapic_va() else {
+        return Outcome::Fail("lapic not ioremapped");
+    };
+    match paging_init::translate(VirtAddr(lapic)) {
+        Some((_, _, f)) if f.contains(PageFlags::PCD | PageFlags::PWT) => Outcome::Ok,
+        Some((_, _, f)) => crate::fail_fmt!("lapic flags {:#x}", f.0),
+        None => Outcome::Fail("lapic va unmapped"),
     }
 }
 
@@ -418,14 +404,20 @@ pub(crate) fn test_mmio_uc_flags() -> Outcome {
 /// `arch::catch::LAST`. `SHOOT_REQ` counts requests (`SHOOT_QUIT` ends the
 /// thread), `SHOOT_ACK` names the last one served, and `SHOOT_RESULT` holds
 /// its outcome: 1 the read succeeded, 2 it faulted.
+#[cfg(target_arch = "x86_64")]
 static SHOOT_VA: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "x86_64")]
 static SHOOT_REQ: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "x86_64")]
 static SHOOT_ACK: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "x86_64")]
 static SHOOT_RESULT: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "x86_64")]
 const SHOOT_QUIT: u64 = u64::MAX;
 
 /// Spin on the AP, never blocking, so the TLB entry a read loads stays
 /// live until a shootdown removes it; IF stays on for the shootdown IPI.
+#[cfg(target_arch = "x86_64")]
 fn shoot_prober() {
     let mut seen = 0u64;
     loop {
@@ -453,6 +445,7 @@ fn shoot_prober() {
 }
 
 /// Ask the prober to read `SHOOT_VA` and return its result, 0 on timeout.
+#[cfg(target_arch = "x86_64")]
 fn shoot_touch(req: u64) -> u64 {
     // Release: `SHOOT_VA` and the mapping change happen before the request.
     SHOOT_REQ.store(req, Ordering::Release);
@@ -463,6 +456,7 @@ fn shoot_touch(req: u64) -> u64 {
 }
 
 /// End the prober and wait until it has stopped reading.
+#[cfg(target_arch = "x86_64")]
 fn shoot_quit() {
     SHOOT_REQ.store(SHOOT_QUIT, Ordering::Release);
     let _ = spin_until_ns(
@@ -471,6 +465,7 @@ fn shoot_quit() {
     );
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
     let Some(ap) = second_cpu() else {
         return Outcome::Skip("no AP");
@@ -745,7 +740,7 @@ pub(crate) fn vmap_32_frames_unmapped() -> Outcome {
         if paging_init::translate(VirtAddr(base + i * PAGE_SIZE)).is_some() {
             still += 1;
         }
-        let hhdm = paging_init::HHDM_BASE + frames.base() + i * PAGE_SIZE;
+        let hhdm = paging_init::hhdm_offset() + frames.base() + i * PAGE_SIZE;
         // SAFETY: frame `i` of the block this test holds, read through the
         // physmap, which covers all RAM (DESIGN §4.1); established here.
         if unsafe { (hhdm as *const u64).read_volatile() } != i {
@@ -920,20 +915,24 @@ pub(crate) mod fail_after {
 /// `kernel_va0_faults`' probe result: 0 none yet, 1 `#PF` at CR2 0 on a
 /// not-present supervisor read, 2 the read did not fault, 3 any other
 /// fault. The CPU that ran it is in the upper 32 bits.
+#[cfg(target_arch = "x86_64")]
 static VA0_RESULT: AtomicU64 = AtomicU64::new(0);
 
-/// Read VA 0 under `catch_fault` with an asm load (a Rust null
-/// dereference is UB) and classify the result.
+/// Read `va` under `catch_fault` with an asm load (a Rust dereference of
+/// an arbitrary address is UB) and classify the result: 1 `#PF` at CR2 `va`
+/// on a not-present supervisor read, 2 the read did not fault, 3 any other
+/// fault.
 #[cfg(target_arch = "x86_64")]
-fn va0_probe() -> u64 {
+fn fault_class(va: u64) -> u64 {
     let fault = catch_fault(|| {
-        // SAFETY: the load reads VA 0, which the identity teardown leaves
-        // unmapped, and `catch_fault` recovers from the #PF it raises; the
-        // asm writes only its scratch register; established here.
+        // SAFETY: the load reads `va`, which the callers pass only after the
+        // identity teardown has unmapped it, and `catch_fault` recovers from
+        // the #PF it raises; the asm writes only its scratch register;
+        // established here.
         unsafe {
             core::arch::asm!(
                 "mov {tmp}, qword ptr [{va}]",
-                va = in(reg) 0u64,
+                va = in(reg) va,
                 tmp = out(reg) _,
                 options(nostack, readonly, preserves_flags)
             );
@@ -942,11 +941,17 @@ fn va0_probe() -> u64 {
     match fault {
         None => 2,
         // Error code: not present (bit 0), read (bit 1), supervisor (bit 2).
-        Some(f) if f.cr2 == 0 && f.error & 0x7 == 0 => 1,
+        Some(f) if f.cr2 == va && f.error & 0x7 == 0 => 1,
         Some(_) => 3,
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+fn va0_probe() -> u64 {
+    fault_class(0)
+}
+
+#[cfg(target_arch = "x86_64")]
 fn va0_entry() {
     // Pinned by `spawn_thread_on`, so the hint is this thread's CPU.
     let cpu = u64::from(thread_init::current_cpu());
@@ -954,10 +959,160 @@ fn va0_entry() {
     VA0_RESULT.store(cpu << 32 | va0_probe(), Ordering::Release);
 }
 
+/// One page of the identity window's 4 KiB leaves (the last of the first
+/// 2 MiB, above the trampoline page's 1 MiB limit) and one inside its 2 MiB
+/// leaves.
+#[cfg(target_arch = "x86_64")]
+const IDENTITY_4K_VA: u64 = 0x1F_F000;
+#[cfg(target_arch = "x86_64")]
+const IDENTITY_2M_VA: u64 = 0x40_1000;
+
+/// Read both identity probe pages on every online CPU, so their translations
+/// are in each CPU's TLB. `smp_init::init` runs it before
+/// `paging_init::teardown_identity`, so the teardown's flush is what
+/// `probe_boot_identity` and `identity_flush_probe` see. The reads are plain
+/// asm loads: a call-function body runs in a lockless section
+/// (`ipi_init::service_calls`), where `catch` is not allowed.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn prime_identity() {
+    crate::ipi_init::call_mask(u64::MAX, prime_identity_entry, core::ptr::null_mut(), true);
+    prime_identity_entry(core::ptr::null_mut());
+}
+
+#[cfg(target_arch = "x86_64")]
+fn prime_identity_entry(_: *mut ()) {
+    for va in [IDENTITY_4K_VA, IDENTITY_2M_VA] {
+        // SAFETY: the window's leaves are mapped until `paging_init::teardown_identity`,
+        // which `smp_init::init` calls after `prime_identity` returns; the load
+        // reads a RAM address below 512 MiB and the asm writes only its scratch
+        // register; established by `smp_init::init`.
+        unsafe {
+            core::arch::asm!(
+                "mov {tmp}, qword ptr [{va}]",
+                va = in(reg) va,
+                tmp = out(reg) _,
+                options(nostack, readonly, preserves_flags)
+            );
+        }
+    }
+}
+
+/// `identity_flush_probe`'s result: the 4 KiB class in bits 0..8 and the
+/// 2 MiB class in bits 8..16 (see `fault_class`); 0 until a probe stores one.
+#[cfg(target_arch = "x86_64")]
+static IDENTITY_RESULT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(target_arch = "x86_64")]
+fn identity_classes() -> u64 {
+    fault_class(IDENTITY_4K_VA) | fault_class(IDENTITY_2M_VA) << 8
+}
+
+#[cfg(target_arch = "x86_64")]
+fn identity_entry() {
+    // Release: publishes the result to `run_pinned`'s Acquire loads.
+    IDENTITY_RESULT.store(identity_classes(), Ordering::Release);
+}
+
+/// The boot CPU's identity classes from `probe_boot_identity`, in
+/// `identity_classes`' layout with the CPU in the upper 32 bits; 0 until
+/// that probe stores one. Nonzero once stored, since the 4 KiB class is 1 to 3.
+#[cfg(target_arch = "x86_64")]
+static BOOT_IDENTITY: AtomicU64 = AtomicU64::new(0);
+
+/// Read the identity probe pages on the boot CPU right after
+/// `paging_init::teardown_identity`, before any CR3 write, and keep the
+/// classes for `kernel_va0_faults`. `smp_init::init` calls it there. The
+/// reads run under `catch_fault` with IF=0 and no lock held. Reads made after
+/// `/hello`'s CR3 write do not show a skipped flush under TCG, so this one
+/// runs first.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn probe_boot_identity() {
+    let cpu = thread_init::current_cpu();
+    // Release: publishes the result to `kernel_va0_faults`' Acquire load.
+    BOOT_IDENTITY.store(u64::from(cpu) << 32 | identity_classes(), Ordering::Release);
+}
+
+/// Run `entry` in a thread pinned to `cpu`, which stores a nonzero result in
+/// `slot`; `None` when it stores none within two seconds.
+#[cfg(target_arch = "x86_64")]
+fn run_pinned(name: &'static str, slot: &AtomicU64, entry: fn(), cpu: u32) -> Option<u64> {
+    // Relaxed: the thread is spawned after this store, which orders it; pairs with nothing.
+    slot.store(0, Ordering::Relaxed);
+    spawn_thread_on(name, entry, cpu);
+    if !spin_until_ns(|| slot.load(Ordering::Acquire) != 0, 2_000_000_000) {
+        return None;
+    }
+    Some(slot.load(Ordering::Acquire))
+}
+
+/// Judge one CPU's identity classes: each probe page must have taken a #PF
+/// at its address.
+#[cfg(target_arch = "x86_64")]
+fn check_identity(cpu: u32, r: u64) -> Outcome {
+    let (four_k, two_m) = (r & 0xFF, (r >> 8) & 0xFF);
+    for (class, what) in [(four_k, "4 KiB"), (two_m, "2 MiB")] {
+        match class {
+            1 => {}
+            2 => {
+                return crate::fail_fmt!(
+                    "cpu {cpu}: a kernel read of the {what} identity page did not fault"
+                );
+            }
+            _ => {
+                return crate::fail_fmt!(
+                    "cpu {cpu}: the {what} identity read took a fault other than #PF at its address"
+                );
+            }
+        }
+    }
+    Outcome::Ok
+}
+
+/// ROADMAP §10.6, DESIGN §4.3: the identity window's translations are gone
+/// on every online CPU, so a read of each probe page faults there. Each
+/// remote CPU probes in its own pinned thread, one CPU at a time: `catch`
+/// keeps one state per machine. On the boot CPU these reads come after
+/// `/hello`'s CR3 write, so under TCG they cannot show a skipped flush, and
+/// `probe_boot_identity` is the check that can. The other CPUs' reads depend
+/// on hardware keeping global translations across CR3 writes, which is not
+/// verified on hardware.
+#[cfg(target_arch = "x86_64")]
+fn identity_flush_probe() -> Outcome {
+    let me = thread_init::current_cpu();
+    let online = per_cpu_init::online_mask();
+    for cpu in (0..64u32).filter(|c| online & (1u64 << c) != 0) {
+        let r = if cpu == me {
+            identity_classes()
+        } else {
+            match run_pinned("identity", &IDENTITY_RESULT, identity_entry, cpu) {
+                Some(r) => r,
+                None => return crate::fail_fmt!("cpu {cpu}: identity probe did not run"),
+            }
+        };
+        let o = check_identity(cpu, r);
+        if !matches!(o, Outcome::Ok) {
+            return o;
+        }
+    }
+    Outcome::Ok
+}
+
 /// ROADMAP §10.6: after `smp: done` the low identity window is gone, so a
 /// kernel read of VA 0 faults on every online CPU. `catch_fault`'s one
-/// jump buffer serves one CPU at a time, so the CPUs probe in turn.
+/// jump buffer serves one CPU at a time, so the CPUs probe in turn. First
+/// the boot CPU's read from `probe_boot_identity` must have faulted; then
+/// `identity_flush_probe` checks the two pages `prime_identity` cached.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn kernel_va0_faults() -> Outcome {
+    // Acquire: pairs with the Release store in `probe_boot_identity`.
+    let boot = BOOT_IDENTITY.load(Ordering::Acquire);
+    if boot == 0 {
+        return crate::fail_fmt!("the boot CPU's identity probe did not run");
+    }
+    let o = check_identity((boot >> 32) as u32, boot & 0xFFFF_FFFF);
+    if !matches!(o, Outcome::Ok) {
+        return o;
+    }
     // The registry is pinned, so the hint is its CPU.
     let me = thread_init::current_cpu();
     let online = per_cpu_init::online_mask();
@@ -965,12 +1120,10 @@ pub(crate) fn kernel_va0_faults() -> Outcome {
         let r = if cpu == me {
             u64::from(cpu) << 32 | va0_probe()
         } else {
-            VA0_RESULT.store(0, Ordering::Relaxed);
-            spawn_thread_on("va0", va0_entry, cpu);
-            if !spin_until_ns(|| VA0_RESULT.load(Ordering::Acquire) != 0, 2_000_000_000) {
-                return crate::fail_fmt!("cpu {cpu}: probe did not run");
+            match run_pinned("va0", &VA0_RESULT, va0_entry, cpu) {
+                Some(r) => r,
+                None => return crate::fail_fmt!("cpu {cpu}: probe did not run"),
             }
-            VA0_RESULT.load(Ordering::Acquire)
         };
         let (ran, what) = ((r >> 32) as u32, r & 0xFFFF_FFFF);
         if ran != cpu {
@@ -982,26 +1135,40 @@ pub(crate) fn kernel_va0_faults() -> Outcome {
             _ => return crate::fail_fmt!("cpu {cpu}: VA 0 read took a fault other than #PF cr2=0"),
         }
     }
-    Outcome::Ok
+    identity_flush_probe()
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn test_nx_enforcement() -> Outcome {
+    Outcome::Skip("x86 NX page")
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn test_stack_guard() -> Outcome {
+    Outcome::Skip("x86 stack guard")
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn kernel_va0_faults() -> Outcome {
+    Outcome::Skip("x86 VA 0 fault")
 }
 
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
     test("map_unmap", test_map_unmap),
-    #[cfg(target_arch = "x86_64")]
     test("nx_enforcement", test_nx_enforcement),
     test("heap_box", test_heap_box),
     test("heap_reuse", test_heap_reuse),
     test("heap_align", test_heap_align),
     test("heap_growth", test_heap_growth),
     test("heap_oom", test_heap_oom),
-    #[cfg(target_arch = "x86_64")]
     test("stack_guard", test_stack_guard),
     test("kva_roundtrip", test_kva_roundtrip),
     test("kva_deferred", test_kva_deferred),
     test("vmap", test_vmap),
     test("mmio_uc_flags", test_mmio_uc_flags),
+    #[cfg(target_arch = "x86_64")]
     test("tlb_shootdown_remote", test_tlb_shootdown_remote),
     test("alloc_stress_smp", test_alloc_stress_smp),
     test("frames_none_leaked", frames_none_leaked),
@@ -1011,8 +1178,9 @@ pub(crate) const TESTS: &[Test] = &[
         "unmap_shootdown_over_max_asserts",
         unmap_shootdown_over_max_asserts,
     ),
-    test("kernel_va0_faults", kernel_va0_faults),
+    test("kernel_va0_faults", kernel_va0_faults).once(),
     test("ioremap_failure_returns_va", ioremap_failure_returns_va),
+    test("physmap_kernel_span_4k", physmap_kernel_span_4k),
 ];
 
 // ---------------------------------------------------------------------------
@@ -1077,6 +1245,38 @@ pub(crate) fn ioremap_failure_returns_va() -> Outcome {
             va.as_u64(),
             planted.as_u64()
         );
+    }
+    Outcome::Ok
+}
+
+// ---------------------------------------------------------------------------
+// physmap_kernel_span_4k
+
+/// Every whole page of the kernel image's physmap alias is a 4 KiB leaf that
+/// maps its own physical page (ROADMAP §11.2, MEMORY.md §4.1). The builder
+/// emits that span at 4 KiB, so no 2 MiB leaf may cover any of it.
+pub(crate) fn physmap_kernel_span_4k() -> Outcome {
+    let span = crate::boot::info().kernel_phys.clone();
+    let hhdm = paging_init::hhdm_offset();
+    let mut pa = span.start.next_multiple_of(PAGE_SIZE);
+    let end = span.end & !(PAGE_SIZE - 1);
+    let mut checked = 0u64;
+    while pa < end {
+        let Some(va) = hhdm.checked_add(pa) else {
+            return Outcome::Fail("physmap alias overflows");
+        };
+        match paging_init::translate(VirtAddr(va)) {
+            Some((got, PageSize::Size4K, _)) if got.as_u64() == pa => {}
+            Some((_, size, _)) => {
+                return crate::fail_fmt!("kernel span page {pa:#x} maps as {size:?}, not Size4K");
+            }
+            None => return crate::fail_fmt!("kernel span page {pa:#x} unmapped"),
+        }
+        checked += 1;
+        pa += PAGE_SIZE;
+    }
+    if checked == 0 {
+        return Outcome::Fail("kernel span has no whole page");
     }
     Outcome::Ok
 }

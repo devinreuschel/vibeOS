@@ -1,5 +1,7 @@
-//! The crashed kernel's address space (ROADMAP §10.7): the page walk from
-//! the root VMCOREINFO names, in the port's `PageTable` format, the
+//! The crashed kernel's address space (ROADMAP §10.7, §11.7): the page walk
+//! from the root VMCOREINFO names, in the port's pure page-table format
+//! ([`CoreFormat`], which each port's `arch::<port>::paging` implements:
+//! [`X86_64`] for the PML4, [`Aarch64Ttbr1`] for the TTBR1 table), the
 //! frame-pointer unwinder, and the virtually addressed core `gdb` opens.
 
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
@@ -7,14 +9,17 @@
 use core::marker::PhantomData;
 
 use super::{
-    BT_MAX, ET_CORE, KERNEL_HALF, PAGE, PT_NOTE, Phdr, PhysMem, SHDR_SIZE, VmError, add, offset,
-    put_all,
+    BT_MAX, ET_CORE, PAGE, PT_NOTE, Phdr, PhysMem, SHDR_SIZE, VmError, add, offset, put_all,
 };
 use crate::log::backtrace::{self, StackRange};
-use crate::paging::{PageFlags, PageTable, VirtAddr, is_canonical};
-use crate::proc::elf::{EHDR_SIZE, ELFCLASS64, ELFDATA2LSB, EM_X86_64, PHDR_SIZE, PT_LOAD};
+use crate::paging::PageFlags;
+pub use crate::paging::{CoreFormat, Desc};
 
-// -------------------------------------------------------------------- walk
+pub use crate::arch::X86_64;
+pub use crate::arch::aarch64::paging::Aarch64Ttbr1;
+use crate::proc::elf::{EHDR_SIZE, ELFCLASS64, ELFDATA2LSB, PHDR_SIZE, PT_LOAD};
+
+// ------------------------------------------------------------------ formats
 
 /// One run of the kernel's mappings: `len` bytes at `va`, backed by the
 /// core from `pa`.
@@ -26,8 +31,8 @@ pub struct Mapping {
 }
 
 /// The crashed kernel's address space, read from the core through the root
-/// its note names, in the page-table format `A` (the port's pure half).
-pub struct Kernel<'m, M: PhysMem, A: PageTable> {
+/// its note names, in the page-table format `A`.
+pub struct Kernel<'m, M: PhysMem, A: CoreFormat> {
     pub mem: &'m M,
     pub root: u64,
     /// Table entries and 4 KiB pages one [`Kernel::kernel_mappings`] walk
@@ -40,16 +45,7 @@ pub struct Kernel<'m, M: PhysMem, A: PageTable> {
 /// 9 GiB guest's kernel half maps.
 pub const WALK_BUDGET: u64 = 1 << 24;
 
-/// The canonical VA of `idx`'s kernel-half slot range.
-fn sign_extend(va: u64) -> u64 {
-    if va & (1 << 47) != 0 {
-        va | 0xFFFF_0000_0000_0000
-    } else {
-        va
-    }
-}
-
-impl<'m, M: PhysMem, A: PageTable> Kernel<'m, M, A> {
+impl<'m, M: PhysMem, A: CoreFormat> Kernel<'m, M, A> {
     /// `levels` must be the format's: another count is a table the tool
     /// cannot walk.
     pub fn new(mem: &'m M, root: u64, levels: u8) -> Result<Self, VmError> {
@@ -88,27 +84,37 @@ impl<'m, M: PhysMem, A: PageTable> Kernel<'m, M, A> {
     }
 
     /// The physical address `va` maps to.
+    /// The output address of a leaf at `level` whose entry names `pa`: its
+    /// block's base, by the level's size. The bits below a block's size are
+    /// not address bits: RES0 in an aarch64 block descriptor, and on x86_64
+    /// bit 12 of a 2 MiB or 1 GiB leaf is its PAT bit, which the entry's
+    /// address mask keeps.
+    fn leaf_base(pa: u64, level: u8) -> u64 {
+        pa & !Self::leaf_size(level).wrapping_sub(1)
+    }
+
     pub fn translate(&self, va: u64) -> Result<u64, VmError> {
-        if !is_canonical(va) {
+        if !A::va_ok(va) {
             return Err(VmError::NonCanonical);
         }
         let mut table = self.root;
         let mut level = A::LEVELS;
         loop {
-            let e = self.entry(table, A::index(VirtAddr(va), level))?;
-            let flags = A::entry_flags(e);
-            if !flags.contains(PageFlags::PRESENT) {
-                return Err(VmError::NotMapped);
+            let e = self.entry(table, A::index(va, level))?;
+            let pa = A::entry_phys(e);
+            match A::desc(e, level) {
+                Desc::Leaf => {
+                    let size = Self::leaf_size(level);
+                    return Self::leaf_base(pa, level)
+                        .checked_add(va & size.wrapping_sub(1))
+                        .ok_or(VmError::NotMapped);
+                }
+                Desc::Table if level > 1 => {
+                    table = pa;
+                    level = level.saturating_sub(1);
+                }
+                Desc::Table | Desc::None => return Err(VmError::NotMapped),
             }
-            let pa = A::entry_phys(e).as_u64();
-            if level == 1 || flags.contains(PageFlags::HUGE) {
-                let size = Self::leaf_size(level);
-                return pa
-                    .checked_add(va & size.wrapping_sub(1))
-                    .ok_or(VmError::NotMapped);
-            }
-            table = pa;
-            level = level.saturating_sub(1);
         }
     }
 
@@ -165,11 +171,10 @@ impl<'m, M: PhysMem, A: PageTable> Kernel<'m, M, A> {
         let top = A::LEVELS;
         let mut left = self.budget;
         for i4 in A::KERNEL_ROOT_FIRST..A::ENTRIES {
-            let base = sign_extend(
-                offset(i4)
-                    .checked_mul(Self::leaf_size(top))
-                    .ok_or(VmError::Levels)?,
-            );
+            let base = offset(i4.saturating_sub(A::KERNEL_ROOT_FIRST))
+                .checked_mul(Self::leaf_size(top))
+                .and_then(|o| A::KERNEL_VA_START.checked_add(o))
+                .ok_or(VmError::Levels)?;
             self.walk_table(self.root, top, i4, base, &mut left, &mut emit)?;
         }
         if let Some(r) = run {
@@ -193,13 +198,24 @@ impl<'m, M: PhysMem, A: PageTable> Kernel<'m, M, A> {
         let Ok(e) = self.entry(table, idx) else {
             return Ok(());
         };
-        let flags = A::entry_flags(e);
-        if !flags.contains(PageFlags::PRESENT) {
+        let desc = A::desc(e, level);
+        if desc == Desc::None || (desc == Desc::Table && level <= 1) {
             return Ok(());
         }
-        let pa = A::entry_phys(e).as_u64();
+        let flags = A::entry_flags(e);
+        let pa = A::entry_phys(e);
         let size = Self::leaf_size(level);
-        if level == 1 || flags.contains(PageFlags::HUGE) {
+        if desc == Desc::Leaf {
+            let pa = Self::leaf_base(pa, level);
+            // Not a mapping of the virtual core: an uncached leaf, which is
+            // x86_64's PCD or PWT and aarch64's Device memory (`PCD | PWT`)
+            // or Normal non-cacheable (`PWT`). Device leaves are MMIO, whose
+            // registers the core does not hold. The kernel maps no
+            // Normal-NC memory today (`paging::mmio_flags` sets both bits);
+            // one it adds would be memory a device shares, such as a
+            // framebuffer or a DMA buffer, which no report reads, so one
+            // rule covers both ports. `translate` still reads through
+            // either kind.
             if flags.0 & (PageFlags::PCD | PageFlags::PWT) != 0 {
                 return Ok(());
             }
@@ -232,11 +248,13 @@ impl<'m, M: PhysMem, A: PageTable> Kernel<'m, M, A> {
         Ok(())
     }
 
-    /// The frame-pointer backtrace from `rip`/`rbp`: at most [`BT_MAX`]
-    /// return addresses into `out`, `rip` first. The walk is the dump's
+    /// The frame-pointer backtrace from `rip`/`rbp` (`pc`/`x29` on
+    /// aarch64, whose frame record has x86_64's layout: the caller's frame
+    /// pointer, then the return address): at most [`BT_MAX`] return
+    /// addresses into `out`, `rip` first. The walk is the dump's
     /// (`backtrace::walk`): `rbp` only rising, 8-aligned and inside the
-    /// canonical kernel half, a read the core cannot serve ending it as a
-    /// zero return does, and a return outside `in_text` ending it.
+    /// kernel half, a read the core cannot serve ending it as a zero
+    /// return does, and a return outside `in_text` ending it.
     pub fn unwind(
         &self,
         rip: u64,
@@ -244,7 +262,7 @@ impl<'m, M: PhysMem, A: PageTable> Kernel<'m, M, A> {
         in_text: impl Fn(u64) -> bool,
         out: &mut [u64; BT_MAX],
     ) -> usize {
-        let half = [StackRange::new(KERNEL_HALF, u64::MAX)];
+        let half = [StackRange::new(A::KERNEL_VA_START, u64::MAX)];
         let mut n = 0usize;
         backtrace::walk(
             rip,
@@ -271,13 +289,13 @@ pub struct VirtStats {
     pub bytes: u64,
 }
 
-fn virt_header(phnum: u16) -> [u8; EHDR_SIZE] {
+fn virt_header(e_machine: u16, phnum: u16) -> [u8; EHDR_SIZE] {
     let mut h = [0u8; EHDR_SIZE];
     let ident: [u8; 7] = [0x7F, b'E', b'L', b'F', ELFCLASS64, ELFDATA2LSB, 1];
     let words: [(usize, &[u8]); 9] = [
         (0, &ident),
         (16, &ET_CORE.to_le_bytes()),
-        (18, &EM_X86_64.to_le_bytes()),
+        (18, &e_machine.to_le_bytes()),
         (20, &1u32.to_le_bytes()),
         (0x20, &offset(EHDR_SIZE).to_le_bytes()),
         (0x34, &(EHDR_SIZE as u16).to_le_bytes()),
@@ -301,7 +319,7 @@ fn round_up(n: u64, to: u64) -> Result<u64, VmError> {
 /// PA, with the bytes read from the core. Two passes over the mappings:
 /// one counts them for the header, one writes; `sink` gets the file in
 /// order.
-pub fn write_virtual_core<M: PhysMem, A: PageTable>(
+pub fn write_virtual_core<M: PhysMem, A: CoreFormat>(
     k: &Kernel<'_, M, A>,
     notes: &[&[u8]],
     mut sink: impl FnMut(&[u8]) -> Result<(), VmError>,
@@ -316,7 +334,7 @@ pub fn write_virtual_core<M: PhysMem, A: PageTable>(
         .checked_add(offset(PHDR_SIZE).saturating_mul(u64::from(phnum)))
         .ok_or(VmError::TooManySegments)?;
     let data_start = round_up(add(heads, note_len)?, PAGE)?;
-    sink(&virt_header(phnum))?;
+    sink(&virt_header(A::E_MACHINE, phnum))?;
     let note = Phdr {
         kind: PT_NOTE,
         offset: heads,

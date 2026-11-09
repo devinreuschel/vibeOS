@@ -95,10 +95,32 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
         }
     };
     let root = space.root().as_u64();
+    let ctx = space.ctx_addr();
     let mut child = *frame;
-    child.rax = 0;
-    let fs = crate::arch::current::user_tls();
-    let h = match thread_init::spawn_user("user", user_thread_entry, pid, root, &child) {
+    Arch::set_ret(&mut child, 0);
+    let fs = {
+        #[cfg(target_arch = "aarch64")]
+        {
+            // EL0 writes TPIDR_EL0 between switches, so the saved base is
+            // stale. The parent is on this CPU (DESIGN §7.5).
+            let _irq = crate::arch::current::InterruptGuard::enter();
+            #[cfg(feature = "kernel_tests")]
+            crate::proc::ktest::fork_tls_diverge();
+            crate::arch::current::user_tls()
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let t = crate::arch::current_tcb();
+            if t.is_null() {
+                0
+            } else {
+                // SAFETY: invariant I9: `current_tcb` is this CPU's live TCB;
+                // established by `thread_init::switch_now`.
+                unsafe { (*t).tls_base }
+            }
+        }
+    };
+    let h = match thread_init::spawn_user("user", user_thread_entry, pid, root, ctx, &child) {
         Ok(h) => h,
         Err(e) => {
             // Nothing names the clone's root yet: no thread was made, so
@@ -131,10 +153,26 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> SysResult {
     // The child starts with the parent's DS, ES, FS and GS (DESIGN §5.1)
     // and its x87 and SSE state (DESIGN §7.5), both before it can run.
     thread_init::set_user_segs(h.id(), crate::arch::gdt::read_user_segs());
+    thread_init::set_tls_base(h.id(), fs);
     syscall_init::fork_fp(h.id());
     thread_init::make_ready(h.id());
     // Child may run (and exit) before we return. POSIX allows either order.
     Ok(pid as usize)
+}
+
+/// `clone` with fork semantics: `flags` must be `SIGCHLD` and `stack` 0.
+pub(super) fn sys_clone(
+    flags: u64,
+    stack: u64,
+    _parent_tid: u64,
+    _child_tid: u64,
+    _tls: u64,
+    frame: Option<&mut UserFrame>,
+) -> SysResult {
+    if flags != u64::from(vibeos::proc::SIGCHLD) || stack != 0 {
+        return Err(KError::Inval);
+    }
+    sys_fork(frame)
 }
 
 /// New references to the directories `base` names, a parent's root and
@@ -196,6 +234,7 @@ pub(super) fn sys_execve(
     let rsp = loaded.rsp;
     let fs = loaded.fs;
     let root = loaded.space.root().as_u64();
+    let ctx = loaded.space.ctx_addr();
     let mut new = Some(loaded.space);
     let old = with_table(|t| {
         let p = t.get_mut(pid)?;
@@ -211,22 +250,29 @@ pub(super) fn sys_execve(
         return Err(KError::Srch);
     };
     close_where(pid, "execve close-on-exec", Fd::cloexec);
-    thread_init::set_pid_cr3(tid, pid, root);
+    thread_init::set_pid_cr3(tid, pid, root, ctx);
     // SAFETY: invariant I44, established at `addr_space_init::SpaceCore`'s
     // drop: `root` is the root of the space `create` built and `p.space`
     // now holds, and `set_pid_cr3` recorded it in this thread's TCB on the
     // line above, here.
-    unsafe { addr_space_init::load_cr3_u64(root) };
+    unsafe { addr_space_init::load_cr3_u64(root, ctx) };
     // The old space's last `users` put, with no lock held and its root no
     // longer loaded or named: the teardown sleeps for its `mm` lock.
     drop(old);
-    *frame = UserFrame {
-        orig_rax: frame.orig_rax,
-        ..UserFrame::new_user(entry, rsp)
-    };
+    // Still this execve's syscall exit: `new_user` would write -1.
+    *frame = UserFrame::exec_from(entry, rsp, Arch::nr(frame));
     // The psABI's initial FP state for the new image (DESIGN §7.5).
     syscall_init::exec_fp();
     thread_init::reset_user_segs();
+    // A switch between these two stores saves the old live register over
+    // the new tls_base (DESIGN §7.5).
+    let _irq = crate::arch::current::InterruptGuard::enter();
+    let t = crate::arch::current_tcb();
+    if !t.is_null() {
+        // SAFETY: invariant I9: `current_tcb` is this CPU's live TCB;
+        // established by `thread_init::switch_now`.
+        unsafe { (*t).tls_base = fs };
+    }
     // SAFETY: `fs` is the new image's thread pointer, a canonical user
     // address the loader chose (`user_init::load_image`), as
     // `set_user_tls` requires, so the next ring-3 TLS access reaches its
@@ -250,7 +296,17 @@ pub(super) fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off:
             return Err(e);
         }
     };
-    match with_current_space(|s| addr_space_init::mmap(s, &req)) {
+    let exec = req.perms.is_some_and(|p| p.exec);
+    let mapped = with_current_space(|s| {
+        let va = addr_space_init::mmap(s, &req)?;
+        // The pages are zero frames just mapped: fetch must not see a dead
+        // process's code in them. No thread knows `va` yet.
+        if exec {
+            fill_init::sync_code(&s.mm(), va, req.len).map_err(|_| AsError::NotMapped)?;
+        }
+        Ok(va)
+    });
+    match mapped {
         None => Err(KError::Inval),
         Some(Ok(va)) => Ok(va as usize),
         Some(Err(AsError::Overlap)) => Err(KError::Exist),

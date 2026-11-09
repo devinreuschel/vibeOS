@@ -23,8 +23,8 @@ use crate::x86::{self, DtPtr};
 /// Mapped pages on each IST stack: four, as DESIGN §5.1 gives, so a dump
 /// or a handler prologue cannot eat the IST. Guard page is still
 /// unmapped below.
-const IST_PAGES: usize = 4;
-const RSP0_PAGES: usize = 4;
+pub(crate) const IST_PAGES: usize = 4;
+pub(crate) const RSP0_PAGES: usize = 4;
 
 /// GDT+TSS for one CPU. The TSS sits in an `UnsafeCell`: after `load`
 /// the tables are shared as `&CpuTables`, and [`CpuTables::set_rsp0`] is
@@ -82,9 +82,15 @@ impl CpuTables {
         // `init` built both: `KERNEL_CS`, `KERNEL_DS` and `TSS_SEL` index
         // them, and IRQs are off, so the `GS_BASE` that `mov gs` zeroes is
         // written back (`per_cpu_init::install_gs`) before any `gs:` read.
+        // `idt::init_early` needs IF=0, which holds, and does anything only
+        // on the boot CPU before `idt::init`, the one caller then.
         unsafe {
             x86::lgdt(&gdtr);
             reload_cs(KERNEL_CS);
+            // Limine's CS is a data selector in this GDT: the early gates
+            // name `KERNEL_CS` before anything here can fault (ROADMAP
+            // §11.1). Returns at once after `idt::init`, so on every AP.
+            super::idt::init_early();
             x86::load_data_segs(KERNEL_DS);
             x86::ltr(TSS_SEL);
         }

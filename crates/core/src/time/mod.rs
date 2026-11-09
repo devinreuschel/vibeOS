@@ -84,6 +84,13 @@ pub fn next_deadline(now: Instant) -> Instant {
     }
 }
 
+/// `CNTx_TVAL` for `ns` at `hz`. The register is signed 32-bit: a negative
+/// value fires at once, so the delay tops out at `i32::MAX` counts.
+pub fn tval_for_ns(ns: u64, hz: u64) -> u32 {
+    let ticks = u128::from(ns) * u128::from(hz) / 1_000_000_000;
+    ticks.min(i32::MAX as u128) as u32
+}
+
 pub const fn hpet_period_ok(period_fs: u32) -> bool {
     period_fs >= HPET_PERIOD_FS_MIN && period_fs <= HPET_PERIOD_FS_MAX
 }
@@ -246,6 +253,7 @@ pub const fn calib_in_band(reference: u64, sample: u64, lo_pct: u64, hi_pct: u64
 /// `fetch_max` then return the larger of previous and `n`. `last` is a
 /// `static` (`time_init::LAST_NS`), so it takes the seam's `core` flavour.
 pub fn monotonic_max(last: &statics::AtomicU64, n: u64) -> u64 {
+    // Relaxed: the read-modify-write alone keeps it monotonic; pairs with nothing.
     last.fetch_max(n, statics::Ordering::Relaxed).max(n)
 }
 
@@ -268,6 +276,8 @@ pub enum ClocksourceId {
     Tsc = 1,
     Hpet = 2,
     AcpiPm = 3,
+    /// `CNTVCT_EL0` (aarch64).
+    Cntvct = 4,
 }
 
 impl ClocksourceId {
@@ -277,6 +287,7 @@ impl ClocksourceId {
             ClocksourceId::Tsc => "tsc",
             ClocksourceId::Hpet => "hpet",
             ClocksourceId::AcpiPm => "acpi_pm",
+            ClocksourceId::Cntvct => "cntvct",
         }
     }
 
@@ -286,6 +297,7 @@ impl ClocksourceId {
             1 => Some(ClocksourceId::Tsc),
             2 => Some(ClocksourceId::Hpet),
             3 => Some(ClocksourceId::AcpiPm),
+            4 => Some(ClocksourceId::Cntvct),
             _ => None,
         }
     }
@@ -418,6 +430,14 @@ impl ClockWriter {
     /// wrap keeps every wrap counted.
     pub fn advance(&mut self, raw: u64) -> Snapshot {
         let d = self.counter.delta(raw, self.last_raw);
+        // On a counter of 56 bits or more, which no gap between reads gets
+        // half way round, a delta past half the range is a read that went
+        // backward, not a wrap: it counts nothing and moves no state, so one
+        // such read cannot pin `ext` or rewind `last_raw`. On a narrower
+        // counter it is a late forward read inside one wrap and counts.
+        if self.counter.width >= 56 && d > self.counter.mask() / 2 + 1 {
+            return self.snapshot();
+        }
         self.ext = self.ext.saturating_add(d);
         self.last_raw = raw & self.counter.mask();
         self.snapshot()
@@ -443,12 +463,17 @@ pub struct Candidates {
     pub tsc_warp_ok: bool,
     pub hpet: Option<Counter>,
     pub pm: Option<Counter>,
+    pub cntvct: Option<Counter>,
 }
 
-/// The clocksource (DESIGN §6.4): the TSC when CPUID reports it invariant
-/// and no warp test saw it step backward, then the HPET main counter, then
-/// the ACPI PM timer. None: no candidate.
+/// The clocksource (DESIGN §6.4): `CNTVCT` when the port has it, else the
+/// TSC when CPUID reports it invariant and no warp test saw it step
+/// backward, then the HPET main counter, then the ACPI PM timer. None:
+/// no candidate.
 pub fn rank(c: &Candidates) -> Option<Counter> {
+    if let Some(v) = c.cntvct {
+        return Some(v);
+    }
     let tsc = c.tsc.filter(|_| c.tsc_invariant && c.tsc_warp_ok);
     tsc.or(c.hpet).or(c.pm)
 }
@@ -496,15 +521,17 @@ impl Payload {
     }
 
     fn store(&self, s: Snapshot) {
-        // Relaxed: ordered by the fences around the sequence bumps.
+        // Relaxed: ordered by the fences around the sequence bumps; pairs with nothing.
         self.id.store(s.id as u64, Ordering::Relaxed);
+        // Relaxed: as `id`; pairs with nothing.
         self.cycles.store(s.cycles, Ordering::Relaxed);
+        // Relaxed: as `id`; pairs with nothing.
         self.ns.store(s.ns, Ordering::Relaxed);
     }
 
     /// The raw words: id, cycles, ns. The id is 0 before the first write.
     fn load(&self) -> (u64, u64, u64) {
-        // Relaxed: ordered by the reader's `fence(Acquire)`.
+        // Relaxed: ordered by the reader's `fence(Acquire)`; pairs with nothing.
         (
             self.id.load(Ordering::Relaxed),
             self.cycles.load(Ordering::Relaxed),
@@ -557,20 +584,23 @@ impl TickClock {
     }
 
     /// One sequence bump. The CPU 0 tick is the only writer, so a Relaxed
-    /// `fetch_add` suffices for the count itself.
+    /// `fetch_add` suffices for the count itself. tests/litmus/seqlock.litmus,
+    /// tests/litmus/seqlock_odd.litmus and tests/litmus/seqlock_odd_llsc.litmus
     fn bump(&self) {
         // The loom models' variants (ROADMAP §10.8): F098's lone AcqRel
         // `fetch_add`, and the bump without its leading fence.
         if variant::pick(Site::SeqlockBumpAcqRel, false, true) {
+            // AcqRel: pairs with the reader's Acquire load of `seq`; F098 shows it is not enough.
             self.seq.fetch_add(1, Ordering::AcqRel);
             return;
         }
         if variant::pick(Site::SeqlockLeadingFence, true, false) {
-            // Release: orders the stores of the copy written before this
-            // bump ahead of it, for a reader whose Acquire load of `seq`
-            // sees the bump and then reads that copy.
+            // Release: pairs with the reader's Acquire load of `seq`; it
+            // orders the stores of the copy written before this bump ahead
+            // of it, for a reader that sees the bump and then reads that copy.
             fence(Ordering::Release);
         }
+        // Relaxed: the one writer's count, which the fences order; pairs with nothing.
         self.seq.fetch_add(1, Ordering::Relaxed);
         // Release: pairs with the reader's `fence(Acquire)` after its
         // payload loads. A reader that loaded any store made after this
@@ -593,6 +623,7 @@ impl TickClock {
     }
 
     /// ISR path. No alloc, no logging. One writer at a time.
+    /// tests/litmus/seqlock.litmus
     pub fn write(&self, s: Snapshot) {
         self.write_copy0(s);
         self.write_copy1(s);
@@ -605,13 +636,16 @@ impl TickClock {
     }
 
     /// The published snapshot; None before the first write. Retries only
-    /// when `seq` changed.
+    /// when `seq` changed. tests/litmus/seqlock.litmus
     pub fn read(&self) -> Option<Snapshot> {
         loop {
+            // Acquire: pairs with the leading Release fence in `bump`.
             let s1 = self.seq.load(Ordering::Acquire);
             let v = self.copy(s1).load();
-            // Payload loads must not move past the seq re-check.
+            // Acquire: pairs with the trailing Release fence in `bump`;
+            // payload loads must not move past the seq re-check.
             fence(Ordering::Acquire);
+            // Relaxed: ordered by the Acquire fence above; pairs with nothing.
             let s2 = self.seq.load(Ordering::Relaxed);
             if s1 == s2 {
                 return decode(v);
@@ -631,11 +665,14 @@ impl TickClock {
         counter: impl Fn(ClocksourceId) -> Option<Counter>,
     ) -> u64 {
         loop {
+            // Acquire: pairs with the leading Release fence in `bump`.
             let s1 = self.seq.load(Ordering::Acquire);
             let v = self.copy(s1).load();
+            // Acquire: pairs with the trailing Release fence in `bump`.
             fence(Ordering::Acquire);
             let snap = decode(v);
             let raw = snap.map(|s| read_raw(s.id));
+            // Relaxed: ordered by the Acquire fence above; pairs with nothing.
             let s2 = self.seq.load(Ordering::Relaxed);
             if s1 != s2 {
                 continue;
@@ -742,6 +779,18 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn tval_never_reads_negative() {
+        let hz = 62_500_000;
+        assert_eq!(tval_for_ns(10_000_000, hz), 625_000);
+        assert_eq!(tval_for_ns(0, hz), 0);
+        // 40 s is 2.5e9 counts, past i32::MAX
+        for ns in [40_000_000_000, u64::MAX] {
+            assert_eq!(tval_for_ns(ns, hz) as i32, i32::MAX);
+        }
+        assert_eq!(tval_for_ns(u64::MAX, u64::MAX) as i32, i32::MAX);
+    }
 
     #[test]
     fn pit_divisor_is_1khz() {
@@ -1177,9 +1226,37 @@ mod tests {
         };
         assert_eq!(ns_at(s, c, 1), u64::MAX);
         assert_eq!(ns_at(s, c, 0), u64::MAX - 5);
+        // A read half the range on is still a forward read and saturates.
         let mut w = ClockWriter::new(c, 0, u64::MAX - 1);
-        assert_eq!(w.advance(u64::MAX).ns, u64::MAX);
+        assert_eq!(w.advance(u64::MAX / 2).ns, u64::MAX);
         assert_eq!(w.advance(u64::MAX - 1).ns, u64::MAX);
+    }
+
+    #[test]
+    fn backward_read_counts_nothing_and_does_not_pin_the_clock() {
+        let c = ghz();
+        let mut w = ClockWriter::new(c, 1_000, 0);
+        // A read 500 cycles behind counts as no time at all.
+        assert_eq!(w.advance(500).ns, 0);
+        // The next forward read counts from the last forward read, not from
+        // the backward one, so `last_raw` was not rewound.
+        assert_eq!(w.advance(1_500).ns, c.scale.to_ns(500));
+        // A 64-bit counter read far behind does not saturate `ext` or move
+        // `last_raw`: the next forward read still counts from 1_500.
+        assert_eq!(w.advance(u64::MAX - 7).ns, c.scale.to_ns(500));
+        assert_eq!(w.advance(1_600).ns, c.scale.to_ns(600));
+    }
+
+    #[test]
+    fn wrap24_late_read_inside_one_wrap_counts_in_full() {
+        let c = Counter::new(ClocksourceId::AcpiPm, PM_TIMER_HZ, 24).unwrap();
+        let wrap = 1u64 << 24;
+        let late = wrap / 4 * 3;
+        let mut w = ClockWriter::new(c, 0x10, 0);
+        // A read three quarters of a wrap on is a late forward read on a
+        // counter this narrow, not a backward one.
+        assert_eq!(w.advance(0x10 + late).ns, c.scale.to_ns(late));
+        assert_eq!(w.advance(0x10 + late + 100).ns, c.scale.to_ns(late + 100));
     }
 
     #[test]
@@ -1244,12 +1321,16 @@ mod tests {
             tsc_warp_ok: true,
             hpet: Some(hpet),
             pm: Some(pm),
+            cntvct: None,
         };
         assert_eq!(rank(&c), Some(tsc));
         c.tsc = None;
         assert_eq!(rank(&c), Some(hpet));
         c.hpet = None;
         assert_eq!(rank(&c), Some(pm));
+        let cntvct = Counter::new(ClocksourceId::Cntvct, 24_000_000, 64).unwrap();
+        c.cntvct = Some(cntvct);
+        assert_eq!(rank(&c), Some(cntvct));
     }
 
     #[test]
@@ -1261,6 +1342,7 @@ mod tests {
             tsc_warp_ok: true,
             hpet: Some(hpet),
             pm: Some(pm),
+            cntvct: None,
         };
         let not_inv = Candidates {
             tsc_invariant: false,
@@ -1289,6 +1371,7 @@ mod tests {
             tsc_warp_ok: true,
             hpet: None,
             pm: None,
+            cntvct: None,
         };
         assert_eq!(rank(&none), None);
         // A TSC that is not invariant is no candidate.
@@ -1317,15 +1400,17 @@ mod tests {
         assert_eq!(ClocksourceId::Tsc.as_str(), "tsc");
         assert_eq!(ClocksourceId::Hpet.as_str(), "hpet");
         assert_eq!(ClocksourceId::AcpiPm.as_str(), "acpi_pm");
+        assert_eq!(ClocksourceId::Cntvct.as_str(), "cntvct");
         for id in [
             ClocksourceId::Tsc,
             ClocksourceId::Hpet,
             ClocksourceId::AcpiPm,
+            ClocksourceId::Cntvct,
         ] {
             assert_eq!(ClocksourceId::from_u64(id as u64), Some(id));
         }
         assert_eq!(ClocksourceId::from_u64(0), None);
-        assert_eq!(ClocksourceId::from_u64(4), None);
+        assert_eq!(ClocksourceId::from_u64(5), None);
     }
 
     #[test]

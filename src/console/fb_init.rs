@@ -12,13 +12,19 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use vibeos::fb::{CHUNK, MAX_CELLS, TextGrid, glyph_origin, pack_bgrx, pixel_offset};
+use vibeos::fb::{
+    CHUNK, FbMemType, MAX_CELLS, TextGrid, fb_mem_type, glyph_origin, pack_bgrx, pixel_offset,
+    span_contains,
+};
 use vibeos::font::{self, FONT_H, FONT_W};
 use vibeos::lock::RANK_DEVICE;
 
 use crate::arch::current::interrupts_enabled;
 use crate::boot::FbInfo;
+use crate::kva_init;
+use crate::paging_init;
 use crate::sync_init::SpinMutex;
+use vibeos::paging::{PhysAddr, VirtAddr};
 
 const BANNER_ROWS: u32 = 1;
 const BG: u32 = pack_bgrx(0x12, 0x12, 0x18);
@@ -59,23 +65,62 @@ pub(super) static CONSOLE: SpinMutex<Console> = SpinMutex::with_rank(
 );
 static FB_PHYS: AtomicU64 = AtomicU64::new(0);
 static FB_LEN: AtomicU64 = AtomicU64::new(0);
+static FB_VIRT: AtomicU64 = AtomicU64::new(0);
 
 /// The framebuffer console is up; the REPL and the in-guest tests ask.
 #[cfg(any(feature = "kernel_tests", feature = "kernel_shell"))]
 pub fn ready() -> bool {
+    // Acquire: pairs with the Release store in `init`.
     READY.load(Ordering::Acquire)
+}
+
+/// Write `color` at `(x, y)`, read it back, put the old pixel back, and
+/// read that back too, under the console lock so no console write lands in
+/// between. Returns `(old, written, restored)`. `None` with no framebuffer
+/// or off its edge. `kernel_tests` only (AGENTS.md rule 9).
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub(crate) fn pixel_round_trip(x: u32, y: u32, color: u32) -> Option<(u32, u32, u32)> {
+    let c = CONSOLE.lock();
+    let fb = c.fb.as_ref()?;
+    let old = fb.get_pixel(x, y)?;
+    fb.put_pixel(x, y, color);
+    let got = fb.get_pixel(x, y);
+    fb.put_pixel(x, y, old);
+    let restored = fb.get_pixel(x, y);
+    Some((old, got?, restored?))
 }
 
 /// Physical `[base, base+len)` of the console framebuffer, if any.
 /// Atomically readable so PCI BAR mapping can skip a UC patch without
 /// taking RANK_DEVICE (ioremap needs PT, which ranks below DEVICE).
 pub fn overlaps_phys(phys: u64, len: u64) -> bool {
+    // Acquire: pairs with the Release store in `init`.
     let span = FB_LEN.load(Ordering::Acquire);
     if span == 0 || len == 0 {
         return false;
     }
+    // Acquire: pairs with the Release store in `init`.
     let base = FB_PHYS.load(Ordering::Acquire);
     phys < base.saturating_add(span) && base < phys.saturating_add(len)
+}
+
+/// Kernel VA of `[phys, phys + len)` inside the console framebuffer
+/// mapping, if the whole range lies in the framebuffer's span. A range that
+/// runs past the span gets `None`: the mapping ends there.
+pub fn va_for_phys(phys: u64, len: u64) -> Option<u64> {
+    // Acquire: pairs with the Release store in `init`.
+    let span = FB_LEN.load(Ordering::Acquire);
+    if span == 0 {
+        return None;
+    }
+    // Acquire: pairs with the Release store in `init`.
+    let base = FB_PHYS.load(Ordering::Acquire);
+    if !span_contains(base, span, phys, len) {
+        return None;
+    }
+    // Acquire: pairs with the Release store in `init`.
+    let virt = FB_VIRT.load(Ordering::Acquire);
+    virt.checked_add(phys.checked_sub(base)?)
 }
 
 /// Attach the first framebuffer [`Fb::new`] accepts.
@@ -86,6 +131,7 @@ pub fn init() -> bool {
     else {
         return false;
     };
+    let base = fb.base;
     {
         let mut c = CONSOLE.lock();
         if !c.grid.configure(fb.width, fb.height, BANNER_ROWS) {
@@ -97,10 +143,52 @@ pub fn init() -> bool {
         fb.paint_string(0, 0, BANNER, BANNER_FG, BANNER_BG);
         c.fb = Some(fb);
     }
+    // Release: pairs with the Acquire load in `overlaps_phys`.
     FB_PHYS.store(info.phys, Ordering::Release);
+    // Release: pairs with the Acquire load in `va_for_phys`.
+    FB_VIRT.store(base, Ordering::Release);
+    // Release: pairs with the Acquire load in `overlaps_phys`; publishes `FB_PHYS` too.
     FB_LEN.store(info.size, Ordering::Release);
+    // Release: pairs with the Acquire loads in `ready` and `write`.
     READY.store(true, Ordering::Release);
     true
+}
+
+fn map_fb(i: &FbInfo) -> Option<u64> {
+    let mem = fb_mem_type(crate::machine_init::info(), i.phys, i.size);
+    // `PWT` alone is write-through on x86_64, not non-cacheable, and no x86
+    // firmware table names PCIe windows (`vibeos::fb::fb_mem_type`).
+    debug_assert!(
+        cfg!(target_arch = "aarch64") || mem == FbMemType::WriteBack,
+        "fb: non-cacheable framebuffer type on x86_64"
+    );
+    // A framebuffer in a PCIe window is a BAR the physmap never covers, and
+    // a write-back physmap alias of it would be the wrong type anyway.
+    if mem == FbMemType::WriteBack
+        && let Some(va) = hhdm_fb(i)
+    {
+        return Some(va);
+    }
+    // SAFETY: invariant I17: the framebuffer is RAM or a PCIe BAR the
+    // bootloader already scanned, mapped at the one type `fb_mem_type`
+    // chose for it, and no other mapping of a BAR exists; established
+    // `vibeos::fb::fb_mem_type`.
+    unsafe { kva_init::memremap(PhysAddr(i.phys), i.size, mem.flags()) }.map(|v| v.as_u64())
+}
+
+/// The framebuffer's physmap VA when every page of it is mapped there.
+fn hhdm_fb(i: &FbInfo) -> Option<u64> {
+    let hhdm = paging_init::hhdm_offset();
+    if !paging_init::phys_mapped(i.phys) || paging_init::translate(VirtAddr(i.virt)).is_none() {
+        return None;
+    }
+    let end = i.phys.saturating_add(i.size);
+    let mut p = i.phys & !(4096 - 1);
+    while p < end {
+        paging_init::translate(VirtAddr(hhdm.wrapping_add(p)))?;
+        p = p.saturating_add(4096);
+    }
+    Some(hhdm.wrapping_add(i.phys))
 }
 
 impl Fb {
@@ -109,8 +197,12 @@ impl Fb {
         if i.bpp != 32 || i.width < FONT_W || i.height < FONT_H * (BANNER_ROWS + 1) || i.pitch < 4 {
             return None;
         }
+        let Some(base) = map_fb(i) else {
+            crate::marker!("vibeOS: fb: unreachable");
+            return None;
+        };
         Some(Self {
-            base: i.virt,
+            base,
             width: i.width,
             height: i.height,
             pitch: i.pitch,
@@ -219,6 +311,10 @@ fn redraw() {
         let Some(p) = c.grid.next_piece() else {
             return;
         };
+        #[cfg_attr(
+            not(all(feature = "kernel_tests", target_arch = "x86_64")),
+            allow(unused_variables, unused_assignments)
+        )]
         let mut painted = 0usize;
         if let Some(fb) = c.fb.as_ref() {
             let cols = c.grid.cols() as usize;
@@ -238,8 +334,9 @@ fn redraw() {
                 }
                 i += 1;
             }
+            let _ = painted;
         }
-        #[cfg(feature = "kernel_tests")]
+        #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
         testing::on_piece(painted * vibeos::fb::CELL_BYTES);
         #[cfg(not(feature = "kernel_tests"))]
         let _ = painted;
@@ -250,6 +347,7 @@ fn redraw() {
 /// for the grid; with IF=1 the redraw follows each chunk, and an empty
 /// write only redraws.
 pub fn write(bytes: &[u8]) {
+    // Acquire: pairs with the Release store in `init`.
     if !READY.load(Ordering::Acquire) {
         return;
     }
@@ -258,7 +356,7 @@ pub fn write(bytes: &[u8]) {
         let (chunk, tail) = rest.split_at(rest.len().min(CHUNK));
         {
             let _st = CONSOLE.lock().grid.write_chunk(chunk);
-            #[cfg(feature = "kernel_tests")]
+            #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
             testing::on_chunk(_st);
         }
         if interrupts_enabled() {
@@ -272,7 +370,7 @@ pub fn write(bytes: &[u8]) {
 }
 
 /// In-guest test counters. `kernel_tests` only (AGENTS.md rule 9).
-#[cfg(feature = "kernel_tests")]
+#[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -285,46 +383,61 @@ pub(crate) mod testing {
     static PIECES: AtomicU64 = AtomicU64::new(0);
 
     pub(crate) fn reset() {
+        // Release: pairs with the Acquire load in `grid_holds`.
         HOLDS.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `max_piece_bytes`.
         MAX_PIECE_BYTES.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `max_chunk_scrolls`.
         MAX_CHUNK_SCROLLS.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `scrolls`.
         SCROLLS.store(0, Ordering::Release);
+        // Release: pairs with the Acquire load in `pieces`.
         PIECES.store(0, Ordering::Release);
     }
 
     /// Redraw pieces taken, since [`reset`].
     pub(crate) fn pieces() -> u64 {
+        // Acquire: pairs with the Release store in `reset` and the AcqRel add in `on_piece`.
         PIECES.load(Ordering::Acquire)
     }
 
     /// Console-lock holds that updated the grid, since [`reset`].
     pub(crate) fn grid_holds() -> u64 {
+        // Acquire: pairs with the Release store in `reset` and the AcqRel add in `on_chunk`.
         HOLDS.load(Ordering::Acquire)
     }
 
     /// The most framebuffer bytes one redraw piece wrote, since [`reset`].
     pub(crate) fn max_piece_bytes() -> u64 {
+        // Acquire: pairs with the Release store in `reset` and the AcqRel max in `on_piece`.
         MAX_PIECE_BYTES.load(Ordering::Acquire)
     }
 
     /// The most scrolls one chunk made.
     pub(crate) fn max_chunk_scrolls() -> u64 {
+        // Acquire: pairs with the Release store in `reset` and the AcqRel max in `on_chunk`.
         MAX_CHUNK_SCROLLS.load(Ordering::Acquire)
     }
 
     /// Chunks that scrolled.
     pub(crate) fn scrolls() -> u64 {
+        // Acquire: pairs with the Release store in `reset` and the AcqRel add in `on_chunk`.
         SCROLLS.load(Ordering::Acquire)
     }
 
     pub(super) fn on_chunk(st: ChunkStats) {
+        // AcqRel: pairs with the Acquire load in `grid_holds`.
         HOLDS.fetch_add(1, Ordering::AcqRel);
+        // AcqRel: pairs with the Acquire load in `max_chunk_scrolls`.
         MAX_CHUNK_SCROLLS.fetch_max(u64::from(st.scrolls), Ordering::AcqRel);
+        // AcqRel: pairs with the Acquire load in `scrolls`.
         SCROLLS.fetch_add(u64::from(st.scrolls), Ordering::AcqRel);
     }
 
     pub(super) fn on_piece(bytes: usize) {
+        // AcqRel: pairs with the Acquire load in `pieces`.
         PIECES.fetch_add(1, Ordering::AcqRel);
+        // AcqRel: pairs with the Acquire load in `max_piece_bytes`.
         MAX_PIECE_BYTES.fetch_max(bytes as u64, Ordering::AcqRel);
     }
 }

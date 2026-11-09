@@ -14,6 +14,7 @@ mod runtime;
 mod segs;
 mod space;
 mod sysdecl;
+mod tls;
 mod uaccess;
 mod waits;
 
@@ -30,13 +31,14 @@ pub(crate) use runtime::*;
 pub(crate) use segs::*;
 pub(crate) use space::*;
 pub(crate) use sysdecl::*;
+pub(crate) use tls::*;
+#[cfg(target_arch = "x86_64")]
 pub(crate) use uaccess::*;
 pub(crate) use waits::*;
 
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
-    #[cfg(target_arch = "x86_64")]
     test(
         "addrspace_map_unmap_teardown",
         test_addrspace_map_unmap_teardown,
@@ -63,7 +65,10 @@ pub(crate) const TESTS: &[Test] = &[
     test("user_selectors", test_user_selectors),
     test("user_ds_fork", test_user_ds_fork),
     test("user_ds_switch", test_user_ds_switch).deadline(30_000),
+    test("tls_survive", test_tls_survive).deadline(30_000),
+    test("tls_yield", test_tls_yield).deadline(30_000),
     test("exec_top_page_enoexec", test_exec_top_page_enoexec).deadline(30_000),
+    #[cfg(target_arch = "x86_64")]
     test("noncanonical_rip_sigsegv", test_noncanonical_rip_sigsegv).deadline(30_000),
     test("exec_huge_memsz", test_exec_huge_memsz).deadline(60_000),
     test("exec_large_elf_from_file", test_exec_large_elf_from_file).deadline(60_000),
@@ -81,6 +86,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("signal_on_return", test_signal_on_return).deadline(30_000),
     test("exit_work_ipi", test_exit_work_ipi).deadline(30_000),
     test("syscall_body_if_on", test_syscall_body_if_on).deadline(30_000),
+    #[cfg(target_arch = "aarch64")]
+    test("el0_fault_body_yield", test_el0_fault_body_yield).deadline(30_000),
     test("kill_line_whole", test_kill_line_whole).deadline(30_000),
     test("kalloc_fail_after_hook", test_kalloc_fail_after_hook),
     test("kalloc_nomem", test_kalloc_nomem).deadline(120_000),
@@ -92,7 +99,9 @@ pub(crate) const TESTS: &[Test] = &[
     test("user_tf_repin", test_user_tf_repin).deadline(60_000),
     test("user_fork_wait_stall", user_fork_wait_stall),
     test("pid_not_reused_after_reap", pid_not_reused_after_reap),
+    #[cfg(target_arch = "x86_64")]
     test("uaccess_syscall_copies", test_uaccess_syscall_copies).deadline(30_000),
+    #[cfg(target_arch = "x86_64")]
     test("uaccess_readonly_efault", test_uaccess_readonly_efault).deadline(30_000),
     test("user_runtime", user_runtime),
     test("syscall_ptr_decl_efault", syscall_ptr_decl_efault),

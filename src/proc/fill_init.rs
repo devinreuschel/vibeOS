@@ -11,9 +11,11 @@
 //! the batch's frames through the physmap with `PT` dropped and IF on.
 
 use vibeos::addr_space::{AsError, Backing, UserPerms};
+use vibeos::arch::Barriers;
 use vibeos::proc::fill::{self, Batch, FillError, PtHold};
 
-use crate::addr_space_init::{self, NewSpace, Space};
+use crate::addr_space_init::{self, Mm, NewSpace, Space};
+use crate::arch::current::Arch;
 use crate::paging_init;
 
 /// `PT`, as the drivers take it: one hold per batch.
@@ -73,6 +75,31 @@ pub fn write(space: &mut NewSpace, va: u64, src: &[u8]) -> Result<(), FillError>
     fill::write(&*mm, &mut KernelPt, va, src)
 }
 
+/// Make `[va, va+len)` of `space` fetchable once its bytes are final: the
+/// port's I-cache maintenance over each page's physmap alias, one pass per
+/// page. Runs where a page becomes executable: after the loader and `fork`
+/// fill, and in `mmap`.
+pub fn sync_code(space: &Mm, va: u64, len: u64) -> Result<(), FillError> {
+    assert_if_on();
+    fill::sync_code(space, &mut KernelPt, va, len, |alias, n| {
+        // SAFETY: `alias` is a user leaf's frame through the physmap, which
+        // is mapped and readable, established by `vibeos::proc::fill::sync_code`.
+        unsafe { Arch::sync_icache(alias as *const u8, n as usize) }
+    })
+}
+
+/// [`sync_code`] over every executable region of the new `space`.
+pub fn sync_exec(space: &NewSpace) -> Result<(), FillError> {
+    let mm = space.mm();
+    for r in mm
+        .regions()
+        .filter(|r| r.perms.exec && r.backing == Backing::Anonymous)
+    {
+        sync_code(&mm, r.start, r.len)?;
+    }
+    Ok(())
+}
+
 /// `fork`'s copy of `src`: a new space with its regions, break and bytes
 /// in new frames. Takes `src`'s `mm` lock and then the new space's; nothing
 /// else reaches an unpublished space, so the pair cannot deadlock. A
@@ -95,6 +122,7 @@ pub fn clone_full(src: &Space) -> Result<NewSpace, FillError> {
     drop(to);
     drop(from);
     drop(core);
+    sync_exec(&dst)?;
     Ok(dst)
 }
 
@@ -125,16 +153,20 @@ pub(crate) mod testing {
     }
 
     pub(super) fn note_hold(b: Batch) {
+        // Relaxed: a statistic; pairs with nothing.
         HOLDS.fetch_add(1, Ordering::Relaxed);
+        // Relaxed: a statistic; pairs with nothing.
         MAX_PAGES.fetch_max(b.pages as u64, Ordering::Relaxed);
         let last = b.va + (b.pages.saturating_sub(1) as u64) * vibeos::paging::PAGE_SIZE_4K;
         if b.va / LEAF_SPAN != last / LEAF_SPAN {
+            // Relaxed: a statistic; pairs with nothing.
             CROSSED.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     pub(super) fn note_boundary(if_on: bool) {
         if !if_on {
+            // Relaxed: a statistic; pairs with nothing.
             IF_OFF.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -142,11 +174,13 @@ pub(crate) mod testing {
     /// Zero the counters.
     pub(crate) fn reset() {
         for c in [&HOLDS, &MAX_PAGES, &CROSSED, &IF_OFF] {
+            // Relaxed: statistics; pairs with nothing.
             c.store(0, Ordering::Relaxed);
         }
     }
 
     pub(crate) fn stats() -> Stats {
+        // Relaxed: statistics; pairs with nothing.
         Stats {
             holds: HOLDS.load(Ordering::Relaxed),
             max_pages: MAX_PAGES.load(Ordering::Relaxed),

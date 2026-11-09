@@ -13,6 +13,7 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from scripts import gen_notices
 from scripts.gen_notices import Crate, NoticeError, Notices
@@ -20,27 +21,27 @@ from tests.harness.gitfixture import TempRepo
 
 COPYRIGHT = "Copy" + "right"
 CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
-COMMIT = "ee5d29cd0a8034612dcd1df3f00052480db785c5"
+COMMIT = "c82c3708b3304be806b2492dc2ce34e219c6f989"
 VV = ("rustc 1.2.3-nightly (abc 2026-01-01)\nbinary: rustc\ncommit-hash: abcdef\n"
       "host: x86_64-unknown-linux-gnu\nrelease: 1.2.3-nightly\n")
 
 THIRDPARTY = """# 3rd Party Software Acknowledgments
 
-- [tinf](https://github.com/jibsen/tinf) (Zlib) is used in early x86 BIOS
-stages.
+- [pdgzip](https://github.com/iczelia/pdgzip) (0BSD) is used for gzip
+decompression.
 
 - [Flanterm](https://example.invalid/Flanterm)
 (BSD-2-Clause) is used for text.
     - an indented sub-item
 """
 
-MANIFEST = f"""release = "v9.6.7"
-binary_commit = "{COMMIT}"
+MANIFEST = f"""release = "v12.9.1"
+commit = "{COMMIT}"
 
 [[project]]
-name = "tinf"
-license = "Zlib"
-files = ["tinf/LICENSE"]
+name = "pdgzip"
+license = "0BSD"
+files = ["pdgzip/LICENSE"]
 
 [[project]]
 name = "Flanterm"
@@ -81,14 +82,14 @@ class Fixture:
         self.registry = self.tmp / "home" / ".cargo" / "registry" / "src" / "index"
         self.sysroot = self.tmp / "home" / ".rustup" / "toolchains" / "t"
         self.repo.commit("t", {
-            "setup.sh": ('LIMINE_TAG="${LIMINE_TAG:-v9.6.7-binary}"\n'
+            "setup.sh": ('LIMINE_TAG="${LIMINE_TAG:-v12.9.1}"\n'
                          f'LIMINE_COMMIT="${{LIMINE_COMMIT:-{COMMIT}}}"\n'),
             "LICENSE": f"MIT License\n\n{COPYRIGHT} (c) vibeOS\n",
             "src/main.rs": "fn main() {}\n",
             "third_party/limine/LICENSE": f"{COPYRIGHT} Limine\n",
             "third_party/limine/3RDPARTY.md": THIRDPARTY,
             "third_party/limine/MANIFEST.toml": MANIFEST,
-            "third_party/limine/tinf/LICENSE": "zlib text\n",
+            "third_party/limine/pdgzip/LICENSE": "0bsd text\n",
             "third_party/limine/flanterm/LICENSE": "bsd text\n",
         })
         write(self.sysroot / "share/doc/rust", {
@@ -264,18 +265,18 @@ class TestLimine(FixtureCase):
     def test_real_fixture_passes(self) -> None:
         self.assertEqual(gen_notices.check_limine(self.f.root), [])
         self.assertEqual(gen_notices.parse_3rdparty(THIRDPARTY),
-                         [("tinf", "Zlib"), ("Flanterm", "BSD-2-Clause")])
+                         [("pdgzip", "0BSD"), ("Flanterm", "BSD-2-Clause")])
 
     def test_limine_release_mismatch_fails(self) -> None:
         write(self.f.root, {"third_party/limine/MANIFEST.toml":
-                            MANIFEST.replace('"v9.6.7"', '"v9.6.6"')})
+                            MANIFEST.replace('"v12.9.1"', '"v12.9.0"')})
         probs = gen_notices.check_limine(self.f.root)
         self.assertEqual(len(probs), 1, probs)
-        self.assertIn("release 'v9.6.6', but setup.sh's LIMINE_TAG v9.6.7-binary", probs[0])
+        self.assertIn("release 'v12.9.0', but setup.sh's LIMINE_TAG is v12.9.1", probs[0])
 
     def test_limine_pins_read_from_defaults_not_environment(self) -> None:
         old = os.environ.get("LIMINE_TAG")
-        os.environ["LIMINE_TAG"] = "v1.0.0-binary"
+        os.environ["LIMINE_TAG"] = "v1.0.0"
         try:
             self.assertEqual(gen_notices.check_limine(self.f.root), [])
         finally:
@@ -288,17 +289,17 @@ class TestLimine(FixtureCase):
         write(self.f.root, {"third_party/limine/MANIFEST.toml": MANIFEST.replace(COMMIT, "0" * 40)})
         probs = gen_notices.check_limine(self.f.root)
         self.assertEqual(len(probs), 1, probs)
-        self.assertIn("binary_commit", probs[0])
+        self.assertIn("commit '0000", probs[0])
 
-    def test_limine_license_differs_from_clone_fails(self) -> None:
-        clone = self.f.tmp / "limine"
-        write(clone, {"LICENSE": f"{COPYRIGHT} Limine\n"})
-        self.assertEqual(gen_notices.check_limine(self.f.root, clone), [])
-        write(clone, {"LICENSE": f"{COPYRIGHT} Limine, newer\n"})
-        probs = gen_notices.check_limine(self.f.root, clone)
+    def test_limine_license_differs_from_unpacked_fails(self) -> None:
+        unpacked = self.f.tmp / "limine"
+        write(unpacked, {"LICENSE": f"{COPYRIGHT} Limine\n"})
+        self.assertEqual(gen_notices.check_limine(self.f.root, unpacked), [])
+        write(unpacked, {"LICENSE": f"{COPYRIGHT} Limine, newer\n"})
+        probs = gen_notices.check_limine(self.f.root, unpacked)
         self.assertEqual(len(probs), 1, probs)
-        self.assertIn("differs from the Limine clone's LICENSE", probs[0])
-        # A missing clone (the check job runs no setup.sh) is no problem.
+        self.assertIn("differs from the unpacked Limine's LICENSE", probs[0])
+        # A missing directory (the check job runs no setup.sh) is no problem.
         self.assertEqual(gen_notices.check_limine(self.f.root, self.f.tmp / "none"), [])
 
     def test_3rdparty_entry_without_manifest_project_fails(self) -> None:
@@ -312,10 +313,10 @@ class TestLimine(FixtureCase):
             self.f.collect()
 
     def test_project_file_missing_fails(self) -> None:
-        (self.f.root / "third_party/limine/tinf/LICENSE").unlink()
+        (self.f.root / "third_party/limine/pdgzip/LICENSE").unlink()
         probs = gen_notices.check_limine(self.f.root)
         self.assertEqual(len(probs), 1, probs)
-        self.assertIn("tinf/LICENSE: missing", probs[0])
+        self.assertIn("pdgzip/LICENSE: missing", probs[0])
 
 
 class TestOutput(FixtureCase):
@@ -387,6 +388,37 @@ class TestRealTree(unittest.TestCase):
         self.assertNotIn(str(Path.home()), text)
         for p in (".cargo/registry", ".rustup"):
             self.assertNotIn(p, text)
+
+
+class TestArch(unittest.TestCase):
+    """`--arch` picks the shipped roots and reaches `generate`, and mkiso.sh passes it."""
+
+    def test_aarch64_roots_are_the_shipped_targets(self) -> None:
+        self.assertEqual(gen_notices.ROOTS["aarch64"], (
+            ("vibeos", "aarch64-unknown-none-softfloat"),
+            ("vibeos-user", "aarch64-unknown-linux-musl"),
+        ))
+
+    def test_main_passes_the_arch_to_generate(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "notices.txt"
+            with mock.patch.object(gen_notices, "generate", return_value="text\n") as gen:
+                self.assertEqual(gen_notices.main(["--out", str(out), "--arch", "aarch64"]), 0)
+            self.assertEqual(gen.call_args.args[1], "aarch64")
+            self.assertEqual(out.read_text(encoding="utf-8"), "text\n")
+
+    def test_mkiso_passes_the_arch(self) -> None:
+        lines = (gen_notices.ROOT / "scripts/mkiso.sh").read_text(encoding="utf-8").splitlines()
+        i = next(k for k, ln in enumerate(lines) if "gen_notices.py" in ln)
+        self.assertIn('--arch "${VIBEOS_ARCH:-x86_64}"', " ".join(lines[i:i + 2]))
+
+
+class TestRealTreeArch(unittest.TestCase):
+    def test_aarch64_real_tree_header(self) -> None:
+        root = gen_notices.ROOT
+        text = gen_notices.generate(root, "aarch64", root / "limine")
+        self.assertIn("== Rust crates (aarch64) ==", text)
+        self.assertNotIn("== Rust crates (x86_64) ==", text)
 
 
 if __name__ == "__main__":

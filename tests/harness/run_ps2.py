@@ -26,7 +26,7 @@ from tests.harness.harness import (
 
 def main() -> int:
     env = env_config(default_iso=default_iso(), default_timeout=BOOT_ALLOWANCE_S)
-    res = results.Results(env.tier)
+    res = results.Results(env.tier, env.arch)
     cfg = env.qemu()
     try:
         inp = run_qemu_console_input(cfg, timeout_s=env.timeout)

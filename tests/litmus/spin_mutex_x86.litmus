@@ -1,0 +1,13 @@
+X86 vibeos-spin-mutex-x86
+(* Unlock is a plain store. herd's X86 model does not implement
+   CMPXCHG, so the acquire is XCHG of 1, a full barrier as lock
+   cmpxchg is. Observing the unlock and still reading the old
+   critical-section store is forbidden. No MFENCE. *)
+{
+[locked]=1;
+}
+ P0                 | P1                 ;
+ MOV [data],$1      | MOV EAX,$1         ;
+ MOV [locked],$0    | XCHG EAX,[locked]  ;
+                    | MOV ECX,[data]     ;
+exists (1:EAX=0 /\ 1:ECX=0)

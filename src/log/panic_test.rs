@@ -2,6 +2,68 @@
 //! whose e2e mode requires one clean dump and the panic exit. No
 //! published ISO enables them (AGENTS.md rule 9).
 
+/// F136: an undefined instruction right after the Limine handshake, before
+/// `arch::idt::init` on x86_64 and the full vector table on aarch64, so the
+/// early handler reports it (ROADMAP §11.1).
+#[cfg(feature = "early_fault_test")]
+pub(crate) fn early_fault_trip() {
+    crate::marker!("vibeOS: boot: early-fault armed");
+    crate::arch::cpu::undefined_instruction();
+}
+
+/// ROADMAP §11.3: a kernel thread recurses until it overflows its guarded
+/// stack, with no `catch` armed, so the overflow path prints its line and
+/// halts: x86_64's `#DF` handler, since the `#PF` frame push lands in the
+/// guard too, and aarch64's vector entry, whose stack-bit test switches to
+/// this CPU's overflow stack. The bootstrap thread parks for good, so
+/// nothing else of boot runs after the armed line.
+#[cfg(feature = "kstack_overflow_test")]
+#[allow(
+    clippy::panic,
+    reason = "the test-only kstack_overflow_test feature: a failed spawn is a failed trip"
+)]
+pub(crate) fn kstack_overflow_trip() {
+    if let Err(e) = crate::thread_init::spawn("kstack-overflow", overflow_thread) {
+        panic!("kstack-overflow: spawn failed: {}", e.as_str());
+    }
+    loop {
+        crate::thread_init::park(None);
+    }
+}
+
+/// Print the running thread's guard and TCB, then overflow its stack.
+#[cfg(feature = "kstack_overflow_test")]
+fn overflow_thread() {
+    let t = crate::arch::current_tcb();
+    // SAFETY: `t` is this CPU's running TCB, and its `stack` is written only
+    // by `thread_init::spawn_inner` and `thread_init::thread_exit`, neither
+    // of which runs for it while it runs here; we only read it. established
+    // by `thread_init::switch_now`.
+    let span = unsafe { t.as_ref() }
+        .and_then(|t| t.stack.as_ref())
+        .map(|s| (s.guard().as_u64(), s.base().as_u64()));
+    let (guard, base) = span.unwrap_or((0, 0));
+    crate::marker!(
+        "vibeOS: boot: kstack-overflow armed guard={:#x} base={:#x} thread={:#x}",
+        guard,
+        base,
+        t as u64
+    );
+    core::hint::black_box(recurse(0));
+}
+
+/// One 512-byte frame per call, kept by `black_box` and by the add after
+/// the call, so neither inlining nor a tail call removes the descent.
+#[cfg(feature = "kstack_overflow_test")]
+#[inline(never)]
+fn recurse(depth: u64) -> u64 {
+    let frame = core::hint::black_box([depth; 64]);
+    if depth == u64::MAX {
+        return frame[0];
+    }
+    recurse(depth.wrapping_add(1)).wrapping_add(core::hint::black_box(frame[63]))
+}
+
 /// F071: underflow `irq_nest` through the decrement `InterruptGuard::drop`
 /// uses, with this CPU's depth at 0. The underflow's `assert!` panics, and
 /// with the depth wrapped every later guard fails it again, so the dump
@@ -26,18 +88,22 @@ pub(crate) use stop::{after_panic_message, stop_trip};
 mod stop {
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+    #[cfg(target_arch = "x86_64")]
     use vibeos::apic::IpiMode;
     use vibeos::lock::RANK_DEVICE;
 
     use crate::arch::current;
     use crate::sync_init::SpinMutex;
-    use crate::{apic_init, ipi_init, per_cpu_init, thread_init, time_init};
+    #[cfg(target_arch = "x86_64")]
+    use crate::{apic_init, ipi_init};
+    use crate::{per_cpu_init, thread_init, time_init};
 
     /// CPUs the scenario needs: the panicking pair and one per other way.
     const CPUS: u32 = 5;
     /// How long CPU 0 waits for the four threads to be in place.
     const READY_MS: u64 = 10_000;
     /// How long the owner waits for its own NMI to come back.
+    #[cfg(target_arch = "x86_64")]
     const SELF_NMI_MS: u64 = 10;
     /// CPU 2's lines before it counts as in place.
     const LINES_BEFORE_READY: u64 = 3;
@@ -107,6 +173,7 @@ mod stop {
         enter();
         ready(4);
         loop {
+            // Relaxed: a count; pairs with nothing.
             SPIN.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -144,13 +211,14 @@ mod stop {
         // After the spawns, which take the heap and SCHED locks, ranked
         // below `HELD`.
         let _held = HELD.lock();
+        // Release: pairs with the Acquire load in `enter`.
         GATE.store(true, Ordering::Release);
         // Acquire: pairs with each thread's Release store in `ready`.
         let all = || READY.iter().skip(1).all(|r| r.load(Ordering::Acquire));
         if !wait_ms(READY_MS, all) {
             panic!("panic-stop: cpus 1-4 not in place");
         }
-        // Release: CPU 1 panics once it sees it.
+        // Release: pairs with the Acquire load in `cpu1`.
         GO.store(true, Ordering::Release);
         panic!("panic-stop: cpu 0");
     }
@@ -159,18 +227,24 @@ mod stop {
     /// (a physical destination: the self shorthand takes Fixed delivery
     /// only), then the owner line once the NMI body returned.
     pub(crate) fn after_panic_message() {
-        let before = ipi_init::OWNER_NMI_RETURNS.load(Ordering::Relaxed);
-        let Some(me) = per_cpu_init::cpu(crate::arch::cpu_id_hint()) else {
-            return;
-        };
-        let apic = me.apic_id.load(Ordering::Relaxed) as u8;
-        // A refused NMI leaves out the owner line, which fails the run.
-        if apic_init::send_ipi(apic, 0, IpiMode::Nmi).is_err() {
-            return;
-        }
-        let back = || ipi_init::OWNER_NMI_RETURNS.load(Ordering::Relaxed) != before;
-        if wait_ms(SELF_NMI_MS, back) {
-            crate::serial::raw::write_owner(b"vibeOS: panic_stop: owner nmi returned");
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Relaxed: a count; pairs with nothing.
+            let before = ipi_init::OWNER_NMI_RETURNS.load(Ordering::Relaxed);
+            let Some(me) = per_cpu_init::cpu(crate::arch::cpu_id_hint()) else {
+                return;
+            };
+            // Relaxed: set before the CPU starts, fixed while it runs; pairs with nothing.
+            let apic = me.apic_id.load(Ordering::Relaxed) as u8;
+            // A refused NMI leaves out the owner line, which fails the run.
+            if apic_init::send_ipi(apic, 0, IpiMode::Nmi).is_err() {
+                return;
+            }
+            // Relaxed: a count; pairs with nothing.
+            let back = || ipi_init::OWNER_NMI_RETURNS.load(Ordering::Relaxed) != before;
+            if wait_ms(SELF_NMI_MS, back) {
+                crate::serial::raw::write_owner(b"vibeOS: panic_stop: owner nmi returned");
+            }
         }
     }
 }

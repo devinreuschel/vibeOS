@@ -1,9 +1,9 @@
 //! Entropy source selection for `/dev/random`. S1.
 //!
-//! Hardware fill is a hook the kernel installs (`entropy_init`): virtio-rng,
-//! then `RDRAND`, and nothing else until ROADMAP §13.10's CSPRNG. Host tests
-//! and the pre-hook boot path leave it unset, and a read then gets no bytes
-//! (ROADMAP §10.12, F134).
+//! Hardware fill is a hook the kernel installs (`entropy_init`): virtio-rng
+//! then `RDRAND` on x86_64, `RNDR` then virtio-rng on aarch64, and nothing
+//! else until ROADMAP §13.10's CSPRNG. Host tests and the pre-hook boot path
+//! leave it unset, and a read then gets no bytes (ROADMAP §10.12, F134).
 
 // Statics only, so `core`'s atomics from the seam's statics re-export
 // (C-ATOMICS).
@@ -14,6 +14,7 @@ use crate::atomic::statics::{AtomicPtr, AtomicU8, Ordering};
 pub enum Source {
     VirtioRng = 0,
     RdRand = 1,
+    Rndr = 2,
 }
 
 impl Source {
@@ -21,13 +22,14 @@ impl Source {
         match v {
             0 => Some(Self::VirtioRng),
             1 => Some(Self::RdRand),
+            2 => Some(Self::Rndr),
             _ => None,
         }
     }
 }
 
 /// Fill a buffer from hardware; returns how many bytes it wrote and the
-/// source that supplied them (virtio-rng when it supplied any), `None` when
+/// first source in the kernel's order that supplied any of them, `None` when
 /// it wrote none.
 pub type HwFill = fn(&mut [u8]) -> (usize, Option<Source>);
 
@@ -38,22 +40,26 @@ static HW: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 static LAST: AtomicU8 = AtomicU8::new(NO_SOURCE);
 
 pub fn set_hw_fill(f: HwFill) {
+    // Release: pairs with the Acquire load in `hw_fill`.
     HW.store(f as *mut (), Ordering::Release);
 }
 
 /// The source of the last hardware fill that returned bytes; `None` before
 /// the first.
 pub fn last_source() -> Option<Source> {
+    // Acquire: pairs with the Release store in `set_last_source`.
     Source::from_u8(LAST.load(Ordering::Acquire))
 }
 
 pub fn set_last_source(src: Source) {
+    // Release: pairs with the Acquire load in `last_source`.
     LAST.store(src as u8, Ordering::Release);
 }
 
-/// Fill from virtio-rng and RDRAND; returns how many bytes it wrote. `0`
-/// means the hook is missing or both sources are dry.
+/// Fill from the hardware sources; returns how many bytes it wrote. `0`
+/// means the hook is missing or every source is dry.
 pub fn hw_fill(buf: &mut [u8]) -> usize {
+    // Acquire: pairs with the Release store in `set_hw_fill`.
     let p = HW.load(Ordering::Acquire);
     if p.is_null() {
         return 0;
@@ -120,8 +126,10 @@ mod tests {
     fn source_roundtrip() {
         assert_eq!(Source::from_u8(0), Some(Source::VirtioRng));
         assert_eq!(Source::from_u8(1), Some(Source::RdRand));
-        assert_eq!(Source::from_u8(2), None);
+        assert_eq!(Source::from_u8(2), Some(Source::Rndr));
+        assert_eq!(Source::from_u8(3), None);
         assert_eq!(Source::from_u8(u8::MAX), None);
         assert_eq!(Source::from_u8(Source::RdRand as u8), Some(Source::RdRand));
+        assert_eq!(Source::from_u8(Source::Rndr as u8), Some(Source::Rndr));
     }
 }

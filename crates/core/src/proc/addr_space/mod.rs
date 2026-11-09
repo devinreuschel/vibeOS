@@ -488,6 +488,8 @@ impl<A: PageTable, C> AddressSpace<A, C> {
             unsafe { self.unmap_pages(va, mapped, alloc, &mut |_| {})? };
             return Err(err);
         }
+        // The Fresh leaves are published before the caller runs them.
+        self.mapper.publish_leaves();
         Ok(())
     }
 
@@ -512,7 +514,7 @@ impl<A: PageTable, C> AddressSpace<A, C> {
             let page = VirtAddr(va + off);
             match self.mapper.translate(page) {
                 None => {}
-                Some((_, PageSize::Size2M, _)) => {
+                Some((_, PageSize::Size2M | PageSize::Size1G, _)) => {
                     return Err(AsError::Map(MapError::PageSizeMismatch));
                 }
                 Some((_, PageSize::Size4K, _)) => {

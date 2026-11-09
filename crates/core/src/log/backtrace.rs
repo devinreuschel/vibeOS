@@ -3,7 +3,8 @@
 //!
 //! The walk follows `rbp` only into a known stack: each frame record's 16
 //! bytes lie inside one [`StackRange`] the kernel names (the current
-//! thread's stack, the boot stack, this CPU's IST and RSP0 stacks), so it
+//! thread's stack, the boot stack, and this CPU's own: x86_64's IST and
+//! RSP0 stacks, aarch64's overflow stack; [`known_stacks`] lists them), so it
 //! never reads an MMIO window or a user page. It reads through a closure
 //! only after that check, and ends on a null `rbp` (the syscall entry
 //! zeroes it before the Rust body), an unknown stack, a return address
@@ -45,6 +46,42 @@ impl StackRange {
             None => false,
         }
     }
+}
+
+/// Slots in a known-stack list ([`known_stacks`]): the thread's stack, the
+/// boot stack, and up to six of the CPU's own.
+pub const KNOWN_STACKS: usize = 8;
+
+/// The stacks a walk may follow the frame pointer into (DESIGN §2.5 step
+/// 4), in this order: the current thread's KVA stack (`thread`, `None`
+/// before the first thread or when it has none), the boot stack the
+/// loader handed `_start` (`boot`, empty until recorded), then this CPU's
+/// own stacks, each its top and its 4 KiB page count. x86_64's are its
+/// four IST stacks and its fallback RSP0 stack (ROADMAP §10.7); aarch64's
+/// is its overflow stack (ROADMAP §11.3, §11.7). An empty range, a zero
+/// top, and a range that would wrap below 0 are left out. Fills `out`
+/// from the front and returns how many it filled; past
+/// [`KNOWN_STACKS`] the rest are dropped.
+pub fn known_stacks(
+    thread: Option<StackRange>,
+    boot: StackRange,
+    cpu: &[(u64, usize)],
+    out: &mut [StackRange; KNOWN_STACKS],
+) -> usize {
+    let cpu_ranges = cpu
+        .iter()
+        .filter(|&&(top, _)| top != 0)
+        .map(|&(top, pages)| StackRange::below(top, pages));
+    let mut n = 0usize;
+    for r in thread.into_iter().chain([boot]).chain(cpu_ranges) {
+        if r.lo < r.hi
+            && let Some(slot) = out.get_mut(n)
+        {
+            *slot = r;
+            n = n.saturating_add(1);
+        }
+    }
+    n
 }
 
 /// Bytes of one frame record: the saved `rbp`, then the return address.
@@ -338,5 +375,140 @@ mod tests {
             frames,
             [IMAGE.start + 1, IMAGE.start + 0x10, IMAGE.start + 0x20]
         );
+    }
+
+    const BOOT: StackRange = StackRange::new(0xFFFF_8000_0FF0_0000, 0xFFFF_8000_0FF4_0000);
+    /// x86_64's IST and RSP0 stacks are 4 pages each (`arch::x86_64::gdt`).
+    const X86_IST_PAGES: usize = 4;
+    const X86_RSP0_PAGES: usize = 4;
+
+    fn list(thread: Option<StackRange>, boot: StackRange, cpu: &[(u64, usize)]) -> Vec<StackRange> {
+        let mut out = [StackRange::EMPTY; KNOWN_STACKS];
+        let n = known_stacks(thread, boot, cpu, &mut out);
+        out[..n].to_vec()
+    }
+
+    #[test]
+    fn known_stacks_x86_64_list() {
+        // §10.7: the thread, the boot stack, the #DF, NMI, #MC and #DB IST
+        // stacks, then the fallback RSP0 stack, in that order.
+        let tops = [
+            0xFFFF_E000_0020_4000,
+            0xFFFF_E000_0020_A000,
+            0xFFFF_E000_0021_0000,
+            0xFFFF_E000_0021_6000,
+        ];
+        let rsp0 = 0xFFFF_E000_0021_C000;
+        let cpu = [
+            (tops[0], X86_IST_PAGES),
+            (tops[1], X86_IST_PAGES),
+            (tops[2], X86_IST_PAGES),
+            (tops[3], X86_IST_PAGES),
+            (rsp0, X86_RSP0_PAGES),
+        ];
+        let got = list(Some(STACK), BOOT, &cpu);
+        let mut want = std::vec![STACK, BOOT];
+        want.extend(tops.iter().map(|&t| StackRange::below(t, X86_IST_PAGES)));
+        want.push(StackRange::below(rsp0, X86_RSP0_PAGES));
+        assert_eq!(got, want);
+        // A CPU whose tables are not loaded yet has zero tops: no IST stack.
+        let early = [
+            (0, X86_IST_PAGES),
+            (0, X86_IST_PAGES),
+            (0, X86_IST_PAGES),
+            (0, X86_IST_PAGES),
+            (rsp0, X86_RSP0_PAGES),
+        ];
+        assert_eq!(
+            list(Some(STACK), BOOT, &early),
+            std::vec![STACK, BOOT, StackRange::below(rsp0, X86_RSP0_PAGES)]
+        );
+    }
+
+    #[test]
+    fn known_stacks_aarch64_list() {
+        // §11.7: the thread's KVA stack, the boot stack, and this CPU's
+        // §11.3 overflow stack, a default-sized guarded stack.
+        let overflow = 0xFFFF_E000_0030_4000;
+        let pages = crate::kva::DEFAULT_STACK_PAGES;
+        let got = list(Some(STACK), BOOT, &[(overflow, pages)]);
+        assert_eq!(
+            got,
+            std::vec![STACK, BOOT, StackRange::below(overflow, pages)]
+        );
+        // Before `vectors::init` gives the CPU its overflow stack.
+        assert_eq!(
+            list(Some(STACK), BOOT, &[(0, pages)]),
+            std::vec![STACK, BOOT]
+        );
+        // A panic on the boot stack before the first thread.
+        assert_eq!(
+            list(None, BOOT, &[(overflow, pages)]),
+            std::vec![BOOT, StackRange::below(overflow, pages)]
+        );
+    }
+
+    #[test]
+    fn known_stacks_leaves_out_empty_and_caps() {
+        // The boot stack before `note_boot_stack`, a stack that would wrap.
+        assert_eq!(
+            list(Some(STACK), StackRange::EMPTY, &[(0x1000, 2)]),
+            std::vec![STACK]
+        );
+        let many = [(0xFFFF_E000_0040_0000u64, 1usize); 10];
+        let got = list(Some(STACK), BOOT, &many);
+        assert_eq!(got.len(), KNOWN_STACKS);
+        assert_eq!(got[..2], [STACK, BOOT]);
+    }
+
+    #[test]
+    fn walk_follows_aarch64_overflow_into_thread_stack() {
+        // The overflow body's frame is on the overflow stack; its saved
+        // x29 is the faulting thread's frame, on the thread stack. The walk
+        // crosses into it only because both are in the list.
+        let pages = crate::kva::DEFAULT_STACK_PAGES;
+        let ovf_top = STACK.lo;
+        let ovf = StackRange::below(ovf_top, pages);
+        let mut out = [StackRange::EMPTY; KNOWN_STACKS];
+        let n = known_stacks(Some(STACK), BOOT, &[(ovf_top, pages)], &mut out);
+        let stacks = &out[..n];
+        let mut mem = Mem::new();
+        let thread_fp = STACK.lo + 0x100;
+        mem.frame(thread_fp, 0, IMAGE.start + 0x30);
+        let mut frames = Vec::new();
+        let mut ovf_mem = std::vec![0u64; ((ovf.hi - ovf.lo) / 8) as usize];
+        let ovf_fp = ovf.hi - 0x40;
+        ovf_mem[((ovf_fp - ovf.lo) / 8) as usize] = thread_fp;
+        ovf_mem[((ovf_fp + 8 - ovf.lo) / 8) as usize] = IMAGE.start + 0x20;
+        let read = |a: u64| {
+            assert!(
+                stacks.iter().any(|s| s.holds(a, 8)),
+                "read {a:#x} outside every known stack"
+            );
+            if ovf.holds(a, 8) {
+                ovf_mem[((a - ovf.lo) / 8) as usize]
+            } else {
+                mem.read(stacks, a)
+            }
+        };
+        let (_, end) = walk(IMAGE.start + 0x10, ovf_fp, stacks, in_image, read, |r| {
+            frames.push(r)
+        });
+        assert_eq!(
+            frames,
+            std::vec![IMAGE.start + 0x10, IMAGE.start + 0x20, IMAGE.start + 0x30]
+        );
+        assert_eq!(end, WalkEnd::NullRbp);
+        // Without the overflow stack in the list the walk stops at once.
+        frames.clear();
+        let (_, end) = walk(
+            IMAGE.start + 0x10,
+            ovf_fp,
+            &[STACK, BOOT],
+            in_image,
+            |_| unreachable!(),
+            |r| frames.push(r),
+        );
+        assert_eq!((frames.len(), end), (1, WalkEnd::UnknownStack));
     }
 }

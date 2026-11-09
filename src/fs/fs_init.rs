@@ -72,9 +72,11 @@ pub fn init_tables() -> Result<(), AllocError> {
 /// The File API module's `init` runs the rest of the bring-up.
 pub fn init(root_is_fat: bool) {
     if root_is_fat {
+        // Release: pairs with the Acquire load in `live`.
         LIVE.store(true, Ordering::Release);
     } else {
         let ok = api().mount_root(&RAMFS, None, false, None).is_ok();
+        // Release: pairs with the Acquire load in `live`.
         LIVE.store(ok, Ordering::Release);
     }
 }
@@ -98,6 +100,7 @@ pub(crate) fn now() -> u64 {
 }
 
 pub fn live() -> bool {
+    // Acquire: pairs with the Release stores in `init`.
     LIVE.load(Ordering::Acquire)
 }
 
@@ -129,6 +132,7 @@ fn hooks() -> Hooks {
         // established by `fs::ktest::hooks::install_hooks`, its only store.
         h.write_window = unsafe { core::mem::transmute::<*mut (), fn()>(w) };
     }
+    // Acquire: pairs with the Release store in `fs::ktest::hooks::install_hooks`.
     let r = OPEN_RACE.load(Ordering::Acquire);
     if !r.is_null() {
         // SAFETY: invariant: a non-null `OPEN_RACE` holds a

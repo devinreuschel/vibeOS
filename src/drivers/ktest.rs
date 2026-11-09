@@ -4,6 +4,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use vibeos::block::{BlockError, DeviceState, Op};
 use vibeos::dev::{DevRef, Instance};
+use vibeos::kalloc::TryVec;
 use vibeos::lock::RANK_DEVICE;
 
 use crate::block_init::IoWaiter;
@@ -141,17 +142,16 @@ pub(crate) fn test_block_vblk_rw() -> Outcome {
         return Outcome::Fail("mismatch");
     }
     // unaligned multi-sector: 3 sectors not at LBA 0
-    let mut multi = [0u8; 1536];
-    i = 0;
-    while i < 1536 {
-        multi[i] = (i as u8).wrapping_add(0x5C);
-        i += 1;
-    }
+    let Ok(multi) = filled_bytes(1536, |i| (i as u8).wrapping_add(0x5C)) else {
+        return Outcome::Fail("nomem");
+    };
     if d.write_dev(5, &multi).is_err() {
         return Outcome::Fail("multi write");
     }
-    let mut mout = [0u8; 1536];
-    if d.read_dev(5, &mut mout).is_err() || mout != multi {
+    let Ok(mut mout) = filled_bytes(1536, |_| 0) else {
+        return Outcome::Fail("nomem");
+    };
+    if d.read_dev(5, &mut mout).is_err() || *mout != *multi {
         return Outcome::Fail("multi read");
     }
     if d.flush_dev().is_err() {
@@ -201,6 +201,26 @@ pub(crate) fn test_block_vblk_irq() -> Outcome {
 /// Requests `vblk_deep_round` keeps in flight at once.
 const VBLK_DEEP_N: usize = 8;
 
+/// `n` bytes on the heap, byte `i` set by `byte`. The registry stack on
+/// aarch64 is 16 KiB, and DESIGN §4.5 keeps 4 KiB of it for a hard-IRQ
+/// top half, so a multi-KiB buffer in a virtio test does not fit the rest.
+fn filled_bytes(n: usize, byte: impl Fn(usize) -> u8) -> Result<TryVec<u8>, ()> {
+    let mut v = TryVec::try_with_capacity(n).map_err(|_| ())?;
+    let mut chunk = [0u8; 256];
+    let mut filled = 0usize;
+    while filled < n {
+        let take = (n - filled).min(chunk.len());
+        let mut i = 0usize;
+        while i < take {
+            chunk[i] = byte(filled + i);
+            i += 1;
+        }
+        v.try_extend_from_slice(&chunk[..take]).map_err(|_| ())?;
+        filled += take;
+    }
+    Ok(v)
+}
+
 /// One round of `block_vblk_deep`: submit `VBLK_DEEP_N` writes at gapped
 /// LBAs 10, 12, ..., so the elevator does not merge them into one VQ
 /// request. The request at `bad` asks for 1 sector with 511 bytes, which
@@ -211,15 +231,26 @@ const VBLK_DEEP_N: usize = 8;
 /// before it returns.
 fn vblk_deep_round(bad: Option<usize>) -> (Outcome, u32) {
     let waiters = [const { IoWaiter::new() }; VBLK_DEEP_N];
-    let mut bufs = [[0u8; 512]; VBLK_DEEP_N];
+    // The sector bytes stay on the heap for the wait. The waiters stay
+    // here: a completion cookie is the waiter's address (block_init::IoWaiter).
+    let Ok(mut bytes) = filled_bytes(VBLK_DEEP_N * 512, |_| 0) else {
+        return (Outcome::Fail("nomem"), 0);
+    };
     let mut submitted = [false; VBLK_DEEP_N];
     let mut first: Option<&'static str> = None;
     let mut i = 0usize;
     while i < VBLK_DEEP_N {
-        bufs[i] = [0x10u8.wrapping_add(i as u8); 512];
+        let start = i * 512;
+        let Some(buf) = bytes.get_mut(start..start + 512) else {
+            return (Outcome::Fail("nomem"), 0);
+        };
+        let fill = 0x10u8.wrapping_add(i as u8);
+        for b in buf.iter_mut() {
+            *b = fill;
+        }
         let len = if bad == Some(i) { 511 } else { 512 };
         let lba = 10 + 2 * i as u64;
-        let (ptr, w) = (bufs[i].as_ptr() as usize, &waiters[i]);
+        let (ptr, w) = (buf.as_ptr() as usize, &waiters[i]);
         let sub = vda(|b| virtio_blk_init::submit(b, Op::Write, lba, 1, ptr, len, w))
             .unwrap_or(Err(BlockError::Gone));
         match sub {
@@ -418,8 +449,10 @@ fn vdb<R>(f: impl FnOnce(&VirtioBlk) -> R) -> Option<R> {
     virtio_blk_init::with_disk(b"vdb", f)
 }
 
-/// The instances the device registry owns for bound virtio-blk functions,
-/// and how many there are.
+/// The instances the device registry owns for bound virtio-blk PCI
+/// functions, and how many there are. The aarch64 harness also binds a
+/// virtio-mmio disk under the same driver name (F047); this count is the
+/// two PCI functions. A bound PCI function with no instance still counts.
 fn blk_instances() -> ([Option<Instance>; 2], usize) {
     let mut out: [Option<Instance>; 2] = [const { None }; 2];
     let mut n = 0usize;
@@ -429,7 +462,15 @@ fn blk_instances() -> ([Option<Instance>; 2], usize) {
         if crate::dev_init::bound(&d) != Some("virtio-blk") {
             continue;
         }
-        if let (Some(slot), Some(inst)) = (out.get_mut(n), crate::dev_init::instance(&d)) {
+        let inst = crate::dev_init::instance(&d);
+        if inst
+            .as_ref()
+            .and_then(|inst| inst.downcast_ref::<VirtioBlk>())
+            .is_some_and(VirtioBlk::is_mmio)
+        {
+            continue;
+        }
+        if let (Some(slot), Some(inst)) = (out.get_mut(n), inst) {
             *slot = Some(inst);
         }
         n += 1;
