@@ -492,10 +492,10 @@ pub fn exception_halt(
     finish();
 }
 
-#[cfg(target_arch = "aarch64")]
-/// An exception dump for a context with no x86 hardware frame (aarch64's
-/// `TrapFrame`): `args` is the first line after `vibeOS: `, and `regs` the
-/// interrupted registers. Shares [`exception_halt`]'s dump and halt.
+/// An exception dump whose first line is `args` after `vibeOS: `, with
+/// `regs` the interrupted registers: aarch64's `TrapFrame` exceptions, and
+/// on both architectures the kernel stack overflow line (ROADMAP §11.3).
+/// Shares [`exception_halt`]'s dump and halt.
 pub fn exception_halt_args(regs: CrashRegs, args: fmt::Arguments<'_>) -> ! {
     begin_dump(regs);
     first_line(regs, |w| {

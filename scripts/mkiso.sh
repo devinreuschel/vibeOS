@@ -60,6 +60,25 @@ python3 "$root/scripts/gen_notices.py" --out "$staging/LICENSES/THIRD-PARTY-NOTI
 # The initrd, which limine.conf's module_path: loads as a Limine module.
 cp "$initrd" "$staging/boot/initrd.fat"
 cp "$root/limine.conf" "$staging/boot/"
+# VIBEOS_HHDM_RANDOM=1, for the ktest-hhdm test image only (ROADMAP §11.1):
+# its Limine randomises the HHDM base, so its boot shows that every
+# physical-to-virtual translation follows the offset Limine reports. The
+# config's one `randomise_hhdm_base: no` line becomes `yes`; any other
+# count of that line fails the build.
+if [ "${VIBEOS_HHDM_RANDOM:-0}" = 1 ]; then
+    python3 - "$staging/boot/limine.conf" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().split("\n")
+hits = [i for i, ln in enumerate(lines) if ln.strip() == "randomise_hhdm_base: no"]
+if len(hits) != 1:
+    sys.exit(f"mkiso.sh: {path} has {len(hits)} `randomise_hhdm_base: no` lines, expected 1")
+i = hits[0]
+lines[i] = lines[i].replace("randomise_hhdm_base: no", "randomise_hhdm_base: yes")
+open(path, "w", encoding="utf-8").write("\n".join(lines))
+PY
+fi
 cp "$limine_dir/limine-bios.sys" "$staging/boot/"
 cp "$limine_dir/limine-bios-cd.bin" "$staging/boot/"
 cp "$limine_dir/limine-uefi-cd.bin" "$staging/boot/"

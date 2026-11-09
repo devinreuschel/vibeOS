@@ -682,8 +682,13 @@ is the second.
   set ([§11.5](PORTABILITY.md#115-aarch64-exceptions-and-privilege-transitions) rule 6), which needs every stack the
   aarch64 kernel runs on (thread, idle, and overflow stacks) to have one size, 16 KiB. x86_64 needs no
   test, since `#DF` switches to its IST stack (§5.1), and its `#DF` handler reports stack overflow
-  when CR2 lies in the guard of the stack the interrupted code ran on; it uses the same layout, so
-  stack allocation has one path. `Kva::alloc_guarded` reserves `2S` at that alignment.
+  when CR2 lies in the guard of the stack the interrupted code ran on and the interrupted RSP lies
+  in that guard or at most one page above it, since `#DF` leaves CR2 as the last `#PF` set it and
+  a CR2 left in a guard by an earlier fault must not name a later `#DF` an overflow. Then the dump
+  opens with `vibeOS: panic: stack overflow far=<cr2> esr=<err> elr=<rip> sp=<rsp>
+  thread=<tcb>`, the line aarch64's overflow entry prints, in place of the `#DF rip=… cs=… err=…
+  cr2=…` header, and that line is the one `record_panic` keeps for the core tool. It uses the same
+  layout, so stack allocation has one path. `Kva::alloc_guarded` reserves `2S` at that alignment.
 - A `GuardedStack` (`vibeos::thread::GuardedStack`, re-exported as `kva_init::GuardedStack`) is a
   move-only handle with private fields; only `kva_init::alloc_guarded_stack` builds one, and
   `free_stack` takes it by value.

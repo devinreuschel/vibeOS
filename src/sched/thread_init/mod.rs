@@ -53,6 +53,8 @@ pub(crate) use boot::bootstrap_stack;
 pub use boot::init_bootstrap;
 pub use idle::halt_if_idle;
 pub use sweep::start_sweep;
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub(crate) use table::live_stack_spans;
 #[cfg(feature = "kernel_tests")]
 pub(crate) use table::scan_live_stacks;
 pub(crate) use table::table_root;

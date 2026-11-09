@@ -1071,7 +1071,7 @@ near 60 s, the 9 GiB case moves to a target of its own, by the rule above that s
 
 | Arch | Tier | Targets | QEMU s |
 |---|---|---|---|
-| x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic`, `test-e2e-panic-nest`, `test-qmp` | 40 |
+| x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic`, `test-e2e-panic-nest`, `test-e2e-kstack-overflow`, `test-qmp` | 49 |
 | x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-early-fault`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem`, `test-e2e-init-fault`, `test-e2e-strace`, `test-e2e-panic-stop`, `test-e2e-power` | 40 |
 | x86_64 | kernel-1 | `test-kernel-1` | 39 |
 | x86_64 | kernel-2 | `test-kernel-2` | 36 |
@@ -1094,9 +1094,11 @@ near 60 s, the 9 GiB case moves to a target of its own, by the rule above that s
 | x86_64 | vibefs-crash-2 | `test-vibefs-crash-2` | 25 |
 | x86_64 | vibefs-crash-plants | `test-vibefs-crash-plants` | 15 |
 | x86_64 | forensics | `test-forensics` | 60 |
+| x86_64 | kernel-hhdm | `test-kernel-hhdm` | 10 |
 | aarch64 | e2e-1 | `test-e2e`, `test-e2e-isa-floor`, `test-e2e-early-fault` | 59 |
-| aarch64 | e2e-2 | `test-e2e-panic`, `test-e2e-panic-stop`, `test-e2e-panic-stop-gic2` | 25 |
+| aarch64 | e2e-2 | `test-e2e-panic`, `test-e2e-panic-stop`, `test-e2e-panic-stop-gic2`, `test-e2e-kstack-overflow` | 38 |
 | aarch64 | forensics | `test-forensics` | 60 |
+| aarch64 | kernel-hhdm | `test-kernel-hhdm` | 17 |
 | aarch64 | kernel-1 | `test-kernel-1` | 40 |
 | aarch64 | kernel-2 | `test-kernel-2` | 40 |
 | aarch64 | kernel-3 | `test-kernel-3` | 40 |
@@ -1131,6 +1133,24 @@ aarch64's portable proof boots (`select`, `repeat`, `deadline-trip`, `planted`,
 self-IPI through `apic_init::send_ipi_cpu`, which does not deliver on aarch64. Those rows' figures
 are one to three boots at the x86 proof-boot cost, about 12 s each, until a `ci` run measures them.
 
+`test-e2e-kstack-overflow` (ROADMAP §11.3, x86_64 e2e-1 and aarch64 e2e-2) boots the
+`kstack_overflow_test` build, whose kernel thread recurses into its stack's guard with no catch
+armed, and requires `panic_dump.check_overflow`: the overflow line, which opens the dump on both
+architectures, with its fault address and SP in the guard the armed line names, the armed thread,
+and the fault's ESR, then `halted`. It adds about 9 s on x86_64 and 13 s on aarch64 to its tier
+in a local TCG run at `f1d5d761` (Apple M-series host), until a `ci` run measures it.
+
+`kernel-hhdm` (ROADMAP §11.1) is one `-smp 2` boot of the ktest ELF in `vibeos-ktest-hhdm.iso`,
+whose `limine.conf` `mkiso.sh` stages with `randomise_hhdm_base: yes`, running
+`run_ktest.HHDM_KTEST` alone: `bootinfo_consistent`, the opt-in `hhdm_randomised`, which fails
+when the offset is Limine's unrandomised base, and boot and mm rows that map and read through the
+offset. `hhdm_randomised` fails a correct kernel about once in 2^15 boots: Limine adds 15 random
+bits at 1 GiB granularity (`rand64() & ~(1 GiB - 1) & ((1 << (va_bits - 3)) - 1)` at a 48-bit VA),
+and a draw of zero is the unrandomised base. The check is kept, since it is what fails an image
+whose Limine does not randomise, and is not retried; ROADMAP §10.2's `hhdm_randomised` flake line
+records it. Its figures are one local TCG run at `f1d5d761` (Apple M-series host, one QEMU at a time),
+until a `ci` run measures them.
+
 aarch64 e2e-1's `test-e2e-isa-floor` adds one short boot that ends 3 s after the ISA floor's refusal,
 about 11 s in a local TCG run at `464a29aa` (Apple M-series host, one QEMU at a time), until a `ci` run
 measures it. aarch64 e2e-2's figure is its two `-smp 5` panic-stop
@@ -1162,7 +1182,7 @@ which the scheduled jobs and the gate run, still rerun the whole registry there.
 | Job | When | What |
 |---|---|---|
 | `check` | push / PR | Installs `x86_64-unknown-none`, the MSRV toolchain with the host and `x86_64-unknown-none` targets, and cargo-deny's pinned release archive, checked against the SHA-256 the step records. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff and mypy at pinned versions, the MSRV build, `scripts/check_*.py`, `cargo deny check licenses bans sources`); on a pull request, `scripts/check_gate_inputs.py` against its merge base; then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines <floor>`, the floor in `tests/gates/inputs.toml`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
-| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (x86_64: `kernel_tests`, `vibefs_crash`, and each of `panic_test`, `gp_test`, `panic_nest_test`, `panic_stop_test` and `hang_test`, plus `kernel_shell`; aarch64: default, `kernel_tests`, `kernel_shell`, and `make ARCH=aarch64 check-msrv`) (the default set also runs in `check` on x86_64, and that recipe passes `--target $(TARGET)`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos-<arch>.iso` (7 days). |
+| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (x86_64: `kernel_tests`, `vibefs_crash`, and each of `panic_test`, `gp_test`, `panic_nest_test`, `panic_stop_test`, `early_fault_test`, `kstack_overflow_test` and `hang_test`, plus `kernel_shell`; aarch64: default, `kernel_tests`, `kernel_shell`, `early_fault_test`, `kstack_overflow_test`, and `make ARCH=aarch64 check-msrv`) (the default set also runs in `check` on x86_64, and that recipe passes `--target $(TARGET)`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos-<arch>.iso` (7 days). |
 | `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 2, so the e2e tiers run two QEMUs at a time on the runner's 4 CPUs; a tier of one target runs one). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
 | `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `gatelib.pr_diff_base` (`BASE_SHA`, or `origin/$GITHUB_BASE_REF` when that is not `main`, or `origin/main`) and skips them when no such ref exists. |
 | `ci-pass` | every per-push run | `needs:` every other job, `if: always()`; fails unless each succeeded, a job gated on the event being allowed to skip (`scripts/check_gate_inputs.py --ci-pass`, which the job runs with `NEEDS: ${{ toJSON(needs) }}` and `SKIPPABLE: ticks`; its static rules fail when the job misses one, lacks `if: always()`, or lists in `SKIPPABLE` a job whose `if:` does not test `github.event_name`) |
