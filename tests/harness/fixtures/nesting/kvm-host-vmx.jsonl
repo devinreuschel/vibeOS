@@ -1,0 +1,3 @@
+{"source": "the recorded TCG replies with the qom-type a -cpu host vCPU has and vmx set, as kvm_intel nested=1 offers; replace with a capture from a KVM runner", "expect": "vmx"}
+{"execute": "query-cpus-fast", "arguments": null, "return": [{"thread-id": 2741, "qom-type": "host-x86_64-cpu", "props": {"core-id": 0, "thread-id": 0, "socket-id": 0}, "qom-path": "/machine/unattached/device[0]", "cpu-index": 0, "target": "x86_64"}]}
+{"execute": "qom-get", "arguments": {"path": "/machine/unattached/device[0]", "property": "vmx"}, "return": true}

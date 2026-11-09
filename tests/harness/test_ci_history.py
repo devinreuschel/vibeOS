@@ -1567,5 +1567,175 @@ class BudgetCli(unittest.TestCase):
                 self.assertEqual(ci_history.main([mode, "--remote", "x"]), 2)
 
 
+class ArtifactNames(unittest.TestCase):
+    """Every `results-*` and `runner-*` artifact a recorded workflow uploads
+    lands on the job that uploads it (`match_job`), so its numbers reach the
+    record: ROADMAP §11.7's weak-order counts ride `results-*` of smp-stress."""
+
+    def test_each_upload_matches_its_job(self) -> None:
+        tree = check_workflows.load_tree(ci_history.ROOT)
+        checked = 0
+        for key, spec in ci_history.WORKFLOWS.items():
+            jobs = []
+            for job in check_workflows._jobs(tree.workflows[spec.path]):
+                n = job.get("name")
+                jobs.append((n.value if n is not None and n.value else job.key, job))
+            entries = [ci_history.job_entry({"name": name}) for name, _ in jobs]
+            for name, job in jobs:
+                for step in check_workflows._steps(job):
+                    w = step.get("with")
+                    art = w.get("name") if w is not None else None
+                    value = art.value if art is not None else None
+                    for pre in ("results-", "runner-"):
+                        if value is None or not value.startswith(pre):
+                            continue
+                        hit = ci_history.match_job(entries, value[len(pre):], key)
+                        with self.subTest(workflow=key, job=name, artifact=value):
+                            self.assertIsNotNone(hit)
+                            assert hit is not None
+                            self.assertEqual(hit["name"], name)
+                        checked += 1
+        self.assertGreater(checked, 20)
+
+
+def kvm_rec(run_id: int, finished: str, nesting: str | None, *,
+            conclusion: str = "success") -> dict[str, Any]:
+    runner: dict[str, Any] = {"os": "linux", "arch": "x86_64", "cpu_model": "c", "invtsc": True}
+    if nesting is not None:
+        runner["nesting"] = nesting
+    job = {**ci_history.job_entry({"name": "kvm", "conclusion": conclusion}), "runner": runner}
+    other = ci_history.job_entry({"name": "miri"})
+    return {"run_id": run_id, "workflow": "nightly", "finished": finished, "jobs": [job, other]}
+
+
+class KvmNesting(unittest.TestCase):
+    """ROADMAP §11.7: the KVM leg's record names its runner's nesting."""
+
+    def test_runner_field_parsed(self) -> None:
+        base = {"schema": 1, "os": "L", "arch": "X", "cpu_model": "c", "invtsc": True}
+        for v in ci_history.NESTINGS:
+            parsed = ci_history.parse_runner({**base, "nesting": v})
+            assert parsed is not None
+            self.assertEqual(parsed["nesting"], v)
+        self.assertIsNone(ci_history.parse_runner({**base, "nesting": "nested"}))
+        parsed = ci_history.parse_runner(base)
+        assert parsed is not None
+        self.assertNotIn("nesting", parsed)
+        # A job whose boots never checked invariant TSC still keeps its runner.
+        parsed = ci_history.parse_runner({**base, "invtsc": None, "nesting": "none"})
+        assert parsed is not None
+        self.assertEqual(parsed["nesting"], "none")
+
+    def test_no_record_with_the_field_passes(self) -> None:
+        recs = [kvm_rec(1, "2026-11-01T03:00:00Z", None),
+                kvm_rec(2, "2026-11-02T03:00:00Z", None)]
+        self.assertEqual(ci_history.kvm_nesting_problems("nightly", recs), [])
+        self.assertEqual(ci_history.kvm_nesting_problems("nightly", []), [])
+
+    def test_missing_after_the_first_fails(self) -> None:
+        recs = [
+            kvm_rec(4, "2026-11-04T03:00:00Z", None),
+            kvm_rec(1, "2026-11-01T03:00:00Z", None),  # before the probe: exempt
+            kvm_rec(2, "2026-11-02T03:00:00Z", "vmx"),
+            kvm_rec(3, "2026-11-03T03:00:00Z", "none"),
+            kvm_rec(5, "2026-11-05T03:00:00Z", None, conclusion="skipped"),
+            {"run_id": 6, "workflow": "nightly", "tombstone": "gone"},
+        ]
+        got = ci_history.kvm_nesting_problems("nightly", recs)
+        self.assertEqual(len(got), 1, got)
+        self.assertIn("nightly run 4 job 'kvm'", got[0])
+        # only `KVM_LEGS` jobs, only in their workflow
+        self.assertEqual(ci_history.kvm_nesting_problems("smp-stress", recs), [])
+
+    def test_runner_without_record_fails(self) -> None:
+        rec = kvm_rec(3, "2026-11-03T03:00:00Z", None)
+        rec["jobs"][0]["runner"] = None
+        recs = [kvm_rec(2, "2026-11-02T03:00:00Z", "svm"), rec]
+        self.assertEqual(len(ci_history.kvm_nesting_problems("nightly", recs)), 1)
+
+    def test_attached_from_the_runner_artifact(self) -> None:
+        rec: dict[str, Any] = {
+            "workflow": "nightly",
+            "jobs": [ci_history.job_entry({"name": n}) for n in ("kvm", "miri")]}
+        runner = ci_history.parse_runner(
+            {"schema": 1, "os": "linux", "arch": "x86_64", "cpu_model": "c", "invtsc": True,
+             "nesting": "vmx"})
+        assert runner is not None
+        ci_history.attach_artifacts(rec, ci_history.Artifacts(runners={"kvm": runner}))
+        self.assertEqual(rec["jobs"][0]["runner"]["nesting"], "vmx")
+        self.assertEqual(ci_history.kvm_nesting_problems(
+            "nightly", [{**rec, "run_id": 1, "finished": "2026-11-01T00:00:00Z"}]), [])
+
+    def test_default_mode_reports_it(self) -> None:
+        history = mock.Mock()
+        history.records.side_effect = lambda wf: (
+            [kvm_rec(2, "2026-11-02T03:00:00Z", "vmx"), kvm_rec(3, "2026-11-03T03:00:00Z", None)]
+            if wf == "nightly" else [])
+        with (
+            mock.patch.object(ci_history, "HistoryRepo", return_value=history),
+            mock.patch.object(ci_history, "GhApi"),
+            mock.patch.object(ci_history, "GhReleaser"),
+            mock.patch.object(ci_history, "_repository", return_value=REPO),
+            mock.patch.object(ci_history, "check_complete", return_value=[]),
+            mock.patch.object(ci_history, "summary") as out,
+        ):
+            self.assertEqual(ci_history.main(["--remote", "x", "--gated", SHA]), 1)
+        (lines,), _ = out.call_args
+        self.assertTrue(any("nightly run 3" in ln for ln in lines), lines)
+
+
+WEAK = {"mp_iters": 10_000_000, "mp_weak": 3, "lb_iters": 9_000, "lb_weak": 0}
+
+
+class WeakOrder(unittest.TestCase):
+    """ROADMAP §11.7: weak_order_probe's counts reach the record through the
+    results artifact, and `--weak-order` reads them back."""
+
+    def test_counts_ride_the_results_artifact(self) -> None:
+        body = json.loads(results_file("test-smp-stress"))
+        body["arch"] = "aarch64"
+        body["weak_order"] = [WEAK]
+        blob = zip_bytes({"aarch64-test-smp-stress.json": json.dumps(body).encode()})
+        name = "results-aarch64-high-cpu-smp-stress-aarch64"
+        jobs = [job_obj(n, "2026-03-02T10:00:05Z", "2026-03-02T10:00:10Z",
+                        "2026-03-02T10:02:00Z")
+                for n in ("high-CPU SMP stress", "high-CPU SMP stress (aarch64)")]
+        routes = run_routes(run_obj(workflow="smp-stress", event="schedule"), jobs,
+                            [{"id": 9, "name": name, "expired": False,
+                              "size_in_bytes": len(blob)}])
+        api = StubApi(routes, {f"/repos/{REPO}/actions/artifacts/9/zip": blob})
+        warnings: list[str] = []
+        rec = ci_history.build_record(api, REPO, "smp-stress", 101, warnings)
+        self.assertEqual(warnings, [])
+        x86, arm = rec["jobs"]
+        self.assertEqual(x86["results"], [])
+        self.assertEqual(arm["results"][0]["weak_order"], [WEAK])
+        dev = {"commit": SHA, "command": "make test-smp-stress", "finished": "2026-03-01T00:00:00Z",
+               "results": [{"weak_order": [WEAK, "junk"]}]}
+        got = ci_history.weak_order_counts([rec, {"tombstone": "x"}], [dev])
+        self.assertEqual([src for _, src, _ in got],
+                         [f"dev-host {SHA[:12]} make test-smp-stress",
+                          "smp-stress run 101 high-CPU SMP stress (aarch64)"])
+        self.assertEqual([w for _, _, w in got], [WEAK, WEAK])
+
+    def test_cli_prints_each_row(self) -> None:
+        history = mock.Mock()
+        history.records.return_value = [{"workflow": "smp-stress", "run_id": 7, "finished": "t",
+                                          "jobs": [{"name": "j", "results": [
+                                              {"weak_order": [WEAK]}]}]}]
+        printed: list[str] = []
+        with (
+            mock.patch.object(ci_history, "HistoryRepo", return_value=history),
+            mock.patch.object(ci_history, "GhReleaser"),
+            mock.patch.object(ci_history, "_repository", return_value=REPO),
+            mock.patch.object(ci_history, "dev_host_records", return_value=[]),
+            mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(a[0])),
+        ):
+            self.assertEqual(ci_history.main(["--weak-order", "--remote", "x"]), 0)
+        history.records.assert_called_with("smp-stress")
+        self.assertEqual(printed, [
+            "t  smp-stress run 7 j  mp_iters=10000000 mp_weak=3 lb_iters=9000 lb_weak=0"])
+
+
 if __name__ == "__main__":
     unittest.main()

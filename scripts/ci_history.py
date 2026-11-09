@@ -9,8 +9,11 @@ id; a later attempt of the run replaces its file.
 Modes (one `if` branch each in `main`):
 
 - default: the completeness check. It fails, naming each, on any `ci` run on
-  `main` since the history landed that has no record, and on a tombstoned run
-  a gate entry needs as proof of the gated commit.
+  `main` since the history landed that has no record, on a tombstoned run
+  a gate entry needs as proof of the gated commit, and on a KVM-leg record
+  (`KVM_LEGS`) whose runner names no nesting, from the first that names one.
+- `--weak-order`: `weak_order_probe`'s counts (ROADMAP §11.7), one line per
+  `smp-stress` job and dev-host record whose results carry them.
 - `--event PATH`: the `workflow_run` writer. It reads only the run id from the
   event file, checks the workflow's name, path and repository against
   `WORKFLOWS`, and builds the record from the Actions API.
@@ -113,6 +116,15 @@ WORKFLOWS: dict[str, WorkflowSpec] = {
 }
 
 ARCH_TOKENS = ("x86_64", "aarch64")
+# The nesting an x86_64 KVM job's runner offers a guest (ROADMAP §11.7),
+# read by `tests/harness/nesting.py` before the job's first boot.
+NESTINGS = ("vmx", "svm", "none")
+# The `weak_order` row's fields (`tests/harness/results.py` writes them).
+WEAK_ORDER_FIELDS = ("mp_iters", "mp_weak", "lb_iters", "lb_weak")
+# The jobs whose records name that nesting, by workflow key and job display
+# name: the §10.1 KVM leg. Each later x86_64 KVM job that records nesting
+# (§20.8's, Phase 21's nested job) is a row here.
+KVM_LEGS: dict[str, tuple[str, ...]] = {"nightly": ("kvm",)}
 HISTORY_WORKFLOW = ".github/workflows/ci-history.yml"
 MAIN = "main"
 MAIN_EVENTS = frozenset({"push", "workflow_dispatch"})
@@ -356,7 +368,9 @@ def slug(name: str) -> str:
 
 
 def parse_runner(obj: object) -> dict[str, Any] | None:
-    """`build/runner.json`, schema 1, or None."""
+    """`build/runner.json`, schema 1, or None. `invtsc` is null when no boot
+    checked it; `nesting`, which only an x86_64 KVM job's runner record
+    holds (ROADMAP §11.7), is one of `NESTINGS`."""
     if not isinstance(obj, dict) or obj.get("schema") != 1:
         return None
     out: dict[str, Any] = {}
@@ -366,9 +380,13 @@ def parse_runner(obj: object) -> dict[str, Any] | None:
             return None
         out[k] = v
     inv = obj.get("invtsc")
-    if not isinstance(inv, bool):
+    if inv is not None and not isinstance(inv, bool):
         return None
     out["invtsc"] = inv
+    if "nesting" in obj:
+        if obj["nesting"] not in NESTINGS:
+            return None
+        out["nesting"] = obj["nesting"]
     return out
 
 
@@ -1090,6 +1108,63 @@ def check_complete(
     return problems
 
 
+def kvm_nesting_problems(workflow: str, records: Sequence[Mapping[str, Any]]) -> list[str]:
+    """One line per `KVM_LEGS` job record of `workflow` whose runner names no
+    nesting (ROADMAP §11.7), from the first record whose runner names one on:
+    the records before the probe landed carry none, and nothing fails while
+    no record carries one. A skipped job runs no step and is exempt."""
+    legs = KVM_LEGS.get(workflow, ())
+    rows: list[tuple[str, int, str, bool]] = []
+    for rec in records:
+        if "tombstone" in rec or not isinstance(rec.get("run_id"), int):
+            continue
+        for job in rec.get("jobs") or []:
+            if not isinstance(job, dict) or job.get("name") not in legs:
+                continue
+            if job.get("conclusion") == "skipped":
+                continue
+            runner = job.get("runner")
+            has = isinstance(runner, dict) and runner.get("nesting") in NESTINGS
+            rows.append((str(rec.get("finished") or rec.get("started") or ""),
+                         rec["run_id"], str(job["name"]), has))
+    rows.sort()
+    first = next((i for i, r in enumerate(rows) if r[3]), None)
+    if first is None:
+        return []
+    return [
+        f"{workflow} run {run_id} job {name!r}: the KVM leg's runner record names no "
+        "nesting (vmx, svm or none)"
+        for _, run_id, name, has in rows[first:] if not has
+    ]
+
+
+def weak_order_counts(
+    ci_records: Sequence[Mapping[str, Any]], dev_records: Sequence[Mapping[str, Any]]
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """(finished, source, row) per `weak_order` row (ROADMAP §11.7) of the
+    results that `ci_records`' jobs and `dev_records` carry, oldest first;
+    `source` names the run and job, or the dev-host record's command."""
+    out: list[tuple[str, str, dict[str, Any]]] = []
+
+    def rows(results: object) -> Iterator[dict[str, Any]]:
+        for r in results if isinstance(results, list) else []:
+            sec = r.get("weak_order") if isinstance(r, dict) else None
+            yield from (w for w in sec if isinstance(w, dict)) if isinstance(sec, list) else ()
+
+    for rec in ci_records:
+        if "tombstone" in rec:
+            continue
+        for job in rec.get("jobs") or []:
+            if isinstance(job, dict):
+                src = f"{rec.get('workflow')} run {rec.get('run_id')} {job.get('name')}"
+                out += [(str(rec.get("finished") or ""), src, w) for w in rows(job.get("results"))]
+    for rec in dev_records:
+        src = f"{DEV_HOST} {str(rec.get('commit'))[:12]} {rec.get('command')}"
+        out += [(str(rec.get("finished") or ""), src, w) for w in rows(rec.get("results"))]
+    out.sort(key=lambda t: (t[0], t[1]))
+    return out
+
+
 # --- backfill -----------------------------------------------------------------
 
 
@@ -1807,6 +1882,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="print each per-push tier's median QEMU time over the last 20 ci runs on main; "
         "fail past 60 s",
     )
+    mode.add_argument(
+        "--weak-order", action="store_true",
+        help="print weak_order_probe's counts per smp-stress run and dev-host record "
+        "(ROADMAP §11.7)",
+    )
     ap.add_argument("--job", metavar="NAME", help="--series: the job")
     ap.add_argument("--step", metavar="NAME", help="--series: the job's step")
     ap.add_argument("--branch", default=MAIN, help="--series: the runs' branch ('' for any)")
@@ -1869,6 +1949,17 @@ def main(argv: list[str] | None = None) -> int:
             print_series(series(history, args.series, args.job, args.step,
                                 args.branch or None, events or None))
             return 0
+        if args.weak_order:
+            history = HistoryRepo(workdir, args.remote or default_remote(),
+                                  releaser=GhReleaser(_repository()), codec=ZstdCli())
+            history.open(depth=1)
+            counts = weak_order_counts(history.records("smp-stress"), dev_host_records(history))
+            for finished, src, w in counts:
+                print(f"{finished}  {src}  "
+                      + " ".join(f"{k}={w.get(k)}" for k in WEAK_ORDER_FIELDS))
+            if not counts:
+                print("no weak_order_probe counts recorded")
+            return 0
         if args.budget or args.tiers:
             history = HistoryRepo(workdir, args.remote or default_remote(),
                                   releaser=GhReleaser(_repository()), codec=ZstdCli())
@@ -1893,6 +1984,8 @@ def main(argv: list[str] | None = None) -> int:
         gated = args.gated or local_head()
         needed = gate_job_entries(args.gates or gatelib.GATES)
         problems = check_complete(api, repo, history, gated, needed)
+        for wf in sorted(KVM_LEGS):
+            problems += kvm_nesting_problems(wf, history.records(wf))
         summary([f"ci-history: {p}" for p in problems]
                 or ["ci-history: every ci run on main since the history landed has a record"])
         return 1 if problems else 0

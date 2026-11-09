@@ -92,7 +92,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: results-x86_64-stress
+          name: results-x86_64-high-cpu-smp-stress
           path: build/results/
           if-no-files-found: ignore
           retention-days: 90
@@ -101,7 +101,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: runner-stress
+          name: runner-high-cpu-smp-stress
           path: build/runner.json
           if-no-files-found: ignore
           retention-days: 90
@@ -176,7 +176,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: results-aarch64-stress
+          name: results-aarch64-high-cpu-smp-stress-aarch64
           path: build/results/
           if-no-files-found: ignore
           retention-days: 90
@@ -185,7 +185,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: runner-stress-aarch64
+          name: runner-high-cpu-smp-stress-aarch64
           path: build/runner.json
           if-no-files-found: ignore
           retention-days: 90
@@ -446,7 +446,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: results-x86_64-nightly-canary
+          name: results-x86_64-latest-nightly-canary
           path: build/results/
           if-no-files-found: ignore
           retention-days: 90
@@ -455,7 +455,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: runner-nightly-canary
+          name: runner-latest-nightly-canary
           path: build/runner.json
           if-no-files-found: ignore
           retention-days: 90

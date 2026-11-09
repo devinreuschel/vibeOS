@@ -1,0 +1,4 @@
+{"source": "the recorded TCG replies, with svm answered by the error a missing property gets (recorded for a property the class lacks)", "expect": "none"}
+{"execute": "query-cpus-fast", "arguments": null, "return": [{"thread-id": 65479, "qom-type": "Skylake-Client-v1-x86_64-cpu", "props": {"core-id": 0, "thread-id": 0, "socket-id": 0}, "qom-path": "/machine/unattached/device[0]", "cpu-index": 0, "target": "x86_64"}]}
+{"execute": "qom-get", "arguments": {"path": "/machine/unattached/device[0]", "property": "vmx"}, "return": false}
+{"execute": "qom-get", "arguments": {"path": "/machine/unattached/device[0]", "property": "svm"}, "error": {"class": "GenericError", "desc": "Property 'Skylake-Client-v1-x86_64-cpu.svm' not found"}}

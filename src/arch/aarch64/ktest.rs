@@ -1164,9 +1164,13 @@ pub(crate) fn test_fb_limine() -> Outcome {
 }
 
 /// Message-passing and load-buffering with Relaxed stores and no barrier
-/// (ROADMAP §11.7). Fails only when a shape completes no iteration.
+/// (ROADMAP §11.7). Each shape runs `WO_ITERS` iterations or `WO_BUDGET_NS`,
+/// whichever ends first, on a budget of its own. Fails only when a shape
+/// completes no iteration.
 const WO_ITERS: u64 = 10_000_000;
 const WO_BUDGET_NS: u64 = 5 * 60 * 1_000_000_000;
+/// Both shapes' budgets and a minute of margin for the handshakes.
+const WO_DEADLINE_MS: u32 = 660_000;
 const WO_KIND_MP: u64 = 0;
 const WO_KIND_LB: u64 = 1;
 
@@ -1226,7 +1230,25 @@ fn wo_wait(g: u64, start: u64) -> bool {
     true
 }
 
-fn wo_mp(start: u64) -> (u64, u64) {
+/// Wait until the worker has finished the last generation issued, bounded
+/// by the test's deadline; false when the deadline came first.
+fn wo_drain() -> bool {
+    // Relaxed: the coordinator, this thread, is `WO_GO`'s only writer.
+    let last = WO_GO.load(Ordering::Relaxed);
+    // Acquire: pairs with the worker's Release of `WO_DONE`.
+    while last != 0 && WO_DONE.load(Ordering::Acquire) != last {
+        if crate::ktest::deadline_within(5_000) == Some(true) {
+            return false;
+        }
+        thread_init::yield_now();
+    }
+    true
+}
+
+/// One shape's generations follow `base`, the last one issued before it, so
+/// no generation repeats across shapes.
+fn wo_mp(base: u64) -> (u64, u64) {
+    let start = time_init::now_ns();
     // Relaxed: pairs with nothing.
     WO_KIND.store(WO_KIND_MP, Ordering::Relaxed);
     let mut n = 0u64;
@@ -1235,7 +1257,7 @@ fn wo_mp(start: u64) -> (u64, u64) {
         // Relaxed: reset before the Release of `WO_GO`; pairs with nothing.
         WO_DATA.store(0, Ordering::Relaxed);
         WO_FLAG.store(0, Ordering::Relaxed);
-        let g = n.saturating_add(1);
+        let g = base.saturating_add(n).saturating_add(1);
         // Release: pairs with the worker's Acquire of `WO_GO`.
         WO_GO.store(g, Ordering::Release);
         // Relaxed: the shape under test; pairs with nothing.
@@ -1252,7 +1274,8 @@ fn wo_mp(start: u64) -> (u64, u64) {
     (n, w)
 }
 
-fn wo_lb(start: u64) -> (u64, u64) {
+fn wo_lb(base: u64) -> (u64, u64) {
+    let start = time_init::now_ns();
     // Relaxed: pairs with nothing.
     WO_KIND.store(WO_KIND_LB, Ordering::Relaxed);
     let mut n = 0u64;
@@ -1261,7 +1284,7 @@ fn wo_lb(start: u64) -> (u64, u64) {
         // Relaxed: reset before the Release of `WO_GO`; pairs with nothing.
         WO_X.store(0, Ordering::Relaxed);
         WO_Y.store(0, Ordering::Relaxed);
-        let g = n.saturating_add(1);
+        let g = base.saturating_add(n).saturating_add(1);
         // Release: pairs with the worker's Acquire of `WO_GO`.
         WO_GO.store(g, Ordering::Release);
         // Relaxed: the shape under test; pairs with nothing.
@@ -1270,7 +1293,9 @@ fn wo_lb(start: u64) -> (u64, u64) {
         if !wo_wait(g, start) {
             break;
         }
-        if y == 0 && WO_OBS_A.load(Ordering::Relaxed) == 0 {
+        // Load buffering's weak outcome: each load saw the other CPU's
+        // later store.
+        if y == 1 && WO_OBS_A.load(Ordering::Relaxed) == 1 {
             w = w.saturating_add(1);
         }
         n = n.saturating_add(1);
@@ -1287,12 +1312,27 @@ pub(crate) fn test_weak_order_probe() -> Outcome {
     WO_DONE.store(0, Ordering::Relaxed);
     WO_STOP.store(0, Ordering::Relaxed);
     let _worker = spawn_thread_on("wo_probe", wo_worker, 1);
-    let start = time_init::now_ns();
-    let (mp_n, mp_w) = wo_mp(start);
-    let (lb_n, lb_w) = wo_lb(start);
+    let (mp_n, mp_w) = wo_mp(0);
+    // A generation the worker was still running when message passing's
+    // budget ran out would store into the next shape's locations: let it
+    // finish before load buffering resets them.
+    let drained = wo_drain();
+    let (lb_n, lb_w) = if drained {
+        // Message passing issued at most generation `mp_n + 1`.
+        wo_lb(mp_n.saturating_add(1))
+    } else {
+        (0, 0)
+    };
+    // The same before the stop, so no generation outlives the counts. A
+    // drain the deadline cuts short is no failure: the box fails the test
+    // only on a shape with no iteration, which an undrained message passing
+    // gives load buffering.
+    let stopped = wo_drain();
     // Release: pairs with the worker's Acquire of `WO_STOP`.
     WO_STOP.store(1, Ordering::Release);
-    crate::ktest_info!("mp iters={mp_n} weak={mp_w} lb iters={lb_n} weak={lb_w}");
+    crate::ktest_info!(
+        "mp iters={mp_n} weak={mp_w} lb iters={lb_n} weak={lb_w} drained={drained} stopped={stopped}"
+    );
     if mp_n == 0 || lb_n == 0 {
         return crate::fail_fmt!("mp {mp_n} lb {lb_n}");
     }
@@ -1420,7 +1460,7 @@ pub(crate) const TESTS: &[Test] = &[
         crate::arch::aarch64::ktest_el0::test_el0_code_recycle,
     ),
     test("weak_order_probe", test_weak_order_probe)
-        .deadline(330_000)
+        .deadline(WO_DEADLINE_MS)
         .opt_in(),
     test("ac_clear_user_popf", skip_ac_clear_user_popf),
     test("ist_gs_sign", skip_ist_gs_sign),
