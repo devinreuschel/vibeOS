@@ -426,6 +426,9 @@ def _ktest_boot(
     results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
     klines = frame.kernel_lines(raw.lines)
     results.current().record_ktest_lines(klines)
+    weak = results.weak_order_rows(klines)
+    if weak:
+        results.current().add_section(results.WEAK_ORDER, weak)
     verdict = check_ktest_output(
         raw.lines, raw.exit_code, pass_status=ktest_pass_status(cfg)
     )

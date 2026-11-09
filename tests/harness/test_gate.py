@@ -471,5 +471,130 @@ class LocalRun(unittest.TestCase):
         self.assertEqual(gate.main([], out=lambda s: None), 2)
 
 
+class Clock:
+    """A fake clock each run of `LoopRunner` moves on by `step` seconds."""
+
+    def __init__(self) -> None:
+        self.t = 1_000_000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+class LoopRunner:
+    """Each run takes `step` seconds, exits with the next of `rcs` (0 once
+    they run out) and writes a results file holding its run number."""
+
+    def __init__(self, clock: Clock, step: float, rcs: list[int] | None = None) -> None:
+        self.clock, self.step, self.rcs = clock, step, list(rcs or [])
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, cmd: str, cwd: Path, log: Path) -> int:
+        self.calls.append((cmd, log.name))
+        stale = cwd / "build" / "results" / "stale.json"
+        self.calls.append(("stale", str(stale.exists())))
+        res = cwd / "build" / "results"
+        res.mkdir(parents=True, exist_ok=True)
+        stale.write_text(json.dumps({"schema": 1, "run": len(self.calls) // 2}), encoding="utf-8")
+        self.clock.t += self.step
+        return self.rcs.pop(0) if self.rcs else 0
+
+
+class RecordLoop(unittest.TestCase):
+    """ROADMAP §11.7: each `common.toml` record runs in a loop for 30
+    minutes, with the pass count in the record; any failed run fails it."""
+
+    def loop(self, step: float, rcs: list[int] | None, loop_s: int) -> tuple[gate.LoopRun,
+                                                                           LoopRunner]:
+        clock = Clock()
+        runner = LoopRunner(clock, step, rcs)
+        with tempfile.TemporaryDirectory() as d:
+            lr = gate.run_loop(runner, "make test-smp-stress", Path(d),
+                               lambda n: Path(d) / f"r-{n}.log", loop_s, clock)
+        return lr, runner
+
+    def test_loops_for_the_whole_time(self) -> None:
+        lr, runner = self.loop(400.0, None, gate.COMMON_LOOP_S)
+        self.assertEqual((lr.rc, lr.runs, lr.passes), (0, 5, 5))  # 5 x 400 s >= 1800 s
+        self.assertEqual([c for c in runner.calls if c[0] == "stale"],
+                         [("stale", "False")] * 5, "each run starts with no results")
+        self.assertEqual([r["run"] for r in lr.results], [1, 2, 3, 4, 5])
+        self.assertEqual(gate.COMMON_LOOP_S, 30 * 60)
+
+    def test_first_failure_stops_and_fails(self) -> None:
+        lr, _ = self.loop(60.0, [0, 0, 3], gate.COMMON_LOOP_S)
+        self.assertEqual((lr.rc, lr.runs, lr.passes), (3, 3, 2))
+
+    def test_unlooped_runs_once(self) -> None:
+        lr, _ = self.loop(5000.0, None, 0)
+        self.assertEqual((lr.rc, lr.runs, lr.passes), (0, 1, 1))
+        lr, _ = self.loop(1.0, [2], 0)
+        self.assertEqual((lr.rc, lr.runs, lr.passes), (2, 1, 0))
+
+    def test_record_gate_loops_common_entries_only(self) -> None:
+        from tests.harness.test_gate_records import FakeHost, History
+
+        repo = TempRepo()
+        self.addCleanup(repo.cleanup)
+        repo.write({
+            "tests/gates/phase-11.toml": '[[line]]\nkey = "models line"\n[[line.entry]]\n'
+                                         'record = { cmd = "make models" }\n',
+            "tests/gates/common.toml": '[[entry]]\nname = "hvf-stress"\n'
+                                       'cmd = "make test-smp-stress ARCH=aarch64"\n',
+        })
+        repo.git("add", "-A")
+        repo.git("commit", "-q", "-m", "maps")
+        commit = repo.git("rev-parse", "HEAD")
+        for rcs, code in (([], 0), ([0, 0, 0, 4], 1)):
+            with self.subTest(rcs=rcs):
+                clock = Clock()
+                runner, history = LoopRunner(clock, 500.0, rcs), History()
+                out: list[str] = []
+                got = gate.record_gate(11, commit, repo.path, Tools(runner, gate.GhCli(), history),
+                                       FakeHost(), out.append, clock=clock)
+                self.assertEqual(got, code, out)
+                models, stress = history.records
+                self.assertEqual(models["numbers"]["runs"], 1)
+                self.assertNotIn("loop_seconds", models["numbers"])
+                n = stress["numbers"]
+                self.assertEqual(n["loop_seconds"], gate.COMMON_LOOP_S)
+                if code == 0:
+                    self.assertEqual((n["runs"], n["passes"]), (4, 4))  # 4 x 500 s
+                    self.assertEqual(stress["result"], "pass")
+                    self.assertGreaterEqual(n["seconds"], gate.COMMON_LOOP_S)
+                    self.assertIn("4 of 4 runs passed", out[1])
+                else:
+                    self.assertEqual((n["runs"], n["passes"]), (3, 2))
+                    self.assertEqual(stress["result"], "fail")
+                self.assertEqual(len(stress["results"]), n["runs"])
+                logs = [log for cmd, log in runner.calls if cmd.startswith("make test")]
+                self.assertEqual(logs, [f"record-2-{k}.log" for k in range(1, n["runs"] + 1)])
+
+    def test_gate_needs_a_looped_record(self) -> None:
+        e = Entry("record", "make test-smp-stress ARCH=aarch64", "", "", False)
+
+        def rec(**numbers: Any) -> dict[str, Any]:
+            return record(phase=11, line="hvf-stress", command=e.cmd, numbers=numbers)
+
+        full = {"seconds": 1900.0, "runs": 4, "passes": 4, "loop_seconds": 1800}
+        cases = [
+            (full, True),
+            ({"seconds": 12.0}, False),  # a single run
+            ({**full, "passes": 3}, False),
+            ({**full, "loop_seconds": 600}, False),
+            ({**full, "seconds": 1200.0}, False),
+            ({**full, "runs": 0, "passes": 0}, False),
+        ]
+        for numbers, want in cases:
+            with self.subTest(numbers=numbers):
+                history = FakeHistory(records=[rec(**numbers)])
+                got = gate.eval_record(e, "hvf-stress", C, 11, history, gate.COMMON_LOOP_S)
+                self.assertEqual(got.ok, want, got.detail)
+        # a phase-map record entry needs no loop
+        got = gate.eval_record(e, "hvf-stress", C, 11,
+                               FakeHistory(records=[rec(seconds=12.0)]))
+        self.assertTrue(got.ok)
+
+
 if __name__ == "__main__":
     unittest.main()
