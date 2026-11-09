@@ -394,6 +394,13 @@ The boot CPU that loses does not send INIT
 `sti` happened before `GS_BASE` was set, and a timer interrupt landed in code that reads per-CPU state.
 Rule: per-CPU MSRs are set before the IDT is live and before `sti`.
 
+**An exception before `idt::init` reboots the machine with no line.**
+Rule: the x86_64 early IDT (`idt::init_early`, ROADMAP §11.1) goes in right after the Limine
+handshake and is refilled with `KERNEL_CS` inside `CpuTables::load` right after the far return, since
+Limine's code selector is a data selector in the kernel's GDT. Its path through the stubs to
+`panic::early_exception` touches no per-CPU state and no `gs:`. It has no IST, so a `#DF` taken on a
+broken stack before `idt::init` still triple-faults.
+
 **AP triple-faults in `ap_entry` before `lidt`.**
 `IrqCell.with` / `InterruptGuard` call `try_current` → `gs:[0]` while GS is still 0 and the IDT is
 not loaded. Rule: read trampoline bring-up params through `IrqCell::as_ptr()`, install `GS_BASE`,

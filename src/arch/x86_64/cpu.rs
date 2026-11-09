@@ -315,11 +315,6 @@ pub fn read_rip() -> u64 {
     val
 }
 
-/// `cli; hlt` loop. Never returns.
-///
-/// Used by the panic handler and by the boot path once phase 0 has printed
-/// its final marker. Interrupts are disabled so no ISR can drag us back.
-#[inline]
 /// Raise the undefined-instruction exception (`ud2`): the early-fault
 /// test build's trip (ROADMAP §11.1), `early_fault_test` only (AGENTS.md
 /// rule 9).
@@ -333,6 +328,11 @@ pub fn undefined_instruction() {
     }
 }
 
+/// `cli; hlt` loop. Never returns.
+///
+/// Used by the panic handler and by the boot path once phase 0 has printed
+/// its final marker. Interrupts are disabled so no ISR can drag us back.
+#[inline]
 pub fn halt() -> ! {
     loop {
         // SAFETY: `cli; hlt` stops this CPU with interrupts off and touches no memory; established here.

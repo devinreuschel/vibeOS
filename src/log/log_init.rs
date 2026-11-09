@@ -149,13 +149,6 @@ pub fn compile_max() -> Level {
     COMPILE_MAX
 }
 
-/// This CPU is inside `log_fmt`'s emit, where DESIGN §7.9 refuses a
-/// cross-CPU wait (`sync_init::assert_tlb_contract`).
-pub fn in_emit() -> bool {
-    // Relaxed: only this CPU writes its own slot; pairs with nothing.
-    EMITTING[cpu_index()].load(Ordering::Relaxed)
-}
-
 fn push_record(level: Level, msg: &[u8]) -> bool {
     if !allowed(level, runtime(), COMPILE_MAX) {
         return false;

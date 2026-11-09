@@ -168,8 +168,8 @@ pub extern "C" fn _start() -> ! {
         arch::current::halt();
     }
     crate::marker!(marker::LIMINE_OK);
-    // SAFETY: one CPU with IF=0, before `idt::init`, as `idt::init_early`
-    // requires; established here (DESIGN §3.3 boot order).
+    // SAFETY: the boot CPU with IF=0, before `idt::init`, as
+    // `idt::init_early` requires; established here (DESIGN §3.3 boot order).
     #[cfg(target_arch = "x86_64")]
     unsafe {
         arch::idt::init_early()
@@ -295,17 +295,11 @@ fn normal_boot_tail() -> ! {
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: KVA is up (`kva_init::init` above), as `gdt::init_bsp` requires; established here.
     unsafe { arch::gdt::init_bsp() };
-    // SAFETY: one CPU with IF=0, before `idt::init`, as `idt::init_early`
-    // requires; established here. The early gates now name the new GDT's CS.
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        arch::idt::init_early()
-    };
     #[cfg(target_arch = "x86_64")]
     crate::marker!(marker::GDT_OK);
 
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
-    // below: the ACPI walk ran and no IDT is loaded yet, as `pic::remap_and_mask` requires; established here.
+    // below: IF=0, the ACPI walk ran, and `idt::init` has not run (the early IDT reports only exceptions), as `pic::remap_and_mask` requires; established here.
     unsafe { arch::pic::remap_and_mask() };
     #[cfg(target_arch = "x86_64")]
     crate::marker!(marker::PIC_REMAPPED);

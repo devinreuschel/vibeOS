@@ -1048,11 +1048,16 @@ pub unsafe fn load() {
 
 /// The early IDT (ROADMAP §11.1, F136): every gate at its stub past the
 /// `clac`, no IST, the live CS; until [`init`] any vector reports itself.
-/// `_start` runs it after the Limine handshake and after `gdt::init_bsp`.
+/// `_start` runs it after the Limine handshake, and `gdt::CpuTables::load`
+/// right after its far return to `KERNEL_CS`. A no-op once [`init`] ran.
 ///
 /// # Safety
-/// One CPU with IF=0, before [`init`].
+/// IF=0, on the boot CPU while `FULL` is clear.
 pub unsafe fn init_early() {
+    // Acquire: pairs with the Release store in `init`.
+    if FULL.load(Ordering::Acquire) {
+        return;
+    }
     let cs: u16;
     // SAFETY: invariant: reading CS has no side effect; established here.
     unsafe {

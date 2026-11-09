@@ -156,6 +156,12 @@ pub fn init() -> bool {
 
 fn map_fb(i: &FbInfo) -> Option<u64> {
     let mem = fb_mem_type(crate::machine_init::info(), i.phys, i.size);
+    // `PWT` alone is write-through on x86_64, not non-cacheable, and no x86
+    // firmware table names PCIe windows (`vibeos::fb::fb_mem_type`).
+    debug_assert!(
+        cfg!(target_arch = "aarch64") || mem == FbMemType::WriteBack,
+        "fb: non-cacheable framebuffer type on x86_64"
+    );
     // A framebuffer in a PCIe window is a BAR the physmap never covers, and
     // a write-back physmap alias of it would be the wrong type anyway.
     if mem == FbMemType::WriteBack

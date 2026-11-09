@@ -261,7 +261,6 @@ impl core::fmt::Display for CpuList {
 /// IRQ-off for publish→wait→clear: this CPU's `SHOOT` slot is not
 /// reentered by a timer/reschedule switch. Inbound shootdowns still
 /// run through `service_incoming` (IF off cannot take the IPI).
-#[track_caller]
 pub fn shootdown_ranges(ranges: &[ShootRange]) {
     // DESIGN §7.9's calling contract, on both ports (ROADMAP §11.2).
     sync_init::assert_tlb_contract();

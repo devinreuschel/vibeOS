@@ -511,7 +511,7 @@ pub fn assert_tlb_contract() {
     };
     // Relaxed: only this CPU writes its slot; pairs with nothing.
     let held = Held::from_raw(slot.load(Ordering::Relaxed));
-    if let Err(e) = held.check_cross_cpu_wait(crate::log_init::in_emit()) {
+    if let Err(e) = held.check_cross_cpu_wait(crate::log_init::is_emitting()) {
         #[cfg(feature = "kernel_tests")]
         testing::trip(testing::SleepTrip::TlbContract);
         panic!("tlb contract: {e} at {}", Location::caller());
