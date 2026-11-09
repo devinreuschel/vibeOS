@@ -491,6 +491,33 @@ impl Drop for NoReclaim {
 #[cfg(feature = "kernel_tests")]
 static RANK_FAILURES: AtomicU64 = AtomicU64::new(0);
 
+/// Assert DESIGN §7.9's calling contract for the TLB-maintenance seam
+/// (`vibeos::lock::Held::check_cross_cpu_wait`) in debug and `kernel_tests`
+/// builds, on both ports (ROADMAP §11.2). Off once `HALTING` is set and
+/// before per-CPU data is live, as the rank checker is.
+#[track_caller]
+#[allow(
+    clippy::panic,
+    reason = "TLB maintenance from a context that may not wait for other CPUs is a kernel bug, never input: DESIGN §7.9's calling contract, checked by `vibeos::lock::Held::check_cross_cpu_wait`"
+)]
+pub fn assert_tlb_contract() {
+    if !(cfg!(debug_assertions) || cfg!(feature = "kernel_tests")) || halting() {
+        return;
+    }
+    // IF=0 for the slot read, so it is this CPU's (DESIGN §2.9 rule 5).
+    let _irq = InterruptGuard::enter();
+    let Some(slot) = held_slot() else {
+        return;
+    };
+    // Relaxed: only this CPU writes its slot; pairs with nothing.
+    let held = Held::from_raw(slot.load(Ordering::Relaxed));
+    if let Err(e) = held.check_cross_cpu_wait(crate::log_init::in_emit()) {
+        #[cfg(feature = "kernel_tests")]
+        testing::trip(testing::SleepTrip::TlbContract);
+        panic!("tlb contract: {e} at {}", Location::caller());
+    }
+}
+
 #[track_caller]
 #[allow(
     clippy::panic,
@@ -706,6 +733,9 @@ pub mod testing {
         /// `sync_init::assert_switch_clean`: a ranked lock held across a
         /// context switch.
         SwitchHeld = 1,
+        /// `sync_init::assert_tlb_contract`: TLB maintenance where DESIGN
+        /// §7.9's calling contract refuses a cross-CPU wait.
+        TlbContract = 5,
     }
 
     /// The last [`SleepTrip`], 0 when none is recorded.
@@ -725,6 +755,7 @@ pub mod testing {
             2 => Some(SleepTrip::HardIrq),
             3 => Some(SleepTrip::Held),
             4 => Some(SleepTrip::IfOff),
+            5 => Some(SleepTrip::TlbContract),
             _ => None,
         }
     }
