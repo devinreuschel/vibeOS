@@ -67,18 +67,21 @@ impl VirtioBlk {
                                 break;
                             }
                             let si = si as usize;
-                            blk.slots.sync_for_cpu::<Arch>();
+                            let stride = blk.stride;
+                            // Before the CPU reads the slot: a non-coherent
+                            // device's slot is invalidated line by line.
+                            take_slot::<Arch>(&blk.slots, si, stride);
                             // SAFETY: slot `si` is in flight on this queue, so the
-                            // device wrote its status byte at offset 16, synced for
-                            // the CPU above; established by
+                            // device wrote its status byte at `SLOT_STATUS`, synced
+                            // for the CPU above; established by
                             // `virtio_blk_init::issue::slot_base`.
-                            let st = unsafe { *slot_base(&blk.slots, si).add(16) };
+                            let st = unsafe { *slot_base(&blk.slots, si, stride).add(SLOT_STATUS) };
                             #[cfg(feature = "kernel_tests")]
                             let st = self.injected(st);
                             let res = map_status(st);
                             if let Some(req) = blk.slot_req[si].take() {
                                 if res.is_ok() && req.bio.op == Op::Read {
-                                    copy_from_bounce(&blk.slots, si, &req);
+                                    copy_from_bounce(&blk.slots, si, stride, &req);
                                 }
                                 done[n] = Some((req, res));
                                 n += 1;
@@ -139,7 +142,7 @@ pub(super) fn blk_top(ctx: Option<&(dyn Any + Send + Sync)>) {
         if isr != 0 {
             // Reading the ISR status acknowledges the interrupt; the value
             // itself is not needed (virtio 1.x §4.1.4.5).
-            let _ = r8(isr, 0);
+            let _ = crate::virtio_init::read_isr8(isr);
         }
     }
 }

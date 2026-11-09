@@ -57,6 +57,7 @@ pub(crate) fn test_dma_alloc() -> Outcome {
         size: 0x1000,
         align: 0x1000,
         boundary: 0x800,
+        coherent: true,
     })
     .is_some()
     {

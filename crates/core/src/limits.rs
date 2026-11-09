@@ -125,6 +125,9 @@ pub const MAX_DT_REG_BYTES: u64 = 1 << 30;
 /// Descriptors in one virtqueue the in-flight bitmap covers
 /// (`virtio::SplitLayout`); the spec allows 32768, the drivers ask for 64.
 pub const MAX_VIRTQ_SIZE: u16 = 256;
+/// The architectural maximum cache writeback granule, 512 words (Arm ARM
+/// DDI0487, `CTR_EL0.CWG`), which a `CWG` of 0 means (DESIGN §4.7).
+pub const MAX_CWG: u64 = 2048;
 /// Kernel shell commands (`shell::Registry`).
 pub const MAX_COMMANDS: usize = 48;
 /// Tokens in one kernel shell line (`shell`).

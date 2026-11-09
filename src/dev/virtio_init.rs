@@ -4,8 +4,9 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::arch::Barriers;
 use vibeos::dev::{DevRef, Device, Driver, IdMatch, Instance, ProbeError};
-use vibeos::dma::{self, DmaAlloc, DmaBuffer};
+use vibeos::dma::{DmaAlloc, DmaBuffer};
 use vibeos::irq::{IrqError, IrqId};
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -68,13 +69,16 @@ pub(crate) const RNG_PAYLOAD: usize = 32;
 const RNG_PAYLOAD_OFF: usize = 16;
 
 /// Register access shared by the PCI and mmio transports; `va` and `off`
-/// are the caller's to keep inside a window `map_mmio` mapped.
+/// are the caller's to keep inside a window `map_mmio` mapped. Each goes
+/// through the port's ordered accessors (DESIGN §4.7): a write follows
+/// every earlier store to memory, and a read completes before any later
+/// load, so no driver adds a barrier around a register access.
 pub(crate) fn r8(va: u64, off: u16) -> u8 {
     // SAFETY: invariant I54: `va` is a register of a window `map_mmio`
     // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
     // and `off` a register offset inside it; established by
     // `pci_init::map_mmio`.
-    unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u8) }
+    unsafe { Arch::mmio_read((va.wrapping_add(off as u64)) as *const u8) }
 }
 
 pub(crate) fn w8(va: u64, off: u16, v: u8) {
@@ -82,7 +86,7 @@ pub(crate) fn w8(va: u64, off: u16, v: u8) {
     // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
     // and `off` a register offset inside it; established by
     // `pci_init::map_mmio`.
-    unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u8, v) }
+    unsafe { Arch::mmio_write((va.wrapping_add(off as u64)) as *mut u8, v) }
 }
 
 pub(crate) fn r16(va: u64, off: u16) -> u16 {
@@ -90,11 +94,7 @@ pub(crate) fn r16(va: u64, off: u16) -> u16 {
     // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
     // and `off` a register offset inside it; established by
     // `pci_init::map_mmio`.
-    unsafe {
-        u16::from_le(core::ptr::read_volatile(
-            (va.wrapping_add(off as u64)) as *const u16,
-        ))
-    }
+    u16::from_le(unsafe { Arch::mmio_read((va.wrapping_add(off as u64)) as *const u16) })
 }
 
 pub(crate) fn w16(va: u64, off: u16, v: u16) {
@@ -102,9 +102,7 @@ pub(crate) fn w16(va: u64, off: u16, v: u16) {
     // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
     // and `off` a register offset inside it; established by
     // `pci_init::map_mmio`.
-    unsafe {
-        core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u16, v.to_le());
-    }
+    unsafe { Arch::mmio_write((va.wrapping_add(off as u64)) as *mut u16, v.to_le()) }
 }
 
 pub(crate) fn r32(va: u64, off: u16) -> u32 {
@@ -112,11 +110,7 @@ pub(crate) fn r32(va: u64, off: u16) -> u32 {
     // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
     // and `off` a register offset inside it; established by
     // `pci_init::map_mmio`.
-    unsafe {
-        u32::from_le(core::ptr::read_volatile(
-            (va.wrapping_add(off as u64)) as *const u32,
-        ))
-    }
+    u32::from_le(unsafe { Arch::mmio_read((va.wrapping_add(off as u64)) as *const u32) })
 }
 
 pub(crate) fn w32(va: u64, off: u16, v: u32) {
@@ -124,9 +118,17 @@ pub(crate) fn w32(va: u64, off: u16, v: u32) {
     // mapped uncached for this bound device (a BAR, or a virtio-mmio slot),
     // and `off` a register offset inside it; established by
     // `pci_init::map_mmio`.
-    unsafe {
-        core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, v.to_le());
-    }
+    unsafe { Arch::mmio_write((va.wrapping_add(off as u64)) as *mut u32, v.to_le()) }
+}
+
+/// Read a PCI transport's ISR status byte at `isr`, which acknowledges the
+/// interrupt (virtio 1.2 §4.1.4.5), through `virtio::read_isr`: ordered
+/// before the used-ring reads that follow it.
+pub(crate) fn read_isr8(isr: u64) -> u8 {
+    // SAFETY: invariant I54: `isr` is the ISR capability's register inside
+    // a BAR `map_mmio` mapped uncached for this bound device; established
+    // by `pci_init::map_mmio`.
+    unsafe { virtio::read_isr::<Arch, u8>(isr as *const u8) }
 }
 
 pub(crate) fn w64(va: u64, off: u16, v: u64) {
@@ -300,7 +302,7 @@ fn rng_top(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {
     if isr != 0 {
         // Reading the ISR status acknowledges the interrupt; the value
         // itself is not needed (virtio 1.x §4.1.4.5).
-        let _ = r8(isr, 0);
+        let _ = read_isr8(isr);
     }
     if !work_init::raise_softirq(on_soft, 1) {
         crate::klog_ratelimited!(
@@ -381,16 +383,15 @@ fn rng_work(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {
     harvest();
 }
 
+/// Notify queue `qi` through `virtio::notify`, an ordered `mmio_write`
+/// after the descriptor and `avail.idx` stores (DESIGN §4.7).
 pub(crate) fn kick(doorbell: u64, qi: u16) {
-    dma::dma_wmb::<Arch>();
     // SAFETY: invariant I54: `doorbell` is a queue's notify register inside
     // the notify capability's BAR, which `map_mmio` mapped uncached, checked
     // against the capability length by `virtio::notify_addr`; established by
     // `pci_init::map_mmio`. The store is that virtqueue's index
     // (virtio 1.2 §§4.1.5.2, 4.2.2).
-    unsafe {
-        core::ptr::write_volatile(doorbell as *mut u16, virtio::queue_notify(qi));
-    }
+    unsafe { virtio::notify::<Arch>(doorbell, qi, false) }
 }
 
 fn setup(dev: &DevRef, caps: ModernCaps) -> Result<(), VirtioError> {

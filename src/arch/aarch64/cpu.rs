@@ -111,6 +111,86 @@ pub fn note_cache() {
     }
     // Release: pairs with the Acquire load in `sync_icache`.
     CTR_NOTED.store(true, Ordering::Release);
+    // A non-coherent device's sub-page DMA region is sized in granules
+    // inside page-sized blocks (DESIGN §4.7): a CPU whose `CTR_EL0.CWG`
+    // claims more than a page would let a writeback reach past the block.
+    assert!(
+        tlb::CacheInfo::from_ctr(ctr).granule_fits_page(vibeos::pmm::PAGE_SIZE),
+        "vibeOS: CTR_EL0.CWG above a page"
+    );
+}
+
+/// What every noted CPU's `CTR_EL0` says: [`CTR`] once a CPU has met into
+/// it, and `CTR_EL0` 0 (the smallest lines, the largest granule) before.
+fn cache_info() -> tlb::CacheInfo {
+    // Acquire: pairs with the Release store of `CTR_NOTED` in `note_cache`.
+    if CTR_NOTED.load(Ordering::Acquire) {
+        // Acquire: pairs with the AcqRel update of `CTR` in `note_cache`.
+        tlb::CacheInfo::from_ctr(CTR.load(Ordering::Acquire))
+    } else {
+        tlb::CacheInfo::from_ctr(0)
+    }
+}
+
+/// The cache writeback granule every noted CPU's `CTR_EL0.CWG` allows,
+/// the largest of them (`tlb::ctr_meet`); `tlb::MAX_CWG` before
+/// [`note_cache`].
+pub fn dma_granule() -> usize {
+    cache_info().cwg as usize
+}
+
+/// Run one DMA maintenance step (`tlb::DmaOp`) at `va`.
+///
+/// # Safety
+/// `va` is a line of mapped memory the caller owns for DMA, and for
+/// `DcIvac` no CPU store to that line is pending.
+unsafe fn exec_dma(op: tlb::DmaOp, va: u64) {
+    // SAFETY: EL1 data-cache maintenance by VA on a line of the caller's
+    // mapped DMA range, this fn's `# Safety`; established by
+    // `arch::aarch64::cpu::dma_clean` and `dma_inval`.
+    unsafe {
+        match op {
+            tlb::DmaOp::DcCvac => {
+                asm!("dc cvac, {0}", in(reg) va, options(nostack, preserves_flags))
+            }
+            tlb::DmaOp::DcCivac => {
+                asm!("dc civac, {0}", in(reg) va, options(nostack, preserves_flags))
+            }
+            tlb::DmaOp::DcIvac => {
+                asm!("dc ivac, {0}", in(reg) va, options(nostack, preserves_flags))
+            }
+            tlb::DmaOp::DsbSy => asm!("dsb sy", options(nostack, preserves_flags)),
+        }
+    }
+}
+
+/// Clean `[start, start+len)` to the Point of Coherency for a non-coherent
+/// device: `tlb::dma_clean` over every noted CPU's smallest D-cache line.
+///
+/// # Safety
+/// `[start, start+len)` is mapped memory the caller owns for DMA.
+pub unsafe fn dma_clean(start: u64, len: u64) {
+    tlb::dma_clean(cache_info(), start, len, |op, va| {
+        // SAFETY: `va` is a line of the range this fn's contract names;
+        // established by `arch::aarch64::cpu::dma_clean`.
+        unsafe { exec_dma(op, va) }
+    });
+}
+
+/// Invalidate `[start, start+len)` for the CPU after a non-coherent
+/// device wrote it: `tlb::dma_inval`, which cleans a line the range
+/// covers only in part.
+///
+/// # Safety
+/// `[start, start+len)` is mapped memory the caller owns for DMA, and no
+/// CPU store to it is pending that the invalidate would discard.
+pub unsafe fn dma_inval(start: u64, len: u64) {
+    tlb::dma_inval(cache_info(), start, len, |op, va| {
+        // SAFETY: `va` is a line of the range this fn's contract names; a
+        // whole line inside it holds no pending CPU store; established by
+        // `arch::aarch64::cpu::dma_inval`.
+        unsafe { exec_dma(op, va) }
+    });
 }
 
 /// Make `[start, start+len)`, written through the data side, fetchable by
@@ -120,16 +200,7 @@ pub fn note_cache() {
 /// # Safety
 /// `[start, start+len)` is mapped, readable memory.
 pub unsafe fn sync_icache(start: u64, len: u64) {
-    // Acquire: pairs with the Release store of `CTR_NOTED` in `note_cache`.
-    let noted = CTR_NOTED.load(Ordering::Acquire);
-    let info = if noted {
-        // Acquire: pairs with the AcqRel update of `CTR` in `note_cache`.
-        let ctr = CTR.load(Ordering::Acquire);
-        tlb::CacheInfo::from_ctr(ctr)
-    } else {
-        tlb::CacheInfo::from_ctr(0)
-    };
-    tlb::sync_range(info, start, len, |op, va| {
+    tlb::sync_range(cache_info(), start, len, |op, va| {
         // SAFETY: EL1 cache maintenance by VA; `va` is a line of the mapped
         // range `sync_icache`'s contract names, established by
         // `arch::aarch64::cpu::sync_icache`.

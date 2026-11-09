@@ -32,6 +32,9 @@ pub const SYSCALL_INSN_LEN: u64 = 4;
 /// The stub port.
 pub struct Arch;
 
+/// The stub's [`Barriers::dma_granule`].
+pub const STUB_DMA_GRANULE: usize = 64;
+
 /// One recorded seam call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -470,6 +473,8 @@ impl Barriers for Arch {
         // `vibeos::arch::Barriers::mmio_read`; established here by the caller's
         // unsafe call.
         let v = unsafe { core::ptr::read_volatile(reg) };
+        #[cfg(test)]
+        crate::dma::trace::record(crate::dma::trace::Ev::MmioRead(reg as usize));
         record(Event::MmioRead {
             addr: addr(reg),
             width: size_of::<W>() as u8,
@@ -481,6 +486,8 @@ impl Barriers for Arch {
         // `vibeos::arch::Barriers::mmio_write`; established here by the
         // caller's unsafe call.
         unsafe { core::ptr::write_volatile(reg, v) };
+        #[cfg(test)]
+        crate::dma::trace::record(crate::dma::trace::Ev::MmioWrite(reg as usize));
         record(Event::MmioWrite {
             addr: addr(reg),
             width: size_of::<W>() as u8,
@@ -488,16 +495,24 @@ impl Barriers for Arch {
         });
     }
     unsafe fn sync_for_device(start: *const u8, len: usize) {
+        #[cfg(test)]
+        crate::dma::trace::record(crate::dma::trace::Ev::Clean(start as usize, len));
         record(Event::SyncForDevice {
             addr: addr(start),
             len,
         });
     }
     unsafe fn sync_for_cpu(start: *const u8, len: usize) {
+        #[cfg(test)]
+        crate::dma::trace::record(crate::dma::trace::Ev::Inval(start as usize, len));
         record(Event::SyncForCpu {
             addr: addr(start),
             len,
         });
+    }
+    /// A 64-byte granule, so host tests see regions rounded.
+    fn dma_granule() -> usize {
+        STUB_DMA_GRANULE
     }
 }
 

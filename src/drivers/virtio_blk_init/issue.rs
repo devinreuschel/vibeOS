@@ -2,14 +2,14 @@ use super::vq::{kick, pick_vq};
 use super::*;
 
 pub(super) const N_SLOTS: usize = 16;
-pub(super) const BOUNCE: usize = 8192;
-pub(super) const SLOT_META: usize = 64;
-pub(super) const SLOT_STRIDE: usize = SLOT_META + BOUNCE;
 pub(super) struct Blk {
     pub(super) q: Queue,
     pub(super) vqs: [Option<Vq>; MAX_VQ],
     pub(super) nq: u8,
     pub(super) slots: DmaBuffer,
+    /// One slot's bytes in `slots` (`DmaPlan::stride`): at least
+    /// `SLOT_META + BOUNCE`, a whole number of DMA granules.
+    pub(super) stride: usize,
     pub(super) slot_used: [bool; N_SLOTS],
     pub(super) slot_req: [Option<Request>; N_SLOTS],
     pub(super) features: u64,
@@ -18,19 +18,19 @@ pub(super) struct Blk {
 }
 
 /// Slot `si`'s first byte. `si < N_SLOTS`, so the slot lies inside `slots`,
-/// which `setup` allocates at `N_SLOTS * SLOT_STRIDE` bytes.
-pub(super) fn slot_base(slots: &DmaBuffer, si: usize) -> *mut u8 {
-    (slots.virt() as usize + si * SLOT_STRIDE) as *mut u8
+/// which `setup` allocates at `N_SLOTS * stride` bytes.
+pub(super) fn slot_base(slots: &DmaBuffer, si: usize, stride: usize) -> *mut u8 {
+    (slots.virt() as usize + si * stride) as *mut u8
 }
 
-pub(super) fn slot_dev(slots: &DmaBuffer, si: usize, off: usize) -> u64 {
-    slots.device().as_u64() + (si * SLOT_STRIDE + off) as u64
+pub(super) fn slot_dev(slots: &DmaBuffer, si: usize, stride: usize, off: usize) -> u64 {
+    slots.device().as_u64() + (si * stride + off) as u64
 }
 
-pub(super) fn copy_to_bounce(slots: &DmaBuffer, si: usize, req: &Request) {
+pub(super) fn copy_to_bounce(slots: &DmaBuffer, si: usize, stride: usize, req: &Request) {
     // SAFETY: slot `si`'s `SLOT_META` header bytes precede its bounce area
     // inside `slots`; established by `virtio_blk_init::issue::slot_base`.
-    let mut dst = unsafe { slot_base(slots, si).add(SLOT_META) };
+    let mut dst = unsafe { slot_base(slots, si, stride).add(SLOT_META) };
     let mut i = 0u8;
     while i < req.nseg {
         let s = req.segs[i as usize];
@@ -46,10 +46,10 @@ pub(super) fn copy_to_bounce(slots: &DmaBuffer, si: usize, req: &Request) {
     }
 }
 
-pub(super) fn copy_from_bounce(slots: &DmaBuffer, si: usize, req: &Request) {
+pub(super) fn copy_from_bounce(slots: &DmaBuffer, si: usize, stride: usize, req: &Request) {
     // SAFETY: as in `copy_to_bounce`; established by
     // `virtio_blk_init::issue::slot_base`.
-    let mut src = unsafe { slot_base(slots, si).add(SLOT_META) };
+    let mut src = unsafe { slot_base(slots, si, stride).add(SLOT_META) };
     let mut i = 0u8;
     while i < req.nseg {
         let s = req.segs[i as usize];
@@ -130,19 +130,20 @@ impl VirtioBlk {
             Op::Discard => T_DISCARD,
         };
 
-        let base = slot_base(&blk.slots, si);
+        let stride = blk.stride;
+        let base = slot_base(&blk.slots, si, stride);
         // SAFETY: slot `si` is free (`alloc_slot` just marked it), so the device
-        // owns none of its `SLOT_STRIDE` bytes; established by
+        // owns none of its `stride` bytes; established by
         // `virtio_blk_init::issue::alloc_slot`.
         unsafe {
-            core::ptr::write_bytes(base, 0, SLOT_STRIDE);
+            core::ptr::write_bytes(base, 0, stride);
             let mut hdr = [0u8; 16];
             pack_header(&mut hdr, typ, sector);
             core::ptr::copy_nonoverlapping(hdr.as_ptr(), base, 16);
-            *base.add(16) = 0xFF;
+            *base.add(SLOT_STATUS) = 0xFF;
         }
         if req.bio.op == Op::Write {
-            copy_to_bounce(&blk.slots, si, &req);
+            copy_to_bounce(&blk.slots, si, stride, &req);
         }
         if req.bio.op == Op::Discard {
             let n512 = match sector_for_lba(req.bio.nsect as u64, blk.blk_size) {
@@ -163,15 +164,17 @@ impl VirtioBlk {
             // SAFETY: as above: bytes 32..48 of the free slot `si`; established
             // by `virtio_blk_init::issue::alloc_slot`.
             unsafe {
-                core::ptr::copy_nonoverlapping(disc.as_ptr(), base.add(32), 16);
+                core::ptr::copy_nonoverlapping(disc.as_ptr(), base.add(SLOT_DISCARD), 16);
             }
         }
 
-        let hdr_d = slot_dev(&blk.slots, si, 0);
-        let st_d = slot_dev(&blk.slots, si, 16);
-        let data_d = slot_dev(&blk.slots, si, SLOT_META);
-        let disc_d = slot_dev(&blk.slots, si, 32);
-        blk.slots.sync_for_device::<Arch>();
+        let hdr_d = slot_dev(&blk.slots, si, stride, 0);
+        let st_d = slot_dev(&blk.slots, si, stride, SLOT_STATUS);
+        let data_d = slot_dev(&blk.slots, si, stride, SLOT_META);
+        let disc_d = slot_dev(&blk.slots, si, stride, SLOT_DISCARD);
+        // Before the chain is published: a non-coherent device's slot is
+        // cleaned line by line (DESIGN §4.7).
+        hand_slot::<Arch>(&blk.slots, si, stride);
 
         let chain: [DescBuf; 3];
         let nchain: usize;

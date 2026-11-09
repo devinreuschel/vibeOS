@@ -607,3 +607,165 @@ fn used_idx_ahead_of_the_queue_breaks_it() {
     assert_eq!(q.get_used(), Err(VirtioError::BadUsed));
     assert_eq!(q.num_free(), 8);
 }
+
+/// DESIGN §4.7, for a non-coherent device, over one virtio-blk request:
+/// every ring store and the request's slot are cleaned before the doorbell,
+/// which is an ordered `mmio_write` after the `avail.idx` store; the
+/// interrupt-status read is an ordered `mmio_read` before the used-ring
+/// reads; every used-ring load is invalidated first, and the slot is
+/// invalidated before the CPU reads it. The per-line expansion of each
+/// clean and invalidate is `arch::aarch64::tlb`'s `dma_clean` and
+/// `dma_inval`, which its own tests check line by line.
+#[test]
+fn non_coherent_request_path_cleans_and_invalidates() {
+    use crate::dma::trace::Ev;
+    use crate::dma::{DmaAlloc, alloc_from_buddy, free_to_buddy};
+    use crate::virtio_blk::{
+        SLOT_META, SLOT_STATUS, hand_slot, slot_region, slot_stride, take_slot,
+    };
+
+    let g = <Stub as Barriers>::dma_granule();
+    let layout = SplitLayout::with_granule(8, g).unwrap();
+    assert_eq!(layout.used_off % g, 0);
+    assert!(layout.used_event() + 2 <= layout.used_off);
+    assert_eq!(layout.total % g, 0);
+    // Ring memory at a page boundary, so granule offsets are addresses.
+    let mut ring_mem = vec![0u8; layout.total + 4096];
+    let ring = {
+        let p = ring_mem.as_mut_ptr();
+        // SAFETY: the adjustment is under 4096, inside the spare page;
+        // established here.
+        unsafe { p.add((4096 - p as usize % 4096) % 4096) }
+    };
+    let mut q = queue(layout, ring, true);
+    q.set_non_coherent().unwrap();
+    q.init();
+    let in_ring = |a: usize| a >= ring as usize && a < ring as usize + layout.total;
+    let used_lo = ring as usize + layout.used_off;
+
+    let mut pool = crate::pmm::testing::Pool::new(64);
+    let hhdm = pool.hhdm();
+    let stride = slot_stride(g).unwrap();
+    let spec = DmaAlloc::new(4 * stride as u64).coherent(false);
+    let slots = alloc_from_buddy::<Stub>(&mut pool.buddy, spec, |p| p.wrapping_add(hhdm)).unwrap();
+    let si = 1usize;
+    let (soff, slen) = slot_region(si, stride);
+    let slot_va = slots.virt() as usize + soff as usize;
+    assert_eq!(soff % g as u64, 0);
+    assert_eq!(slen % g as u64, 0);
+
+    let doorbell = 0u16;
+    let isr = 1u8;
+    // The device reaches the slot buffer at device offsets from its base.
+    let chain = [
+        DescBuf {
+            addr: soff,
+            len: 16,
+            flags: 0,
+        },
+        DescBuf {
+            addr: soff + SLOT_META as u64,
+            len: 512,
+            flags: DESC_F_WRITE,
+        },
+        DescBuf {
+            addr: soff + SLOT_STATUS as u64,
+            len: 1,
+            flags: DESC_F_WRITE,
+        },
+    ];
+
+    dma::trace::start();
+    hand_slot::<Stub>(&slots, si, stride);
+    q.add_chain(&chain).unwrap();
+    let old = q.last_avail();
+    q.publish();
+    let _ = q.should_kick(old);
+    // SAFETY: `doorbell` is a live, aligned u16 standing in for the notify
+    // register; established here.
+    unsafe { notify::<Stub>(&doorbell as *const u16 as u64, 0, false) };
+    let sub = dma::trace::take();
+    assert!(!sub.overflow);
+    let sub = sub.as_slice();
+    let bell = sub
+        .iter()
+        .position(|e| *e == Ev::MmioWrite(&doorbell as *const u16 as usize))
+        .expect("doorbell written");
+    assert!(
+        sub[..bell].contains(&Ev::Clean(slot_va, slen as usize)),
+        "slot not cleaned before the doorbell"
+    );
+    let idx = sub
+        .iter()
+        .rposition(|e| *e == Ev::Store(ring as usize + layout.avail_idx()))
+        .expect("avail.idx stored");
+    assert!(idx < bell, "the doorbell is not after the avail.idx store");
+    let mut stores = 0;
+    for (i, e) in sub[..bell].iter().enumerate() {
+        if let Ev::Store(a) = *e {
+            assert!(in_ring(a));
+            stores += 1;
+            // The next maintenance after the store cleans its bytes.
+            let clean = sub[i + 1..bell]
+                .iter()
+                .find(|e| matches!(e, Ev::Clean(..) | Ev::Inval(..)));
+            assert!(
+                matches!(clean, Some(Ev::Clean(s, n)) if *s <= a && a < s + n),
+                "ring store at {a:#x} not cleaned before the doorbell"
+            );
+        }
+    }
+    assert!(stores >= 4, "descriptors, avail entry, avail.idx");
+
+    // SAFETY: the chain's buffers are device offsets into the slot buffer
+    // at `slots.virt()`, which holds them; established here.
+    let done = unsafe { sim_complete(&mut q, 0, slots.virt() as *mut u8, 0) };
+    assert_eq!(done, 1);
+
+    dma::trace::start();
+    // SAFETY: `isr` is a live byte standing in for the ISR register;
+    // established here.
+    let _ = unsafe { read_isr::<Stub, u8>(&isr) };
+    assert!(q.get_used().unwrap().is_some());
+    take_slot::<Stub>(&slots, si, stride);
+    let comp = dma::trace::take();
+    assert!(!comp.overflow);
+    let comp = comp.as_slice();
+    assert_eq!(comp[0], Ev::MmioRead(&isr as *const u8 as usize));
+    let mut loads = 0;
+    for (i, e) in comp.iter().enumerate() {
+        if let Ev::Load(a) = *e
+            && a >= used_lo
+            && in_ring(a)
+        {
+            loads += 1;
+            assert!(i > 0, "a used-ring load before the ISR read");
+            assert!(
+                matches!(comp[i - 1], Ev::Inval(s, n) if s <= a && a < s + n),
+                "used-ring load at {a:#x} not invalidated first"
+            );
+        }
+    }
+    assert!(loads >= 3, "used.idx, the element's id and len");
+    let last_load = comp.iter().rposition(|e| matches!(e, Ev::Load(_))).unwrap();
+    assert!(
+        comp[last_load..].contains(&Ev::Inval(slot_va, slen as usize)),
+        "slot not invalidated before the CPU reads it"
+    );
+    free_to_buddy::<Stub>(&mut pool.buddy, slots);
+    drop(ring_mem);
+}
+
+/// A non-coherent queue needs its used ring on a granule boundary.
+#[test]
+fn non_coherent_queue_refuses_a_packed_layout() {
+    let g = <Stub as Barriers>::dma_granule();
+    let packed = SplitLayout::new(8).unwrap();
+    assert_ne!(packed.used_off % g, 0);
+    let (_keep, base) = pool(packed.total + 4096);
+    let mut q = queue(packed, base, false);
+    assert_eq!(q.set_non_coherent(), Err(VirtioError::BadQueue));
+    assert!(q.coherent());
+    assert_eq!(SplitLayout::with_granule(8, 4), SplitLayout::new(8));
+    assert_eq!(SplitLayout::with_granule(8, 48), None);
+}

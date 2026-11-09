@@ -276,6 +276,21 @@ fn window_of(e: &Ecam, bus: u8) -> Option<EcamWin> {
     None
 }
 
+/// Whether the host bridge whose bus range holds `bus` marks its devices
+/// DMA-coherent (`dma-coherent` on its device-tree node, or every host on
+/// x86_64). A bus no host covers, such as x86_64's legacy configuration
+/// path, is coherent on x86_64 and non-coherent elsewhere (DESIGN §4.7).
+fn host_dma_coherent(bus: u8) -> bool {
+    machine_init::info()
+        .and_then(|d| {
+            d.pci_hosts()
+                .iter()
+                .find(|h| h.first_bus <= bus && bus <= h.last_bus)
+                .map(|h| h.dma_coherent)
+        })
+        .unwrap_or(cfg!(target_arch = "x86_64"))
+}
+
 /// The window `scan` installs for `h`: base non-zero, `last` clamped to
 /// `first + (size >> 20) - 1`.
 fn host_window(h: &vibeos::machine::PciHost) -> Option<EcamWin> {
@@ -525,7 +540,8 @@ pub fn init(publish: fn(Device, Option<u64>) -> Result<DevRef, AllocError>) {
         let parent = dev::parent_bridge(scanned, i)
             .and_then(|p| ids.get(p).copied())
             .filter(|&id| id != 0);
-        let dev = Device::from_func(info);
+        let mut dev = Device::from_func(info);
+        dev.dma_coherent = host_dma_coherent(info.bdf.bus);
         #[expect(
             clippy::let_underscore_must_use,
             reason = "a write to Serial cannot fail (DESIGN §2.5)"

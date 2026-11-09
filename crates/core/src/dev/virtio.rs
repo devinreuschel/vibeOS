@@ -6,7 +6,7 @@
 
 use core::marker::PhantomData;
 
-use crate::arch::Barriers;
+use crate::arch::{Barriers, MmioWidth};
 use crate::atomic::AtomicU16;
 
 use crate::dma::{self, publish_index};
@@ -339,6 +339,41 @@ pub const fn queue_notify(qi: u16) -> u16 {
     qi
 }
 
+/// Notify the device of queue `qi` at its doorbell, through the port's
+/// ordered [`Barriers::mmio_write`]: the write follows every earlier store,
+/// the descriptors and `avail.idx` included, so the caller adds no barrier
+/// (DESIGN §4.7). Every driver's kick is this call. `notify32` picks
+/// virtio-mmio's 32-bit QueueNotify over PCI's 16-bit register.
+///
+/// # Safety
+/// `doorbell` is the queue's mapped, aligned notify register, which the
+/// caller's driver owns.
+pub unsafe fn notify<A: Barriers>(doorbell: u64, qi: u16, notify32: bool) {
+    // SAFETY: the doorbell is the caller's register, this fn's `# Safety`
+    // section; established by `virtio::notify`'s caller.
+    unsafe {
+        if notify32 {
+            A::mmio_write(doorbell as *mut u32, u32::from(queue_notify(qi)));
+        } else {
+            A::mmio_write(doorbell as *mut u16, queue_notify(qi));
+        }
+    }
+}
+
+/// Read an interrupt-status register (PCI's ISR byte, virtio-mmio's
+/// InterruptStatus) through the port's ordered [`Barriers::mmio_read`]:
+/// the read completes before any later load, so the ring reads that follow
+/// see what the status announced (DESIGN §4.7).
+///
+/// # Safety
+/// `reg` is the device's mapped, aligned status register, and the read
+/// (which acknowledges on PCI) is one the caller's driver owns.
+pub unsafe fn read_isr<A: Barriers, W: MmioWidth>(reg: *const W) -> W {
+    // SAFETY: the register is the caller's, this fn's `# Safety` section;
+    // established by `virtio::read_isr`'s caller.
+    unsafe { A::mmio_read(reg) }
+}
+
 /// Smallest `length` a capability of `cfg_type` may declare and still hold
 /// the registers the driver reads: the common config is 0x38 bytes
 /// (virtio 1.2 §4.1.4.3), a notify register 2 (§4.1.4.4), the ISR status 1
@@ -397,20 +432,36 @@ pub struct SplitLayout {
 
 impl SplitLayout {
     pub fn new(size: u16) -> Option<Self> {
+        Self::with_granule(size, 4)
+    }
+
+    /// [`new`](Self::new) with the used ring, which the device writes, at a
+    /// `granule` boundary and the total sized in granules, so for a
+    /// non-coherent device no granule holds both what the CPU writes (the
+    /// descriptors and the avail ring) and what the device writes (DESIGN
+    /// §4.7). `granule` is a power of two; below 4 it is 4, the used ring's
+    /// alignment (virtio 1.2 §2.7).
+    pub fn with_granule(size: u16, granule: usize) -> Option<Self> {
         if !is_pow2_u16(size) || size > MAX_VIRTQ_SIZE {
             return None;
         }
+        let g = granule.max(4);
         let n = size as usize;
         let desc = n * 16;
         let avail = 4 + 2 * n + 2;
-        let used_off = (desc + avail + 3) & !3;
+        let used_off = dma::granule_round(desc + avail, g)?;
         let used = 4 + 8 * n + 2;
+        let total = if g == 4 {
+            used_off + used
+        } else {
+            dma::granule_round(used_off + used, g)?
+        };
         Some(Self {
             size,
             desc_off: 0,
             avail_off: desc,
             used_off,
-            total: used_off + used,
+            total,
         })
     }
 
@@ -572,6 +623,10 @@ pub struct SplitQueue<A: Barriers> {
     pub event_idx: bool,
     /// Avail idx last published. Kick uses this as `old`.
     last_avail: u16,
+    /// The device snoops the CPU's caches. When clear, each ring store is
+    /// cleaned to the Point of Coherency after it and each load from the
+    /// used ring invalidated before it (DESIGN §4.7).
+    coherent: bool,
     _port: PhantomData<fn() -> A>,
 }
 
@@ -604,8 +659,52 @@ impl<A: Barriers> SplitQueue<A> {
             broken: false,
             event_idx,
             last_avail: 0,
+            coherent: true,
             _port: PhantomData,
         })
+    }
+
+    /// Serve a non-coherent device: from now on the queue runs the port's
+    /// cache maintenance around each ring access. `BadQueue` unless the used
+    /// ring starts on a [`Barriers::dma_granule`] boundary, as
+    /// [`SplitLayout::with_granule`] places it.
+    pub fn set_non_coherent(&mut self) -> Result<(), VirtioError> {
+        let g = A::dma_granule();
+        let used = (self.base.0 as usize).wrapping_add(self.layout.used_off);
+        if !g.is_power_of_two() || used & (g - 1) != 0 {
+            return Err(VirtioError::BadQueue);
+        }
+        self.coherent = false;
+        Ok(())
+    }
+
+    /// Whether the queue serves a coherent device.
+    pub fn coherent(&self) -> bool {
+        self.coherent
+    }
+
+    /// Before a load of `len` bytes at ring offset `off`: for a
+    /// non-coherent device, invalidate it when the device writes it (the
+    /// used ring), so the load sees memory, not a stale line.
+    fn before_load(&self, p: *const u8, off: usize, len: usize) {
+        if !self.coherent && off >= self.layout.used_off {
+            // SAFETY: invariant I53: `[p, p + len)` lies inside the queue's
+            // ring (checked by `field`), and the CPU stores nothing to the
+            // used ring once `init` has cleaned it; established by
+            // `virtio::SplitQueue::new`.
+            unsafe { A::sync_for_cpu(p, len) };
+        }
+    }
+
+    /// After a store of `len` bytes at `p`: for a non-coherent device,
+    /// clean it to the Point of Coherency before the device can be told.
+    fn after_store(&self, p: *const u8, len: usize) {
+        if !self.coherent {
+            // SAFETY: invariant I53: `[p, p + len)` lies inside the queue's
+            // ring (checked by `field`); established by
+            // `virtio::SplitQueue::new`.
+            unsafe { A::sync_for_device(p, len) };
+        }
     }
 
     // The layout and the cursors are private, with these read accessors,
@@ -644,6 +743,7 @@ impl<A: Barriers> SplitQueue<A> {
 
     fn rd16(&self, off: usize) -> u16 {
         let p = self.field(off, 2);
+        self.before_load(p, off, 2);
         // SAFETY: invariant I53: `p` lies inside the queue's ring (checked
         // by `field`), which `base` keeps valid and aligned; established by
         // `virtio::SplitQueue::new`.
@@ -654,11 +754,13 @@ impl<A: Barriers> SplitQueue<A> {
         let p = self.field(off, 2);
         // SAFETY: invariant I53, as in `rd16`; established by
         // `virtio::SplitQueue::new`.
-        unsafe { store_u16(p, 0, v) }
+        unsafe { store_u16(p, 0, v) };
+        self.after_store(p, 2)
     }
 
     fn rd32(&self, off: usize) -> u32 {
         let p = self.field(off, 4);
+        self.before_load(p, off, 4);
         // SAFETY: invariant I53, as in `rd16`; established by
         // `virtio::SplitQueue::new`.
         unsafe { load_u32(p, 0) }
@@ -668,11 +770,13 @@ impl<A: Barriers> SplitQueue<A> {
         let p = self.field(off, 4);
         // SAFETY: invariant I53, as in `rd16`; established by
         // `virtio::SplitQueue::new`.
-        unsafe { store_u32(p, 0, v) }
+        unsafe { store_u32(p, 0, v) };
+        self.after_store(p, 4)
     }
 
     fn rd64(&self, off: usize) -> u64 {
         let p = self.field(off, 8);
+        self.before_load(p, off, 8);
         // SAFETY: invariant I53, as in `rd16`; established by
         // `virtio::SplitQueue::new`.
         unsafe { load_u64(p, 0) }
@@ -682,7 +786,8 @@ impl<A: Barriers> SplitQueue<A> {
         let p = self.field(off, 8);
         // SAFETY: invariant I53, as in `rd16`; established by
         // `virtio::SplitQueue::new`.
-        unsafe { store_u64(p, 0, v) }
+        unsafe { store_u64(p, 0, v) };
+        self.after_store(p, 8)
     }
 
     /// Chain free descriptors. Zero rings.

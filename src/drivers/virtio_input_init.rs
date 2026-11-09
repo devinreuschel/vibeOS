@@ -65,7 +65,7 @@ static STATE: SpinMutex<State> = SpinMutex::with_rank(
 fn ack_isr(st: &State) {
     for d in st.devs.iter().flatten() {
         if d.isr != 0 {
-            let _ = r8(d.isr, 0);
+            let _ = crate::virtio_init::read_isr8(d.isr);
         }
     }
 }
