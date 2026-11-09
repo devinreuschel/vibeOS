@@ -71,6 +71,27 @@ GDB_SYMBOLS = "build/debug/symbols.gdb"
 GDB_PORT = 1234
 # `make debug CORE=`: the virtually addressed core the core tool writes.
 GDB_CORE = "build/debug/core.virt"
+# Per arch (ROADMAP §10.1, §11.7): gdb's `set architecture` name, and the gdb
+# that reads the arch's ELFs: a multi-target gdb on Linux (Ubuntu's
+# `gdb-multiarch` for aarch64 on an x86_64 host), and Homebrew's cross gdb on
+# macOS, which has no native gdb on Apple Silicon.
+GDB_ARCH = {"x86_64": "i386:x86-64", "aarch64": "aarch64"}
+GDB_COMMAND = {
+    "x86_64": "gdb -x scripts/vibeos.gdb        (x86_64-elf-gdb on macOS)",
+    "aarch64": "gdb-multiarch -x scripts/vibeos.gdb        (aarch64-elf-gdb on macOS)",
+}
+
+
+def current_arch() -> str:
+    """The arch `VIBEOS_ARCH` names (`apply_arch_cli` sets it from --arch)."""
+    return os.environ.get("VIBEOS_ARCH") or "x86_64"
+
+
+def gdb_arch(arch: str) -> str:
+    """gdb's `set architecture` name for `arch`; HarnessError on another."""
+    if arch not in GDB_ARCH:
+        raise HarnessError(f"arch {arch!r}: not x86_64 or aarch64")
+    return GDB_ARCH[arch]
 
 
 def interactive_config(mode: str) -> tuple[QemuConfig, float | None]:
@@ -87,13 +108,18 @@ def interactive_argv(mode: str) -> list[str]:
 
 
 def write_gdb_symbols(
-    path: str, kernel_elf: str, user_elfs: Sequence[str], core: str | None = None
+    path: str,
+    kernel_elf: str,
+    user_elfs: Sequence[str],
+    core: str | None = None,
+    arch: str = "x86_64",
 ) -> None:
-    """The gdb commands that load the kernel ELF and each user ELF, by
-    absolute path. The user ELFs load at their own link addresses (`-o 0`).
-    `$vibeos_core` tells scripts/vibeos.gdb whether to attach to the stub
-    (0) or, with `core`, to open that virtually addressed core (1)."""
-    lines = [f"file {os.path.abspath(kernel_elf)}"]
+    """The gdb commands that set `arch`'s architecture and load the kernel
+    ELF and each user ELF, by absolute path. The user ELFs load at their own
+    link addresses (`-o 0`). `$vibeos_core` tells scripts/vibeos.gdb whether
+    to attach to the stub (0) or, with `core`, to open that virtually
+    addressed core (1)."""
+    lines = [f"set architecture {gdb_arch(arch)}", f"file {os.path.abspath(kernel_elf)}"]
     lines += [f"add-symbol-file {os.path.abspath(u)} -o 0" for u in user_elfs]
     if core is None:
         lines.append("set $vibeos_core = 0")
@@ -114,10 +140,12 @@ def debug_core(core: str, kernel_elf: str) -> int:
     sys.stdout.write(out)
     if rc != 0:
         raise HarnessError(f"vmcore exited {rc}: {err.strip()}")
-    write_gdb_symbols(GDB_SYMBOLS, kernel_elf, [], core=GDB_CORE)
+    arch = current_arch()
+    gdb_arch(arch)
+    write_gdb_symbols(GDB_SYMBOLS, kernel_elf, [], core=GDB_CORE, arch=arch)
     print(
         f"debug: {GDB_CORE} holds {core}'s kernel half; from the repository root run\n"
-        "    gdb -x scripts/vibeos.gdb        (x86_64-elf-gdb on macOS)\n"
+        f"    {GDB_COMMAND[arch]}\n"
         "then `info threads` and `bt` (one thread per CPU)",
         file=sys.stderr,
     )
@@ -190,11 +218,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return debug_core(args.core, args.kernel_elf)
         cfg, timeout = interactive_config(args.cmd)
         if args.cmd == "debug":
-            write_gdb_symbols(GDB_SYMBOLS, args.kernel_elf, args.user_elf)
+            arch = current_arch()
+            gdb_arch(arch)
+            write_gdb_symbols(GDB_SYMBOLS, args.kernel_elf, args.user_elf, arch=arch)
             print(
                 f"debug: QEMU starts halted with a gdb stub on localhost:{GDB_PORT}; "
                 "from the repository root, in another terminal, run\n"
-                "    gdb -x scripts/vibeos.gdb        (x86_64-elf-gdb on macOS)\n"
+                f"    {GDB_COMMAND[arch]}\n"
                 f"then `hbreak _start` and `continue`. Symbols: {GDB_SYMBOLS}",
                 file=sys.stderr,
             )

@@ -1848,7 +1848,7 @@ when = ["panic_stop_test", "!panic_test"]
 [[marker]]
 text = "vibeOS: hang_test: armed"
 kind = "contract"
-arch = "x86_64"
+arch = "both"
 source = "kernel"
 section = "§10.7"
 order = 360

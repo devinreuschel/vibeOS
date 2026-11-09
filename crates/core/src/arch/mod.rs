@@ -16,6 +16,10 @@ pub mod x86_64;
 /// that port's module; the kernel picks them in `arch::current`.
 pub use x86_64::{apic, desc, pic, uart, vectors};
 
+/// The core tool's x86_64 page-table format (`log::vmcore::walk`), named
+/// here so portable code reaches it outside this directory.
+pub use x86_64::paging::X86_64;
+
 /// Host tests and the x86_64 kernel use the reference port's numbers.
 pub use x86_64::syscall::nr as syscall_nr;
 

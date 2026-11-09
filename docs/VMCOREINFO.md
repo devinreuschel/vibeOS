@@ -39,8 +39,10 @@ page-aligned 4 KiB page of its image (`log::vmcoreinfo_init`, with the portable
 
 `vmcoreinfo_init::publish` runs once at boot, on the BSP, after the per-CPU array and the bootstrap
 thread exist and before `irq: enabled`. It renders the note, translates its address, and then, when
-QEMU's fw_cfg is present (probed only when CPUID reports a hypervisor, ROADMAP §10.2, so bare metal
-never sees a write to port `0x510`) and lists `etc/vmcoreinfo`, reads that file's 16 bytes:
+QEMU's fw_cfg is present (on x86_64 probed only when CPUID reports a hypervisor, ROADMAP §10.2, so
+bare metal never sees a write to port `0x510`; on aarch64 at the MMIO window of the
+`qemu,fw-cfg-mmio` node the device tree names, ROADMAP §11.7) and lists `etc/vmcoreinfo`, reads that
+file's 16 bytes:
 
 | Offset | Size | Field |
 |---|---|---|
@@ -69,8 +71,8 @@ values are decimal. These are Linux's shapes. The kernel emits the keys in this 
 | `OSRELEASE` | the kernel crate's version (Linux's key) |
 | `BUILD-ID` | 40 lowercase hex digits: the descriptor of the kernel ELF's `NT_GNU_BUILD_ID` note (Linux's key) |
 | `PAGESIZE` | `4096` (Linux's key) |
-| `NUMBER(vibeos_pgt_root)` | physical address of the kernel's x86_64 PML4 (`paging_init::kernel_cr3`) |
-| `NUMBER(vibeos_pgt_levels)` | `4`: the kernel never sets `CR4.LA57` |
+| `NUMBER(vibeos_pgt_root)` | physical address of the kernel's page-table root (`paging_init::kernel_cr3`): the PML4 on x86_64; on aarch64 the TTBR1_EL1 root table, which maps the whole kernel half (4 KiB granule, 48-bit VA) |
+| `NUMBER(vibeos_pgt_levels)` | `4`: x86_64 never sets `CR4.LA57`; aarch64's `T1SZ` is 16 |
 | `SYMBOL(vibeos_log)` | virtual address of the log ring's static, a `vibeos::log::KernelLog` |
 | `SYMBOL(vibeos_tcbs)` | virtual address of the TCB slot array; each slot is a `TcbSlot`, null or a `Tcb` pointer |
 | `LENGTH(vibeos_tcbs)` | slots in that array |
@@ -82,6 +84,10 @@ Naming rule: a key Linux defines keeps Linux's name and meaning; an entry only v
 Linux interfaces). Compatibility: readers ignore keys they do not know, and a key never changes
 meaning; a new meaning takes a new key.
 
+The core's `e_machine` says which format `NUMBER(vibeos_pgt_root)` is in: the core tool walks an
+x86_64 core's PML4 from slot 256 and an aarch64 core's TTBR1 table from slot 0
+(`vmcore::walk::CoreFormat`).
+
 The three roots exist so the core tool reaches the tables through the types below, which are the
 portable crate's, instead of through kernel-half containers (`SpinMutex<Sched>`,
 `BootCell<Box<[PerCpu]>>`) whose layouts are not.
@@ -89,7 +95,6 @@ portable crate's, instead of through kernel-half containers (`SpinMutex<Sched>`,
 Planned keys, not yet emitted:
 
 - `KERNELOFFSET` (ROADMAP §18.2): the KASLR slide, Linux's key.
-- aarch64's TTBR1 root table (ROADMAP §11.7).
 - `LAYOUT-VERSION` and the `SIZE`, `OFFSET` and `NUMBER` entries §25.4's dump filter reads.
 
 `vibeos::log::vmcoreinfo::KEYS` lists the emitted keys in order; its host test `keys_documented`

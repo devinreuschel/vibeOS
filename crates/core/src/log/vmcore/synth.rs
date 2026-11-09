@@ -1,8 +1,9 @@
 //! Synthetic cores for the host tests, the hostlib tool's tests and the
 //! fuzz seeds (C-FUZZ): physical RAM segments, a four-level page table in
-//! the port's pure format built in that RAM, notes, and the ELF core QEMU's
-//! `dump-guest-memory` writes around them; and a small kernel ELF with a
-//! build-id note, `.text` and `.symtab`. Host only (`std`).
+//! a port's pure format (x86_64's PML4, or aarch64's TTBR1 table) built in
+//! that RAM, notes, and the ELF core QEMU's `dump-guest-memory` writes
+//! around them; and a small kernel ELF with a build-id note, `.text` and
+//! `.symtab`. Host only (`std`).
 
 #![allow(
     clippy::disallowed_types,
@@ -15,15 +16,17 @@
 
 use std::vec::Vec;
 
-use super::{ET_CORE, NT_PRSTATUS, PAGE, PT_NOTE, Phdr, SHT_NOTE, SHT_SYMTAB};
-use crate::arch::stub::Arch;
+use super::walk::{Aarch64Ttbr1, CoreFormat, Desc, X86_64};
+use super::{ET_CORE, Machine, NT_PRSTATUS, PAGE, PT_NOTE, Phdr, SHT_NOTE, SHT_SYMTAB};
 use crate::log::vmcoreinfo;
-use crate::paging::{PageFlags, PageTable, PhysAddr, VirtAddr};
-use crate::proc::elf::{EHDR_SIZE, EM_X86_64, PHDR_SIZE, PT_LOAD};
+use crate::paging::PageFlags;
+use crate::proc::elf::{EHDR_SIZE, PHDR_SIZE, PT_LOAD};
 
 /// A core under construction: RAM segments `(paddr, bytes)`, frames for
 /// page tables taken from the first segment's top down, and the notes.
 pub struct Synth {
+    /// The port whose tables, registers and `e_machine` the core has.
+    pub machine: Machine,
     pub segs: Vec<(u64, Vec<u8>)>,
     pub notes: Vec<u8>,
     /// The next page-table frame, counting down.
@@ -54,29 +57,46 @@ pub fn note(name: &[u8], kind: u32, desc: &[u8]) -> Vec<u8> {
     v
 }
 
-/// An `NT_PRSTATUS` descriptor (336 bytes) with `pr_pid` and the four
-/// registers the tool reads in their `pr_reg` slots.
+/// An x86-64 `NT_PRSTATUS` descriptor (336 bytes) with `pr_pid` and the
+/// four registers the tool reads in their `pr_reg` slots.
 pub fn prstatus(pid: u32, rip: u64, rsp: u64, rbp: u64) -> Vec<u8> {
-    let mut d = vec![0u8; 336];
+    prstatus_for(Machine::X86_64, pid, rip, rsp, rbp)
+}
+
+/// A `machine` `NT_PRSTATUS` descriptor: x86-64's 336 bytes, or AArch64's
+/// 392 (`user_pt_regs` is 34 words), with `pr_pid`, the PC, SP and frame
+/// pointer, and the flags word (`eflags` 2, `pstate` EL1h 5).
+pub fn prstatus_for(machine: Machine, pid: u32, pc: u64, sp: u64, fp: u64) -> Vec<u8> {
+    let (len, [pc_at, sp_at, fp_at, fl_at], flags) = match machine {
+        Machine::X86_64 => (336, [16, 19, 4, 18], 0x2u64),
+        Machine::Aarch64 => (392, [32, 31, 29, 33], 0x5u64),
+    };
+    let mut d = vec![0u8; len];
     d[32..36].copy_from_slice(&pid.to_le_bytes());
     let slot = |i: usize| 112 + i * 8;
-    d[slot(4)..slot(4) + 8].copy_from_slice(&rbp.to_le_bytes());
-    d[slot(16)..slot(16) + 8].copy_from_slice(&rip.to_le_bytes());
-    d[slot(18)..slot(18) + 8].copy_from_slice(&0x2u64.to_le_bytes());
-    d[slot(19)..slot(19) + 8].copy_from_slice(&rsp.to_le_bytes());
+    for (at, v) in [(fp_at, fp), (pc_at, pc), (fl_at, flags), (sp_at, sp)] {
+        d[slot(at)..slot(at) + 8].copy_from_slice(&v.to_le_bytes());
+    }
     d
 }
 
 impl Synth {
-    /// RAM segments `(paddr, len)`, zeroed; page-table frames come from the
-    /// top of the first.
+    /// An x86_64 core of RAM segments `(paddr, len)`, zeroed; page-table
+    /// frames come from the top of the first.
     pub fn new(segs: &[(u64, u64)]) -> Self {
+        Self::new_for(Machine::X86_64, segs)
+    }
+
+    /// A `machine` core of RAM segments `(paddr, len)`: its root is a PML4
+    /// on x86_64 and a TTBR1 table on aarch64.
+    pub fn new_for(machine: Machine, segs: &[(u64, u64)]) -> Self {
         let segs: Vec<(u64, Vec<u8>)> = segs
             .iter()
             .map(|&(pa, len)| (pa, vec![0u8; len as usize]))
             .collect();
         let (pa0, ref b0) = segs[0];
         let mut s = Synth {
+            machine,
             next: pa0 + b0.len() as u64,
             segs,
             notes: Vec::new(),
@@ -131,6 +151,36 @@ impl Synth {
         self.write_phys(table + idx as u64 * 8, &e.to_le_bytes());
     }
 
+    fn index(&self, va: u64, level: u8) -> usize {
+        match self.machine {
+            Machine::X86_64 => X86_64::index(va, level),
+            Machine::Aarch64 => Aarch64Ttbr1::index(va, level),
+        }
+    }
+
+    fn desc(&self, e: u64, level: u8) -> (Desc, u64) {
+        match self.machine {
+            Machine::X86_64 => (X86_64::desc(e, level), X86_64::entry_phys(e)),
+            Machine::Aarch64 => (Aarch64Ttbr1::desc(e, level), Aarch64Ttbr1::entry_phys(e)),
+        }
+    }
+
+    /// A table descriptor for the table at `pa`, in this core's format.
+    pub fn table_entry(&self, pa: u64) -> u64 {
+        match self.machine {
+            Machine::X86_64 => X86_64::table_entry(pa),
+            Machine::Aarch64 => Aarch64Ttbr1::table_entry(pa),
+        }
+    }
+
+    /// A leaf that maps `pa` at `va` with `flags`, in this core's format.
+    pub fn leaf_entry(&self, va: u64, pa: u64, flags: u64) -> u64 {
+        match self.machine {
+            Machine::X86_64 => X86_64::leaf_entry(va, pa, flags),
+            Machine::Aarch64 => Aarch64Ttbr1::leaf_entry(va, pa, flags),
+        }
+    }
+
     /// Map `va` to `pa` with one leaf of `size` (4 KiB, 2 MiB or 1 GiB)
     /// and extra `flags` (`PageFlags` bits), building tables as needed.
     pub fn map(&mut self, va: u64, pa: u64, size: u64, flags: u64) {
@@ -141,16 +191,18 @@ impl Synth {
             _ => panic!("synth: page size {size:#x}"),
         };
         let mut table = self.root;
-        let mut level = Arch::LEVELS;
+        let mut level = 4u8;
         while level > leaf {
-            let idx = Arch::index(VirtAddr(va), level);
+            let idx = self.index(va, level);
             let e = self.pte(table, idx);
-            table = if e & PageFlags::PRESENT != 0 {
-                Arch::entry_phys(e).as_u64()
-            } else {
-                let t = self.alloc_frame();
-                self.set_pte(table, idx, Arch::make_table(PhysAddr(t)));
-                t
+            table = match self.desc(e, level) {
+                (Desc::Table, next) => next,
+                _ => {
+                    let t = self.alloc_frame();
+                    let e = self.table_entry(t);
+                    self.set_pte(table, idx, e);
+                    t
+                }
             };
             level -= 1;
         }
@@ -158,28 +210,22 @@ impl Synth {
         if leaf > 1 {
             f |= PageFlags::HUGE;
         }
-        let idx = Arch::index(VirtAddr(va), leaf);
-        self.set_pte(
-            table,
-            idx,
-            Arch::make_entry(VirtAddr(va), PhysAddr(pa), PageFlags(f)),
-        );
+        let idx = self.index(va, leaf);
+        let e = self.leaf_entry(va, pa, f);
+        self.set_pte(table, idx, e);
     }
 
     /// The PA of `va` under this table, if mapped.
     pub fn translate(&mut self, va: u64) -> Option<u64> {
         let mut table = self.root;
-        let mut level = Arch::LEVELS;
+        let mut level = 4u8;
         loop {
-            let e = self.pte(table, Arch::index(VirtAddr(va), level));
-            if e & PageFlags::PRESENT == 0 {
-                return None;
+            let e = self.pte(table, self.index(va, level));
+            match self.desc(e, level) {
+                (Desc::None, _) => return None,
+                (Desc::Leaf, pa) => return Some(pa + (va & (level_size(level) - 1))),
+                (Desc::Table, pa) => table = pa,
             }
-            let pa = Arch::entry_phys(e).as_u64();
-            if level == 1 || e & PageFlags::HUGE != 0 {
-                return Some(pa + (va & (level_size(level) - 1)));
-            }
-            table = pa;
             level -= 1;
         }
     }
@@ -209,9 +255,11 @@ impl Synth {
         self.notes.extend_from_slice(&n);
     }
 
-    /// A `CORE`/`NT_PRSTATUS` note.
-    pub fn cpu(&mut self, pid: u32, rip: u64, rsp: u64, rbp: u64) {
-        self.note(b"CORE", NT_PRSTATUS, &prstatus(pid, rip, rsp, rbp));
+    /// A `CORE`/`NT_PRSTATUS` note in this core's register layout: the PC,
+    /// SP and frame pointer (`rip`, `rsp`, `rbp`, or `pc`, `sp`, `x29`).
+    pub fn cpu(&mut self, pid: u32, pc: u64, sp: u64, fp: u64) {
+        let d = prstatus_for(self.machine, pid, pc, sp, fp);
+        self.note(b"CORE", NT_PRSTATUS, &d);
     }
 
     /// The VMCOREINFO note `info` renders, with this core's root.
@@ -227,7 +275,14 @@ impl Synth {
         let phnum = 1 + self.segs.len();
         let heads = EHDR_SIZE + PHDR_SIZE * phnum;
         let mut out = Vec::new();
-        out.extend_from_slice(&elf_header(ET_CORE, phnum as u16, 0, 0, 0));
+        out.extend_from_slice(&elf_header_for(
+            self.machine,
+            ET_CORE,
+            phnum as u16,
+            0,
+            0,
+            0,
+        ));
         let mut data_at = (heads + self.notes.len()) as u64;
         let note = Phdr {
             kind: PT_NOTE,
@@ -259,10 +314,22 @@ impl Synth {
 
 /// An x86-64 ELF64 little-endian header.
 pub fn elf_header(kind: u16, phnum: u16, shoff: u64, shnum: u16, shstrndx: u16) -> [u8; 64] {
+    elf_header_for(Machine::X86_64, kind, phnum, shoff, shnum, shstrndx)
+}
+
+/// A `machine` ELF64 little-endian header.
+pub fn elf_header_for(
+    machine: Machine,
+    kind: u16,
+    phnum: u16,
+    shoff: u64,
+    shnum: u16,
+    shstrndx: u16,
+) -> [u8; 64] {
     let mut h = [0u8; 64];
     h[..7].copy_from_slice(&[0x7F, b'E', b'L', b'F', 2, 1, 1]);
     h[16..18].copy_from_slice(&kind.to_le_bytes());
-    h[18..20].copy_from_slice(&EM_X86_64.to_le_bytes());
+    h[18..20].copy_from_slice(&machine.em().to_le_bytes());
     h[20..24].copy_from_slice(&1u32.to_le_bytes());
     h[0x20..0x28].copy_from_slice(&(EHDR_SIZE as u64).to_le_bytes());
     h[0x28..0x30].copy_from_slice(&shoff.to_le_bytes());
@@ -284,10 +351,21 @@ pub struct SymDef<'a> {
     pub kind: u8,
 }
 
-/// A kernel ELF (`ET_EXEC`): one `PT_LOAD` for `text` at `text_addr`, and
-/// sections `.text` (executable), `.note.gnu.build-id` (`build_id`, none
-/// when empty), `.symtab`, `.strtab` and `.shstrtab`.
+/// An x86-64 kernel ELF (`ET_EXEC`): one `PT_LOAD` for `text` at
+/// `text_addr`, and sections `.text` (executable), `.note.gnu.build-id`
+/// (`build_id`, none when empty), `.symtab`, `.strtab` and `.shstrtab`.
 pub fn kernel_elf(build_id: &[u8], text_addr: u64, text: &[u8], syms: &[SymDef<'_>]) -> Vec<u8> {
+    kernel_elf_for(Machine::X86_64, build_id, text_addr, text, syms)
+}
+
+/// [`kernel_elf`] for `machine`.
+pub fn kernel_elf_for(
+    machine: Machine,
+    build_id: &[u8],
+    text_addr: u64,
+    text: &[u8],
+    syms: &[SymDef<'_>],
+) -> Vec<u8> {
     let mut shstr = vec![0u8];
     let mut name = |s: &str| {
         let at = shstr.len() as u32;
@@ -338,7 +416,7 @@ pub fn kernel_elf(build_id: &[u8], text_addr: u64, text: &[u8], syms: &[SymDef<'
     let o_shstr = place(&shstr);
     let mut out = Vec::new();
     let shoff = (base + body.len() as u64 + 7) & !7;
-    out.extend_from_slice(&elf_header(2, 1, shoff, 6, 5));
+    out.extend_from_slice(&elf_header_for(machine, 2, 1, shoff, 6, 5));
     let load = Phdr {
         kind: PT_LOAD,
         flags: 5,

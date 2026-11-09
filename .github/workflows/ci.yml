@@ -490,6 +490,12 @@ jobs:
           - arch: aarch64
             runner: ubuntu-26.04-arm
             apt: qemu-system-arm qemu-efi-aarch64
+            tier: forensics
+            targets: test-forensics
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
             tier: kernel-1
             targets: test-kernel-1
             jobs: 2
