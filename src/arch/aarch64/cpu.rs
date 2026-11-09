@@ -288,7 +288,8 @@ pub fn log_isa_floor() {
     );
 }
 
-#[expect(dead_code, reason = "boot-CPU S7; unused on this path")]
+/// Whether the boot CPU passed [`check_isa_floor`]: until then
+/// `panic::early_exception` prints with no atomic read-modify-write.
 pub fn isa_ok() -> bool {
     // Acquire: pairs with the Release store in `check_isa_floor`.
     ISA_OK.load(Ordering::Acquire)
