@@ -33,6 +33,19 @@ global_asm!(
     "    cbnz x1, 2f",
     "    mov x19, #{feature}",
     "2:",
+    // ASID width (Linux's `verify_cpu_asid_bits`): with the boot CPU's
+    // `TCR_EL1.AS` set, a core whose `ID_AA64MMFR0_EL1.ASIDBits` is not
+    // 0b0010 (16 bits) refuses, unless the ISA floor already did.
+    "    cmp x19, #{arrived}",
+    "    b.ne 7f",
+    "    ldr x1, [x0, #{tcr}]",
+    "    tbz x1, #36, 7f",
+    "    mrs x1, ID_AA64MMFR0_EL1",
+    "    ubfx x1, x1, #4, #4",
+    "    cmp x1, #2",
+    "    b.eq 7f",
+    "    mov x19, #{asid}",
+    "7:",
     "    ldr x1, [x0, #{el2}]",
     "    cbz x1, 3f",
     "    ldr x1, [x0, #{hcr}]",
@@ -143,8 +156,8 @@ global_asm!(
     // Arm ARM DDI0487, "Memory barriers" (the DSB): the status store completes before
     // the PSCI call below, which herd7 does not model.
     "    dsb ish",
-    "    cmp x19, #{feature}",
-    "    b.ne 4f",
+    "    cmp x19, #{arrived}",
+    "    b.eq 4f",
     "    movz x0, #{cpu_off_lo}",
     "    movk x0, #{cpu_off_hi}, lsl #16",
     "    cbnz x1, 5f",
@@ -164,6 +177,7 @@ global_asm!(
     ".popsection",
     arrived = const psci::STATUS_ARRIVED,
     feature = const psci::STATUS_FEATURE,
+    asid = const psci::STATUS_ASID,
     cpu_off_lo = const (psci::CPU_OFF & 0xFFFF),
     cpu_off_hi = const ((psci::CPU_OFF >> 16) & 0xFFFF),
     el2 = const SecondaryParam::EL2,

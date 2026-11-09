@@ -211,7 +211,10 @@ The kernel half is `arch::aarch64::asid`, through which every TTBR0 load goes. T
 an atomic in `addr_space_init::SpaceCore`, which `Tcb.as_ctx` names beside `Tcb.as_cr3`, so every
 CPU that runs a space shares one word; the slow path reads it again under the lock and stores what it
 allocates there. The boot CPU builds the allocator before any user root loads, logs its width (or why
-ASIDs are off), and runs a local `tlbi vmalle1`. A root with no context, as some in-guest tests load,
+ASIDs are off), and runs a local `tlbi vmalle1`. Each secondary core gets the boot CPU's `TCR_EL1`,
+so where that sets `AS`, a core whose `ID_AA64MMFR0_EL1.ASIDBits` reports fewer than 16 bits
+refuses in its entry stub (`STATUS_ASID`) and calls PSCI `CPU_OFF`, and the boot CPU logs it and
+takes the bring-up failure path, as Linux's `verify_cpu_asid_bits` does. A root with no context, as some in-guest tests load,
 gets ASID 0, followed by a local invalidate of ASID 0 whenever another ASID-0 root was loaded since.
 An unmap's `tlbi vale1is` names the space's own ASID, read from its word after a `dmb ish` that
 orders the read after the PTE store (`SpaceCtx::flush_page`, Linux arm64's `ASID(mm)`), so it reaches

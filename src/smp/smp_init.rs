@@ -1331,6 +1331,13 @@ fn start_one_aarch64(
         );
         return aarch64_lost(cpu_id, hw_id, idle_id, workers, published);
     }
+    if status == vibeos::arch::aarch64::psci::STATUS_ASID {
+        crate::klog!(
+            vibeos::log::Level::Error,
+            "vibeOS: smp: cpu {hw_id:#x} asid bits below the boot cpu's 16"
+        );
+        return aarch64_lost(cpu_id, hw_id, idle_id, workers, published);
+    }
     if status != vibeos::arch::aarch64::psci::STATUS_ARRIVED {
         crate::marker!("vibeOS: smp: apic {hw_id} timed out");
         return aarch64_lost(cpu_id, hw_id, idle_id, workers, published);

@@ -173,7 +173,10 @@ The parameter pages, the identity tables, and `ttbr0_empty` are never freed: the
 one page per CPU plus a fixed table count (`secondary::IDENTITY_TABLES`), so that leak is bounded.
 The stub, in order: reads `ID_AA64ISAR0_EL1` and `ID_AA64MMFR1_EL1` and, when FEAT_LSE or FEAT_PAN
 is missing, keeps `STATUS_FEATURE` in a register in place of `STATUS_ARRIVED` and goes on, since it
-writes no shared memory before its MMU is on. When the block says EL2, it writes `HCR_EL2` whole
+writes no shared memory before its MMU is on; then, when no feature is missing and the block's
+TCR value sets its AS bit (16-bit ASIDs, ROADMAP §11.2), reads `ID_AA64MMFR0_EL1` and keeps `STATUS_ASID`
+when its ASIDBits field does not report 16 bits, as Linux's `verify_cpu_asid_bits` refuses such a
+core. When the block says EL2, it writes `HCR_EL2` whole
 and an `isb`, then `tlbi vmalle1`, `dsb nsh`, and `isb` (an E2H/TGE change leaves the local TLB
 stale), then the rest of the EL2 controls on the port's one list whole from the block: `CPTR_EL2`,
 `CNTHCTL_EL2`, `HSTR_EL2`, `MDCR_EL2`, `ICC_SRE_EL2` when the block's flag says the boot CPU found
@@ -192,7 +195,7 @@ the empty user root with an `isb`, then runs `tlbi vmalle1`, `dsb nsh`, and `isb
 entry survives; loads the PSCI conduit from the page; then stores its status with `stlr` through
 the page's TTBR1 address, its first shared write and its last access to the page, ordered after
 every load above for the boot CPU's Acquire in `smp_init::wait_secondary_status` (AGENTS.md rule
-5), and runs `dsb ish`. With `STATUS_FEATURE` it calls PSCI `CPU_OFF` through `smc`, or through
+5), and runs `dsb ish`. With `STATUS_FEATURE` or `STATUS_ASID` it calls PSCI `CPU_OFF` through `smc`, or through
 `hvc` when the conduit is HVC, and waits in `wfi` should that return; otherwise it loads its stack
 pointer and branches to Rust `ap_entry_aarch64` with the `PerCpu` pointer in `x0`.
 `scripts/doc_refs.py` checks that this paragraph names the stub's steps exactly, in its order:

@@ -56,6 +56,11 @@ pub const STATUS_NONE: u64 = 0;
 pub const STATUS_ARRIVED: u64 = 1;
 /// FEAT_LSE or FEAT_PAN missing; the core calls `CPU_OFF`.
 pub const STATUS_FEATURE: u64 = 2;
+/// The boot CPU's `TCR_EL1.AS` is set (16-bit ASIDs) and this core's
+/// `ID_AA64MMFR0_EL1.ASIDBits` does not report 16 bits, so it could not
+/// hold every ASID the allocator hands out (Linux's
+/// `verify_cpu_asid_bits`); the core calls `CPU_OFF`.
+pub const STATUS_ASID: u64 = 3;
 
 /// One core's bring-up block. The boot CPU fills it, cleans it to the
 /// Point of Coherency, and passes its physical address as PSCI
