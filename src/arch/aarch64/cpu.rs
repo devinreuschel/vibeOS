@@ -21,6 +21,8 @@ static EL2_VHE: BootCell<bool> = BootCell::new();
 static CTR: AtomicU64 = AtomicU64::new(tlb::CTR_MEET_TOP);
 /// A CPU has met its `CTR_EL0` into [`CTR`].
 static CTR_NOTED: AtomicBool = AtomicBool::new(false);
+/// The DMA granule, frozen at `smp: done` ([`freeze_dma_granule`]).
+static DMA_GRANULE: BootCell<u64> = BootCell::new();
 static ISA_OK: AtomicBool = AtomicBool::new(false);
 static OVERFLOW_SP: AtomicU64 = AtomicU64::new(0);
 
@@ -94,6 +96,7 @@ pub fn note_cache() {
     let ctr: u64;
     // SAFETY: `CTR_EL0` is readable at EL1; established here.
     unsafe { asm!("mrs {0}, CTR_EL0", out(reg) ctr, options(nomem, nostack, preserves_flags)) };
+    check_cwg(tlb::CacheInfo::from_ctr(ctr).cwg);
     // Acquire: pairs with the AcqRel exchange below on another CPU.
     let mut cur = CTR.load(Ordering::Acquire);
     loop {
@@ -113,6 +116,112 @@ pub fn note_cache() {
     CTR_NOTED.store(true, Ordering::Release);
 }
 
+/// Refuse this CPU, before its `CTR_EL0` joins the meet, when its cache
+/// writeback granule `cwg` breaks what DMA layouts assume (DESIGN §4.7):
+/// larger than a page, since a non-coherent device's sub-page region is
+/// sized in granules inside page-sized blocks; or, once
+/// [`freeze_dma_granule`] has run, larger than the frozen granule that
+/// drivers sized their regions in. A refused CPU prints a registered line
+/// through `serial::raw`, which needs no log path, and parks; an AP never
+/// marks itself ready, so bring-up treats it as lost (F032).
+fn check_cwg(cwg: u64) {
+    if cwg > vibeos::pmm::PAGE_SIZE {
+        crate::serial::raw::put_boot_line(b"vibeOS: cpu: cwg above a page");
+        halt();
+    }
+    if let Some(&frozen) = DMA_GRANULE.try_get()
+        && cwg > frozen
+    {
+        crate::serial::raw::put_boot_line(b"vibeOS: cpu: cwg above the frozen dma granule");
+        halt();
+    }
+}
+
+/// Fix the DMA granule at the meet of every CPU online now, at `smp: done`,
+/// so a CPU that arrives later (a stalled AP, F032) cannot raise it under
+/// regions already sized in it: [`check_cwg`] refuses such a CPU instead.
+pub fn freeze_dma_granule() {
+    // SAFETY: invariant I22: one write, on the BSP in `smp_init::init`
+    // right before `smp: done`; established by `smp_init::init`.
+    unsafe { DMA_GRANULE.set(cache_info().cwg) };
+}
+
+/// What every noted CPU's `CTR_EL0` says: [`CTR`] once a CPU has met into
+/// it, and `CTR_EL0` 0 (the smallest lines, the largest granule) before.
+fn cache_info() -> tlb::CacheInfo {
+    // Acquire: pairs with the Release store of `CTR_NOTED` in `note_cache`.
+    if CTR_NOTED.load(Ordering::Acquire) {
+        // Acquire: pairs with the AcqRel update of `CTR` in `note_cache`.
+        tlb::CacheInfo::from_ctr(CTR.load(Ordering::Acquire))
+    } else {
+        tlb::CacheInfo::from_ctr(0)
+    }
+}
+
+/// The cache writeback granule DMA regions are sized in: the frozen value
+/// from [`freeze_dma_granule`] once `smp: done` has passed, and before it
+/// the largest `CTR_EL0.CWG` of every noted CPU (`tlb::ctr_meet`), or
+/// `tlb::MAX_CWG` before [`note_cache`].
+pub fn dma_granule() -> usize {
+    DMA_GRANULE.try_get().copied().unwrap_or(cache_info().cwg) as usize
+}
+
+/// Run one DMA maintenance step (`tlb::DmaOp`) at `va`. Arm ARM DDI0487,
+/// "Ordering and completion of data and instruction cache instructions":
+/// herd7 does not model the caches.
+///
+/// # Safety
+/// `va` is a line of mapped memory the caller owns for DMA, and for
+/// `DcIvac` no CPU store to that line is pending.
+unsafe fn exec_dma(op: tlb::DmaOp, va: u64) {
+    // SAFETY: EL1 data-cache maintenance by VA on a line of the caller's
+    // mapped DMA range, this fn's `# Safety`; established by
+    // `arch::aarch64::cpu::dma_clean` and `dma_inval`.
+    unsafe {
+        match op {
+            tlb::DmaOp::DcCvac => {
+                asm!("dc cvac, {0}", in(reg) va, options(nostack, preserves_flags))
+            }
+            tlb::DmaOp::DcCivac => {
+                asm!("dc civac, {0}", in(reg) va, options(nostack, preserves_flags))
+            }
+            tlb::DmaOp::DcIvac => {
+                asm!("dc ivac, {0}", in(reg) va, options(nostack, preserves_flags))
+            }
+            tlb::DmaOp::DsbSy => asm!("dsb sy", options(nostack, preserves_flags)),
+        }
+    }
+}
+
+/// Clean `[start, start+len)` to the Point of Coherency for a non-coherent
+/// device: `tlb::dma_clean` over every noted CPU's smallest D-cache line.
+///
+/// # Safety
+/// `[start, start+len)` is mapped memory the caller owns for DMA.
+pub unsafe fn dma_clean(start: u64, len: u64) {
+    tlb::dma_clean(cache_info(), start, len, |op, va| {
+        // SAFETY: `va` is a line of the range this fn's contract names;
+        // established by `arch::aarch64::cpu::dma_clean`.
+        unsafe { exec_dma(op, va) }
+    });
+}
+
+/// Invalidate `[start, start+len)` for the CPU after a non-coherent
+/// device wrote it: `tlb::dma_inval`, which cleans a line the range
+/// covers only in part.
+///
+/// # Safety
+/// `[start, start+len)` is mapped memory the caller owns for DMA, and no
+/// CPU store to it is pending that the invalidate would discard.
+pub unsafe fn dma_inval(start: u64, len: u64) {
+    tlb::dma_inval(cache_info(), start, len, |op, va| {
+        // SAFETY: `va` is a line of the range this fn's contract names; a
+        // whole line inside it holds no pending CPU store; established by
+        // `arch::aarch64::cpu::dma_inval`.
+        unsafe { exec_dma(op, va) }
+    });
+}
+
 /// Make `[start, start+len)`, written through the data side, fetchable by
 /// every CPU. Runs `tlb::sync_range` over `CTR_EL0`'s line sizes; before
 /// [`note_cache`] it assumes the smallest lines and no IDC or DIC.
@@ -122,16 +231,7 @@ pub fn note_cache() {
 /// # Safety
 /// `[start, start+len)` is mapped, readable memory.
 pub unsafe fn sync_icache(start: u64, len: u64) {
-    // Acquire: pairs with the Release store of `CTR_NOTED` in `note_cache`.
-    let noted = CTR_NOTED.load(Ordering::Acquire);
-    let info = if noted {
-        // Acquire: pairs with the AcqRel update of `CTR` in `note_cache`.
-        let ctr = CTR.load(Ordering::Acquire);
-        tlb::CacheInfo::from_ctr(ctr)
-    } else {
-        tlb::CacheInfo::from_ctr(0)
-    };
-    tlb::sync_range(info, start, len, |op, va| {
+    tlb::sync_range(cache_info(), start, len, |op, va| {
         // SAFETY: EL1 cache maintenance by VA; `va` is a line of the mapped
         // range `sync_icache`'s contract names, established by
         // `arch::aarch64::cpu::sync_icache`.

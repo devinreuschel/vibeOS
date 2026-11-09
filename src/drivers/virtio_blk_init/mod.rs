@@ -13,7 +13,7 @@ use vibeos::block::{
     BlockDevice, BlockError, Completion, DRAIN_BATCH, DeviceState, Op, Queue, Request,
 };
 use vibeos::dev::{DevRef, Device, Driver, IdMatch, Instance, ProbeError};
-use vibeos::dma::{self, DmaAlloc, DmaBuffer};
+use vibeos::dma::{DmaAlloc, DmaBuffer};
 use vibeos::irq::{IrqError, IrqId};
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -26,11 +26,12 @@ use vibeos::virtio::{
     STATUS_FEATURES_OK, SplitLayout, VENDOR_ID, VirtioError, notify_addr,
 };
 use vibeos::virtio_blk::{
-    CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_BLK_SIZE,
-    F_DISCARD, F_FLUSH, F_MQ, F_RO, F_TOPOLOGY, MAX_DISKS, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT,
-    disk_name, exhausted_fails_device, fit_config, logical_capacity, map_status, nq_from_config,
-    pack_discard, pack_header, pick_blk_size, pick_features, queue_size, refuse_read_only,
-    sector_for_lba,
+    BOUNCE, CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY,
+    F_BLK_SIZE, F_DISCARD, F_FLUSH, F_MQ, F_RO, F_TOPOLOGY, MAX_DISKS, SECTOR, SLOT_DISCARD,
+    SLOT_META, SLOT_STATUS, T_DISCARD, T_FLUSH, T_IN, T_OUT, disk_name, exhausted_fails_device,
+    fit_config, hand_slot, logical_capacity, map_status, nq_from_config, pack_discard, pack_header,
+    pick_blk_size, pick_features, queue_size, refuse_read_only, sector_for_lba, slot_stride,
+    take_slot,
 };
 
 use crate::arch::{self, current::Arch};
@@ -53,8 +54,8 @@ mod vq;
 use irq::{blk_top, blk_work};
 #[cfg(feature = "kernel_tests")]
 pub use issue::submit;
-use issue::{Blk, N_SLOTS, SLOT_STRIDE};
-use vq::{FREE, MAX_QSIZE, MAX_VQ, Vq};
+use issue::{Blk, N_SLOTS};
+use vq::{DmaPlan, FREE, MAX_QSIZE, MAX_VQ, Vq};
 
 /// One bound virtio-blk function: what the driver keeps for it. The PCI
 /// registry slot of the device owns it as a `dev::Instance`; the block
@@ -332,7 +333,17 @@ fn setup(
         }
     }
 
-    let Some(slots) = dma_init::alloc(DmaAlloc::dma32((N_SLOTS * SLOT_STRIDE) as u64)) else {
+    let plan = match DmaPlan::for_device(dev) {
+        Ok(p) => p,
+        Err(e) => {
+            fail_probe(dev, common, &vecs, nvec, None, &mut vqs, None);
+            return Err(e);
+        }
+    };
+    let Some(slots) = dma_init::alloc(DmaAlloc::dma32(
+        N_SLOTS.saturating_mul(plan.stride) as u64,
+        plan.coherent,
+    )) else {
         fail_probe(dev, common, &vecs, nvec, None, &mut vqs, None);
         return Err(VirtioError::Failed);
     };
@@ -341,6 +352,7 @@ fn setup(
     unsafe {
         core::ptr::write_bytes(slots.virt() as *mut u8, 0, slots.len() as usize);
     }
+    slots.sync_for_device::<Arch>();
 
     let mut q0sz = 0u16;
     let mut qi = 0usize;
@@ -387,11 +399,12 @@ fn setup(
         if qi == 0 {
             q0sz = qsz;
         }
-        let Some(layout) = SplitLayout::new(qsz) else {
+        let Some(layout) = SplitLayout::with_granule(qsz, plan.granule) else {
             fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
             return Err(VirtioError::BadQueue);
         };
-        let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64)) else {
+        let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64, plan.coherent))
+        else {
             fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, None);
             return Err(VirtioError::Failed);
         };
@@ -413,6 +426,11 @@ fn setup(
                 return Err(e);
             }
         };
+        if let Err(e) = plan.apply(&mut vq) {
+            drop(vq);
+            fail_probe(dev, common, &vecs, nvec, Some(slots), &mut vqs, Some(qdma));
+            return Err(e);
+        }
         vq.init();
         qdma.sync_for_device::<Arch>();
         w64(
@@ -495,6 +513,7 @@ fn setup(
         vqs,
         nq: nq as u8,
         slots,
+        stride: plan.stride,
         slot_used: [false; N_SLOTS],
         slot_req: [None; N_SLOTS],
         features: feat,
@@ -697,7 +716,17 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
         return Err(VirtioError::Failed);
     }
 
-    let Some(slots) = dma_init::alloc(DmaAlloc::dma32((N_SLOTS * SLOT_STRIDE) as u64)) else {
+    let plan = match DmaPlan::for_device(dev) {
+        Ok(p) => p,
+        Err(e) => {
+            fail_mmio(base, &vecs, nvec, None, &mut vqs, None);
+            return Err(e);
+        }
+    };
+    let Some(slots) = dma_init::alloc(DmaAlloc::dma32(
+        N_SLOTS.saturating_mul(plan.stride) as u64,
+        plan.coherent,
+    )) else {
         fail_mmio(base, &vecs, nvec, None, &mut vqs, None);
         return Err(VirtioError::Failed);
     };
@@ -705,6 +734,7 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
     unsafe {
         core::ptr::write_bytes(slots.virt() as *mut u8, 0, slots.len() as usize);
     }
+    slots.sync_for_device::<Arch>();
 
     let mut q0sz = 0u16;
     let mut qi = 0usize;
@@ -720,11 +750,12 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
         if qi == 0 {
             q0sz = qsz;
         }
-        let Some(layout) = SplitLayout::new(qsz) else {
+        let Some(layout) = SplitLayout::with_granule(qsz, plan.granule) else {
             fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, None);
             return Err(VirtioError::BadQueue);
         };
-        let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64)) else {
+        let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64, plan.coherent))
+        else {
             fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, None);
             return Err(VirtioError::Failed);
         };
@@ -744,6 +775,11 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
                 return Err(e);
             }
         };
+        if let Err(e) = plan.apply(&mut vq) {
+            drop(vq);
+            fail_mmio(base, &vecs, nvec, Some(slots), &mut vqs, Some(qdma));
+            return Err(e);
+        }
         vq.init();
         qdma.sync_for_device::<Arch>();
         crate::virtio_mmio_init::set_queue_addrs(
@@ -798,6 +834,7 @@ fn setup_mmio(blk: &VirtioBlk, inst: &Instance, dev: &DevRef) -> Result<(), Virt
         vqs,
         nq: nq as u8,
         slots,
+        stride: plan.stride,
         slot_used: [false; N_SLOTS],
         slot_req: [None; N_SLOTS],
         features: feat,

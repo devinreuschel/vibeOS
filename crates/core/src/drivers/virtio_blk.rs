@@ -4,7 +4,9 @@
 //! OASIS virtio-blk constants. Kernel MMIO / VQ / IRQ live in
 //! `virtio_blk_init`.
 
+use crate::arch::Barriers;
 use crate::block::{BlockError, Op};
+use crate::dma::{self, DmaBuffer};
 use crate::virtio::{self, F_EVENT_IDX, F_INDIRECT_DESC, F_VERSION_1};
 
 /// virtio-blk feature bits (device-specific, not transport).
@@ -209,6 +211,50 @@ pub fn nq_from_config(feat: u64, cfg_num_queues: u16, common_num_queues: u16) ->
     offered.min(hw)
 }
 
+/// A request slot's bytes ahead of its bounce area: the header at 0, the
+/// status byte at [`SLOT_STATUS`], a discard segment at [`SLOT_DISCARD`].
+pub const SLOT_META: usize = 64;
+/// Where the device writes a slot's status byte.
+pub const SLOT_STATUS: usize = 16;
+/// Where a slot's discard segment lies.
+pub const SLOT_DISCARD: usize = 32;
+/// A slot's bounce area, after [`SLOT_META`]: the most one request moves.
+pub const BOUNCE: usize = 8192;
+
+const _: () = assert!(
+    HDR_LEN <= SLOT_STATUS && SLOT_STATUS < SLOT_DISCARD && SLOT_DISCARD + DISCARD_LEN <= SLOT_META
+);
+
+/// One request slot's stride in the driver's slot buffer: [`SLOT_META`]
+/// and [`BOUNCE`] sized in `granule`-byte granules (the port's
+/// [`Barriers::dma_granule`]), so slots start on granule boundaries and no
+/// two in-flight requests' regions share a granule (DESIGN §4.7). `None`
+/// when `granule` is not a power of two.
+pub const fn slot_stride(granule: usize) -> Option<usize> {
+    dma::granule_round(SLOT_META + BOUNCE, granule)
+}
+
+/// Slot `si`'s byte range in the slot buffer, `(offset, len)`.
+pub const fn slot_region(si: usize, stride: usize) -> (u64, u64) {
+    ((si as u64).saturating_mul(stride as u64), stride as u64)
+}
+
+/// Hand slot `si`, which the CPU has filled, to the device before its chain
+/// is published: for a non-coherent device every line of the slot is
+/// cleaned to the Point of Coherency (DESIGN §4.7).
+pub fn hand_slot<A: Barriers>(slots: &DmaBuffer, si: usize, stride: usize) {
+    let (off, len) = slot_region(si, stride);
+    slots.sync_range_for_device::<A>(off, len);
+}
+
+/// Take slot `si` back once its completion is harvested, before the CPU
+/// reads its status or bounce bytes: for a non-coherent device every line
+/// of the slot is invalidated (DESIGN §4.7).
+pub fn take_slot<A: Barriers>(slots: &DmaBuffer, si: usize, stride: usize) {
+    let (off, len) = slot_region(si, stride);
+    slots.sync_range_for_cpu::<A>(off, len);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +425,35 @@ mod tests {
         assert_eq!(disk_name(25, &mut out), Some("vdz"));
         assert_eq!(disk_name(26, &mut out), None);
         assert_eq!(disk_name(u8::MAX, &mut out), None);
+    }
+
+    #[test]
+    fn slots_never_share_a_granule() {
+        let mut g = 1usize;
+        while g <= crate::arch::aarch64::tlb::MAX_CWG as usize {
+            let stride = slot_stride(g).unwrap();
+            assert!(stride >= SLOT_META + BOUNCE);
+            assert_eq!(stride % g, 0, "granule {g}");
+            let mut a = 0usize;
+            while a < 16 {
+                let (ao, al) = slot_region(a, stride);
+                assert_eq!(ao % g as u64, 0);
+                let mut b = a + 1;
+                while b < 16 {
+                    let (bo, _) = slot_region(b, stride);
+                    // `a`'s last granule ends at or before `b`'s first.
+                    let a_last = (ao + al - 1) / g as u64;
+                    let b_first = bo / g as u64;
+                    assert!(a_last < b_first, "granule {g}: slots {a} and {b}");
+                    b += 1;
+                }
+                a += 1;
+            }
+            g *= 2;
+        }
+        // A 64-byte granule keeps today's stride; the 2 KiB maximum grows it.
+        assert_eq!(slot_stride(64), Some(SLOT_META + BOUNCE));
+        assert_eq!(slot_stride(2048), Some(10240));
+        assert_eq!(slot_stride(48), None);
     }
 }

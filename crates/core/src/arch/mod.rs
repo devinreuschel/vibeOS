@@ -125,21 +125,34 @@ pub trait Barriers {
     /// `reg` is an aligned register of a mapped device, and the write is one
     /// the caller's driver owns.
     unsafe fn mmio_write<W: MmioWidth>(reg: *mut W, v: W);
-    /// Make the CPU's writes to `start..start + len` visible to a device
-    /// (a clean; a no-op on a coherent port).
+    /// Make the CPU's writes to `start..start + len` visible to a
+    /// non-coherent device: clean each line to the Point of Coherency, then
+    /// a full barrier (aarch64's `dc cvac` and `dsb sy`; a no-op on a port
+    /// whose devices are all coherent). `vibeos::dma` calls it only for a
+    /// device the registry records as non-coherent (DESIGN §4.7).
     ///
     /// # Safety
     ///
     /// The range is mapped memory the caller owns for this DMA.
     unsafe fn sync_for_device(start: *const u8, len: usize);
-    /// Make a device's writes to `start..start + len` visible to the CPU
-    /// (an invalidate; a no-op on a coherent port).
+    /// Make a non-coherent device's writes to `start..start + len` visible
+    /// to the CPU: invalidate each line, then a full barrier (aarch64's
+    /// `dc ivac`, `dc civac` on a line the range covers in part, and
+    /// `dsb sy`; a no-op on a port whose devices are all coherent).
     ///
     /// # Safety
     ///
     /// The range is mapped memory the caller owns for this DMA, and no CPU
     /// store to it is pending that the invalidate would discard.
     unsafe fn sync_for_cpu(start: *const u8, len: usize);
+    /// The cache writeback granule in bytes, a power of two no larger than
+    /// a page: a non-coherent device's DMA region smaller than a page is
+    /// aligned to and sized in it, so no two regions share one (aarch64's
+    /// `CTR_EL0.CWG`, DESIGN §4.7). 1 on a port whose devices are all
+    /// coherent.
+    fn dma_granule() -> usize {
+        1
+    }
     /// Make bytes written to `start..start + len` through a data alias
     /// fetchable as code (aarch64's `dc cvau` and `ic ivau`; x86_64's
     /// caches are coherent with fetch).

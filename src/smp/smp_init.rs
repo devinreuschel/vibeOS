@@ -721,6 +721,7 @@ pub unsafe fn init() {
     #[cfg(target_arch = "aarch64")]
     {
         init_aarch64();
+        arch::aarch64::cpu::freeze_dma_granule();
         crate::log::trace_init::publish_cntvct_clock();
         crate::marker!(marker::SMP_DONE);
     }

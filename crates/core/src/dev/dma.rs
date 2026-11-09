@@ -1,9 +1,12 @@
 //! DMA buffers, identity map, SG lists, publish fences. ROADMAP §6.4.
 //!
 //! IOMMU later: keep every device-visible address behind [`DmaTranslate`].
-//! x86 is coherent; [`sync_for_device`] / [`sync_for_cpu`] still run so
-//! aarch64 can fill them in. The fences are the port's: every barrier here
-//! is generic over [`Barriers`] and calls its method (PORTABILITY §11.1).
+//! Coherence is the device's (DESIGN §4.7): a buffer for a coherent device
+//! syncs with [`dma_wmb`] and [`dma_rmb`]; one for a non-coherent device
+//! runs the port's cache maintenance, [`Barriers::sync_for_device`] and
+//! [`Barriers::sync_for_cpu`]. The fences are the port's: every barrier
+//! here is generic over [`Barriers`] and calls its method (PORTABILITY
+//! §11.1).
 
 use crate::arch::Barriers;
 use crate::atomic::{AtomicU16, Ordering};
@@ -86,22 +89,31 @@ pub struct DmaAlloc {
     pub size: u64,
     pub align: u64,
     pub boundary: u64,
+    /// The device snoops the CPU's caches, as its registry entry records
+    /// (`dev::Device::dma_coherent`). Every constructor takes it: there is
+    /// no default, since a device with no `dma-coherent` is non-coherent
+    /// (DESIGN §4.7).
+    pub coherent: bool,
 }
 
 impl DmaAlloc {
-    pub const fn new(size: u64) -> Self {
+    /// `size` bytes for a device whose coherence is `coherent`.
+    pub const fn new(size: u64, coherent: bool) -> Self {
         Self {
             size,
             align: PAGE_SIZE,
             boundary: 0,
+            coherent,
         }
     }
 
-    pub const fn dma32(size: u64) -> Self {
+    /// As [`new`](Self::new), never crossing a 4 GiB line.
+    pub const fn dma32(size: u64, coherent: bool) -> Self {
         Self {
             size,
             align: PAGE_SIZE,
             boundary: DMA32_BOUNDARY,
+            coherent,
         }
     }
 
@@ -160,6 +172,7 @@ pub struct DmaBuffer {
     virt: u64,
     len: u64,
     frames: Frames,
+    coherent: bool,
 }
 
 impl DmaBuffer {
@@ -194,12 +207,67 @@ impl DmaBuffer {
         dma_to_device(self.phys())
     }
 
-    pub fn sync_for_device<A: Barriers>(&self) {
-        dma_wmb::<A>();
+    /// Whether the device this buffer serves is DMA-coherent.
+    pub fn coherent(&self) -> bool {
+        self.coherent
     }
 
+    /// Hand the whole buffer to the device: [`sync_range_for_device`]
+    /// over its `len` bytes.
+    ///
+    /// [`sync_range_for_device`]: Self::sync_range_for_device
+    pub fn sync_for_device<A: Barriers>(&self) {
+        self.sync_range_for_device::<A>(0, self.len);
+    }
+
+    /// Take the whole buffer back for the CPU: [`sync_range_for_cpu`] over
+    /// its `len` bytes.
+    ///
+    /// [`sync_range_for_cpu`]: Self::sync_range_for_cpu
     pub fn sync_for_cpu<A: Barriers>(&self) {
-        dma_rmb::<A>();
+        self.sync_range_for_cpu::<A>(0, self.len);
+    }
+
+    /// The part of `[off, off + len)` inside the block, as a VA and a length.
+    fn clip(&self, off: u64, len: u64) -> (*const u8, usize) {
+        let block = (self.frames.count() as u64).saturating_mul(PAGE_SIZE);
+        let off = off.min(block);
+        let len = len.min(block - off);
+        (self.virt.wrapping_add(off) as *const u8, len as usize)
+    }
+
+    /// Make the CPU's writes to `[off, off + len)` visible to the device,
+    /// before the device is told of them. A coherent device needs
+    /// [`dma_wmb`] only; for a non-coherent one the port cleans every line
+    /// of the range to the Point of Coherency, whatever the transfer's
+    /// direction, so no dirty line is written back later over what the
+    /// device writes (DESIGN §4.7). The range is clipped to the block.
+    pub fn sync_range_for_device<A: Barriers>(&self, off: u64, len: u64) {
+        if self.coherent {
+            dma_wmb::<A>();
+            return;
+        }
+        let (p, n) = self.clip(off, len);
+        // SAFETY: `[p, p + n)` lies inside this buffer's block, which the
+        // buffer owns and the kernel maps at `virt`; established by
+        // `dma::alloc_from_buddy`.
+        unsafe { A::sync_for_device(p, n) };
+    }
+
+    /// Make the device's writes to `[off, off + len)` visible to the CPU,
+    /// before the CPU reads them. A coherent device needs [`dma_rmb`] only;
+    /// for a non-coherent one the port invalidates every line of the range.
+    /// The CPU stores nothing to the range while the device owns it, so the
+    /// invalidate discards no CPU store. The range is clipped to the block.
+    pub fn sync_range_for_cpu<A: Barriers>(&self, off: u64, len: u64) {
+        if self.coherent {
+            dma_rmb::<A>();
+            return;
+        }
+        let (p, n) = self.clip(off, len);
+        // SAFETY: as in `sync_range_for_device`: the range lies inside the
+        // buffer's own block; established by `dma::alloc_from_buddy`.
+        unsafe { A::sync_for_cpu(p, n) };
     }
 
     pub fn as_ptr(&self) -> *mut u8 {
@@ -311,6 +379,7 @@ pub fn alloc_from_buddy<A: Barriers>(
         virt: virt_of(frames.base()),
         len: spec.size,
         frames,
+        coherent: spec.coherent,
     };
     buf.sync_for_device::<A>();
     Some(buf)
@@ -320,6 +389,19 @@ pub fn alloc_from_buddy<A: Barriers>(
 pub fn free_to_buddy<A: Barriers>(buddy: &mut Buddy, buf: DmaBuffer) {
     buf.sync_for_cpu::<A>();
     buddy.free(buf.frames);
+}
+
+/// `size` rounded up to a whole number of `granule`-byte granules (a power
+/// of two), the size of a non-coherent device's sub-page region (DESIGN
+/// §4.7); `None` on overflow or a granule that is not a power of two.
+pub const fn granule_round(size: usize, granule: usize) -> Option<usize> {
+    if !granule.is_power_of_two() {
+        return None;
+    }
+    match size.checked_add(granule - 1) {
+        Some(v) => Some(v & !(granule - 1)),
+        None => None,
+    }
 }
 
 pub fn crosses_boundary(phys: u64, size: u64, boundary: u64) -> bool {
@@ -346,6 +428,14 @@ pub(crate) mod trace {
         Wmb,
         Rmb,
         Mb,
+        /// The port's `sync_for_device` over `(addr, len)`.
+        Clean(usize, usize),
+        /// The port's `sync_for_cpu` over `(addr, len)`.
+        Inval(usize, usize),
+        /// An ordered MMIO read at this address.
+        MmioRead(usize),
+        /// An ordered MMIO write at this address.
+        MmioWrite(usize),
     }
 
     /// The events recorded since [`start`], oldest first.
@@ -436,7 +526,8 @@ mod tests {
         assert_eq!(IdentityDma.dma_to_device(pa).0, pa);
         let mut p = Pool::new(16);
         let virt_of = |phys: u64| phys.wrapping_add(0xFFFF_8000_0000_0000);
-        let buf = alloc_from_buddy::<Stub>(&mut p.buddy, DmaAlloc::new(4096), virt_of).unwrap();
+        let buf =
+            alloc_from_buddy::<Stub>(&mut p.buddy, DmaAlloc::new(4096, true), virt_of).unwrap();
         assert_eq!(buf.device().0, buf.phys());
         assert_ne!(buf.device().0, buf.virt());
         assert_eq!(buf.virt(), virt_of(buf.phys()));
@@ -451,6 +542,7 @@ mod tests {
             size: 0x1800,
             align: 0x2000,
             boundary: DMA32_BOUNDARY,
+            coherent: true,
         };
         let buf = alloc_from_buddy::<Stub>(&mut p.buddy, spec, |phys| phys + 0x1000).unwrap();
         assert_eq!(buf.phys() & 0x1FFF, 0);
@@ -465,15 +557,15 @@ mod tests {
         buf.sync_for_cpu::<Stub>();
         free_to_buddy::<Stub>(&mut p.buddy, buf);
         assert_eq!(p.buddy.stats().free_frames, 256);
-        assert!(DmaAlloc::dma32(64).boundary == DMA32_BOUNDARY);
+        assert!(DmaAlloc::dma32(64, true).boundary == DMA32_BOUNDARY);
         let _ = MAX_ORDER;
     }
 
     #[test]
     fn sg_builds_from_buffer_and_caps() {
         let mut p = Pool::new(16);
-        let buf =
-            alloc_from_buddy::<Stub>(&mut p.buddy, DmaAlloc::new(0x1000), |phys| phys).unwrap();
+        let buf = alloc_from_buddy::<Stub>(&mut p.buddy, DmaAlloc::new(0x1000, true), |phys| phys)
+            .unwrap();
         let sg = SgList::from_buffer(&buf).unwrap();
         assert_eq!(sg.n, 1);
         assert_eq!(sg.entries[0].addr, buf.device());
@@ -495,6 +587,7 @@ mod tests {
             size: 0x800,
             align: PAGE_SIZE,
             boundary: 0x800,
+            coherent: true,
         };
         assert_eq!(fits.order(), Some(0));
         let over = DmaAlloc {
@@ -506,11 +599,12 @@ mod tests {
             size: 0x800,
             align: PAGE_SIZE,
             boundary: 0x3000,
+            coherent: true,
         };
         assert_eq!(odd.order(), None);
-        assert_eq!(DmaAlloc::new(0x3000).order(), Some(2));
-        assert_eq!(DmaAlloc::dma32(0x1000).order(), Some(0));
-        assert_eq!(DmaAlloc::new(0).order(), None);
+        assert_eq!(DmaAlloc::new(0x3000, true).order(), Some(2));
+        assert_eq!(DmaAlloc::dma32(0x1000, true).order(), Some(0));
+        assert_eq!(DmaAlloc::new(0, true).order(), None);
         let mut p = Pool::new(16);
         assert!(alloc_from_buddy::<Stub>(&mut p.buddy, over, |phys| phys).is_none());
         assert_eq!(p.buddy.stats().free_frames, 16);
@@ -534,5 +628,70 @@ mod tests {
         assert!(addr_fits_mask(EDU_DMA_MASK, EDU_DMA_MASK));
         assert!(!addr_fits_mask(EDU_DMA_MASK.wrapping_add(1), EDU_DMA_MASK));
         assert!(!addr_fits_mask(0x1_0000_0000, EDU_DMA_MASK));
+    }
+
+    #[test]
+    fn coherent_buffer_syncs_with_barriers_only() {
+        let mut p = Pool::new(16);
+        let buf = alloc_from_buddy::<Stub>(&mut p.buddy, DmaAlloc::new(0x1000, true), |phys| phys)
+            .unwrap();
+        assert!(buf.coherent());
+        trace::start();
+        buf.sync_for_device::<Stub>();
+        buf.sync_for_cpu::<Stub>();
+        buf.sync_range_for_device::<Stub>(0x40, 0x40);
+        let log = trace::take();
+        assert_eq!(
+            log.as_slice(),
+            [trace::Ev::Wmb, trace::Ev::Rmb, trace::Ev::Wmb]
+        );
+        free_to_buddy::<Stub>(&mut p.buddy, buf);
+    }
+
+    #[test]
+    fn non_coherent_buffer_runs_the_port_maintenance() {
+        let mut p = Pool::new(16);
+        // Host memory stands in for the block: `virt_of` maps it there.
+        let mut mem = std::vec![0u8; 0x3000];
+        let host = mem.as_mut_ptr() as u64;
+        let spec = DmaAlloc::new(0x1800, false);
+        let buf = alloc_from_buddy::<Stub>(&mut p.buddy, spec, |_| host).unwrap();
+        assert!(!buf.coherent());
+        trace::start();
+        buf.sync_for_device::<Stub>();
+        buf.sync_for_cpu::<Stub>();
+        buf.sync_range_for_device::<Stub>(0x40, 0x40);
+        buf.sync_range_for_cpu::<Stub>(0x80, 0x10);
+        // Clipped to the two-page block.
+        buf.sync_range_for_cpu::<Stub>(0x1F00, 0x1000);
+        buf.sync_range_for_cpu::<Stub>(0x9000, 0x10);
+        let log = trace::take();
+        let h = host as usize;
+        assert_eq!(
+            log.as_slice(),
+            [
+                trace::Ev::Clean(h, 0x1800),
+                trace::Ev::Inval(h, 0x1800),
+                trace::Ev::Clean(h + 0x40, 0x40),
+                trace::Ev::Inval(h + 0x80, 0x10),
+                trace::Ev::Inval(h + 0x1F00, 0x100),
+                trace::Ev::Inval(h + 0x2000, 0),
+            ]
+        );
+        free_to_buddy::<Stub>(&mut p.buddy, buf);
+        drop(mem);
+    }
+
+    #[test]
+    fn granule_round_sizes_in_whole_granules() {
+        assert_eq!(granule_round(0, 64), Some(0));
+        assert_eq!(granule_round(1, 64), Some(64));
+        assert_eq!(granule_round(64, 64), Some(64));
+        assert_eq!(granule_round(8256, 2048), Some(10240));
+        assert_eq!(granule_round(8256, 64), Some(8256));
+        assert_eq!(granule_round(17, 1), Some(17));
+        assert_eq!(granule_round(17, 48), None);
+        assert_eq!(granule_round(17, 0), None);
+        assert_eq!(granule_round(usize::MAX, 64), None);
     }
 }

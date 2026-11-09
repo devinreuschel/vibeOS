@@ -134,7 +134,7 @@ pub(crate) fn test_fw_cfg_dma() -> Outcome {
     if fw_cfg_init::read(f, &mut port[..len]) != len {
         return Outcome::Fail("short port read");
     }
-    let Some(buf) = dma_init::alloc(DmaAlloc::new(4096)) else {
+    let Some(buf) = dma_init::alloc(DmaAlloc::new(4096, fw_cfg_init::dma_coherent())) else {
         return Outcome::Fail("no dma buffer");
     };
     let r = fw_cfg_init::transfer(FW_CFG_DMA_READ, f.select, &buf, len as u32);

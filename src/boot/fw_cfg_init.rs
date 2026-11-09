@@ -23,7 +23,7 @@ use vibeos::boot::{
     FW_CFG_ID, FW_CFG_ID_DMA, FW_CFG_QEMU, FW_CFG_SIGNATURE, fw_cfg_dma_access,
     parse_fw_cfg_dir_count, parse_fw_cfg_dir_entry,
 };
-use vibeos::dma::{self, DmaAlloc, DmaBuffer};
+use vibeos::dma::{DmaAlloc, DmaBuffer};
 
 pub use vibeos::boot::FwCfgFile;
 
@@ -130,6 +130,22 @@ pub fn hypervisor() -> bool {
 #[cfg(target_arch = "aarch64")]
 pub fn hypervisor() -> bool {
     true
+}
+
+/// Whether fw-cfg's DMA is coherent (DESIGN §4.7): `dma-coherent` on its
+/// device-tree node on aarch64, and always on x86_64. A buffer for
+/// [`transfer`] is allocated with it.
+pub fn dma_coherent() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::machine_init::info()
+            .and_then(|d| d.fw_cfg)
+            .is_some_and(|m| m.dma_coherent)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        true
+    }
 }
 
 /// Point later accesses at a mapped fw_cfg window. Early console map,
@@ -314,7 +330,9 @@ pub(super) fn transfer(
     // `DMA_DATA + len` bytes (checked above) mapped at `as_ptr`, and no
     // device reaches them before the port write below.
     unsafe { core::ptr::copy_nonoverlapping(desc.as_ptr(), base, desc.len()) };
-    dma::dma_wmb::<Arch>();
+    // The descriptor and, for a write, the data reach the device first: a
+    // barrier when it is coherent, a clean of the buffer when not.
+    buf.sync_range_for_device::<Arch>(0, need);
     // SAFETY: invariant I57, established at `boot::fw_cfg_init::probe`:
     // `has_dma` found the signature and the DMA feature, so 0x514 and
     // 0x518 are the DMA address register, big-endian in two halves; the
@@ -337,6 +355,9 @@ pub(super) fn transfer(
         unsafe { Arch::mmio_write(p, dev.to_be()) };
     }
     for _ in 0..DMA_POLLS {
+        // The device clears the control word: invalidated before each read
+        // when it is non-coherent.
+        buf.sync_range_for_cpu::<Arch>(0, 4);
         let mut word = [0u8; 4];
         for (i, b) in word.iter_mut().enumerate() {
             // SAFETY: `dma_init::alloc` established it: the control word
@@ -349,7 +370,7 @@ pub(super) fn transfer(
             return Err(FwCfgError::Device);
         }
         if c == 0 {
-            dma::dma_rmb::<Arch>();
+            buf.sync_range_for_cpu::<Arch>(0, need);
             return Ok(());
         }
         core::hint::spin_loop();
@@ -369,8 +390,11 @@ pub fn dma_write(select: u16, data: &[u8]) -> Result<(), FwCfgError> {
     if data.len() > DMA_MAX {
         return Err(FwCfgError::TooLong);
     }
-    let buf =
-        dma_init::alloc(DmaAlloc::new((DMA_DATA + data.len()) as u64)).ok_or(FwCfgError::NoMem)?;
+    let buf = dma_init::alloc(DmaAlloc::new(
+        (DMA_DATA + data.len()) as u64,
+        dma_coherent(),
+    ))
+    .ok_or(FwCfgError::NoMem)?;
     // SAFETY: `dma_init::alloc` established it: `buf` owns `DMA_DATA +
     // data.len()` bytes at `as_ptr`, and no device reaches them yet.
     unsafe {
