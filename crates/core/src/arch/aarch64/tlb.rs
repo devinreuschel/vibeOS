@@ -17,10 +17,6 @@ pub enum TlbOp {
     /// Leaf change of a user VA whose space the caller does not name:
     /// `tlbi vaale1is`, every ASID.
     TlbiVaale1is,
-    /// Table page freed: `tlbi vae1is`.
-    TlbiVae1is,
-    /// One ASID: `tlbi aside1is`.
-    TlbiAside1is,
     /// Local ASID-0 flush when ASIDs are off: `tlbi aside1`.
     TlbiAside1,
     /// Local generation flush: `tlbi vmalle1`.
@@ -44,8 +40,6 @@ impl TlbOp {
             Self::DsbIshst => "dsb ishst",
             Self::TlbiVale1is => "tlbi vale1is",
             Self::TlbiVaale1is => "tlbi vaale1is",
-            Self::TlbiVae1is => "tlbi vae1is",
-            Self::TlbiAside1is => "tlbi aside1is",
             Self::TlbiAside1 => "tlbi aside1",
             Self::TlbiVmalle1 => "tlbi vmalle1",
             Self::TlbiVmalle1is => "tlbi vmalle1is",
@@ -73,26 +67,6 @@ pub const LEAF_INVAL: [TlbOp; 4] = [
 pub const ALL_INVAL: [TlbOp; 4] = [
     TlbOp::DsbIshst,
     TlbOp::TlbiVmalle1is,
-    TlbOp::DsbIsh,
-    TlbOp::Isb,
-];
-
-/// Table page freed: `vae1is` instead of `vale1is`.
-/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
-/// completion of TLB maintenance instructions": herd7 does not model the TLB.
-pub const TABLE_INVAL: [TlbOp; 4] = [
-    TlbOp::DsbIshst,
-    TlbOp::TlbiVae1is,
-    TlbOp::DsbIsh,
-    TlbOp::Isb,
-];
-
-/// One ASID (not a rollover). A rollover broadcasts nothing.
-/// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
-/// completion of TLB maintenance instructions": herd7 does not model the TLB.
-pub const ASID_INVAL: [TlbOp; 4] = [
-    TlbOp::DsbIshst,
-    TlbOp::TlbiAside1is,
     TlbOp::DsbIsh,
     TlbOp::Isb,
 ];
@@ -476,8 +450,6 @@ mod tests {
         assert_eq!(LEAF_INVAL[1], TlbOp::TlbiVale1is);
         assert_eq!(LEAF_INVAL[2], TlbOp::DsbIsh);
         assert_eq!(LEAF_INVAL[3], TlbOp::Isb);
-        assert_eq!(TABLE_INVAL[1], TlbOp::TlbiVae1is);
-        assert_eq!(ASID_INVAL[1], TlbOp::TlbiAside1is);
         assert_eq!(ROLLOVER_LOCAL[0], TlbOp::TlbiVmalle1);
         assert_ne!(ROLLOVER_LOCAL.as_slice(), LEAF_INVAL.as_slice());
     }
@@ -511,7 +483,6 @@ mod tests {
         );
         // ASID 0 is the operand's bits 63:48, with no VA.
         assert_eq!(tlbi_va_operand(0, 0), 0);
-        assert!(!TTBR0_SWITCH.contains(&TlbOp::TlbiAside1is));
         assert!(!TTBR0_SWITCH.contains(&TlbOp::TlbiVmalle1is));
     }
 

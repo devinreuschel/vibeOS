@@ -382,12 +382,6 @@ fn exec_tlb(op: tlb::TlbOp, va_operand: u64) {
             tlb::TlbOp::TlbiVaale1is => {
                 asm!("tlbi vaale1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
             }
-            tlb::TlbOp::TlbiVae1is => {
-                asm!("tlbi vae1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
-            }
-            tlb::TlbOp::TlbiAside1is => {
-                asm!("tlbi aside1is, {0}", in(reg) va_operand, options(nostack, preserves_flags));
-            }
             tlb::TlbOp::TlbiAside1 => {
                 asm!("tlbi aside1, {0}", in(reg) va_operand, options(nostack, preserves_flags));
             }
@@ -438,36 +432,45 @@ fn is_kernel_va(va: u64) -> bool {
 /// A kernel VA's entries are global, which every ASID matches, so it runs
 /// `tlb::LEAF_INVAL` with ASID 0; a user VA's could carry any space's ASID,
 /// so it runs `tlb::LEAF_INVAL_ALL_ASIDS`. A caller that knows the space
-/// uses [`tlbi_user_va`].
+/// uses [`tlbi_user_va`]. A user VA's invalidate asserts DESIGN §7.9's
+/// calling contract (`sync_init::assert_tlb_contract`), as every user
+/// invalidate here does.
 /// Arm ARM DDI0487, "TLB maintenance requirements" and "Ordering and
 /// completion of TLB maintenance instructions": herd7 does not model the TLB.
+#[track_caller]
 pub fn tlbi_va(va: u64) {
     if is_kernel_va(va) {
         run_tlb(&tlb::LEAF_INVAL, tlb::tlbi_va_operand(va, 0));
     } else {
+        crate::sync_init::assert_tlb_contract();
         run_tlb(&tlb::LEAF_INVAL_ALL_ASIDS, tlb::tlbi_va_operand(va, 0));
     }
 }
 
 /// Leaf TLB invalidate of user VA `va` in the space whose ASID is `asid`,
-/// on every CPU (Linux arm64's `flush_tlb_page` with `ASID(mm)`). Runs
-/// `tlb::LEAF_INVAL`. Arm ARM DDI0487, "TLB maintenance requirements" and
-/// "Ordering and completion of TLB maintenance instructions": herd7 does not
-/// model the TLB.
+/// on every CPU (Linux arm64's `flush_tlb_page` with `ASID(mm)`), after
+/// asserting DESIGN §7.9's calling contract. Runs `tlb::LEAF_INVAL`. Arm
+/// ARM DDI0487, "TLB maintenance requirements" and "Ordering and completion
+/// of TLB maintenance instructions": herd7 does not model the TLB.
+#[track_caller]
 pub fn tlbi_user_va(va: u64, asid: u16) {
+    crate::sync_init::assert_tlb_contract();
     run_tlb(&tlb::LEAF_INVAL, tlb::tlbi_va_operand(va, asid));
 }
 
 /// Break-before-make maintenance after the invalid store. Runs
 /// `tlb::BBM_AFTER_INVALID` for a kernel VA (global entries, ASID 0) and
 /// `tlb::BBM_AFTER_INVALID_ALL_ASIDS` for a user VA, whose space the seam
-/// does not name.
+/// does not name, after asserting DESIGN §7.9's calling contract for a
+/// user VA.
 /// Arm ARM DDI0487, "Using break-before-make when updating translation
 /// table entries": herd7 does not model the TLB.
+#[track_caller]
 pub(crate) fn bbm_break(va: u64) {
     if is_kernel_va(va) {
         run_tlb(&tlb::BBM_AFTER_INVALID, tlb::tlbi_va_operand(va, 0));
     } else {
+        crate::sync_init::assert_tlb_contract();
         run_tlb(
             &tlb::BBM_AFTER_INVALID_ALL_ASIDS,
             tlb::tlbi_va_operand(va, 0),

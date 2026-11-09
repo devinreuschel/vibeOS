@@ -72,39 +72,88 @@ impl Saved {
     }
 }
 
-/// ROADMAP §11.2: TLB maintenance through the §1.2 shootdown hook asserts
-/// DESIGN §7.9's calling contract on both ports. A thread passes; the same
+/// A user VA no test maps: invalidating it drops nothing.
+#[cfg(target_arch = "aarch64")]
+const TLB_TEST_USER_VA: u64 = 0x0000_7000_0000_0000;
+
+fn tlb_entry_shootdown() {
+    vibeos::paging::tlb_shootdown_ranges(&[]);
+}
+
+#[cfg(target_arch = "aarch64")]
+fn tlb_entry_user_va() {
+    arch::aarch64::cpu::tlbi_user_va(TLB_TEST_USER_VA, 0);
+}
+
+#[cfg(target_arch = "aarch64")]
+fn tlb_entry_seam_user_va() {
+    arch::aarch64::cpu::tlbi_va(TLB_TEST_USER_VA);
+}
+
+#[cfg(target_arch = "aarch64")]
+fn tlb_entry_bbm_user_va() {
+    arch::aarch64::cpu::bbm_break(TLB_TEST_USER_VA);
+}
+
+/// Every TLB-invalidate entry point that asserts DESIGN §7.9's calling
+/// contract: the §1.2 shootdown hook on both ports, and on aarch64 each
+/// user-VA invalidate, which a space's own-ASID flush
+/// (`asid::SpaceCtx::flush_page`) reaches without the hook.
+const TLB_ENTRIES: &[(&str, fn())] = &[
+    ("shootdown hook", tlb_entry_shootdown),
+    #[cfg(target_arch = "aarch64")]
+    ("tlbi_user_va", tlb_entry_user_va),
+    #[cfg(target_arch = "aarch64")]
+    ("tlbi_va (user)", tlb_entry_seam_user_va),
+    #[cfg(target_arch = "aarch64")]
+    ("bbm_break (user)", tlb_entry_bbm_user_va),
+];
+
+/// ROADMAP §11.2: TLB maintenance asserts DESIGN §7.9's calling contract on
+/// both ports, at every entry in [`TLB_ENTRIES`]. A thread passes; the same
 /// call inside a lockless section (the context of an NMI, `#MC`, or CPL-0
 /// `#DB` body, and of serviced shootdown or call-function work) panics.
 pub(crate) fn tlb_contract_asserts() -> Outcome {
+    for &(name, entry) in TLB_ENTRIES {
+        if let Err(o) = tlb_contract_case(name, entry) {
+            return o;
+        }
+    }
+    Outcome::Ok
+}
+
+fn tlb_contract_case(name: &str, entry: fn()) -> Result<(), Outcome> {
     use sync_init::testing::SleepTrip;
     let saved = Saved::now();
     let _ = sync_init::testing::take_trip();
     // IF off, as a lockless section always runs: its depth is this CPU's.
     let g = crate::arch::current::InterruptGuard::enter();
     let nest = per_cpu_init::irq_nest();
-    let free = arch::catch::catch_panic(|| vibeos::paging::tlb_shootdown_ranges(&[]));
+    let free = arch::catch::catch_panic(entry);
     let free_trip = sync_init::testing::take_trip();
     let hit = arch::catch::catch_panic(|| {
         let _l = sync_init::lockless_section();
-        vibeos::paging::tlb_shootdown_ranges(&[]);
+        entry();
     });
     let trip = sync_init::testing::take_trip();
     saved.restore_locks(nest);
     drop(g);
     if free || free_trip.is_some() {
-        return crate::fail_fmt!("thread context: panic {free}, trip {:?}", free_trip);
+        return Err(crate::fail_fmt!(
+            "{name}: thread context: panic {free}, trip {:?}",
+            free_trip
+        ));
     }
     if !hit {
-        return Outcome::Fail("no panic in a lockless section");
+        return Err(crate::fail_fmt!("{name}: no panic in a lockless section"));
     }
     if trip != Some(SleepTrip::TlbContract) {
-        return crate::fail_fmt!("trip {:?}, want TlbContract", trip);
+        return Err(crate::fail_fmt!(
+            "{name}: trip {:?}, want TlbContract",
+            trip
+        ));
     }
-    if let Err(o) = saved.check() {
-        return o;
-    }
-    Outcome::Ok
+    saved.check()
 }
 
 /// ROADMAP §10.3 (F108): a yield while holding a ranked `SpinMutex` trips

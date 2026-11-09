@@ -678,8 +678,10 @@ ASID until the lazy CPU loads another root. Until then, a switch to a kernel thr
 root, and on aarch64 points TTBR0 at the empty user root.
 
 On aarch64 the DESIGN §11.1 seam's invalidation is the Inner Shareable broadcast sequence (ROADMAP §11.2):
-`dsb ishst` after the descriptor store, then `tlbi vale1is` for a leaf (`vae1is` when a table page
-is freed, `aside1is` for one ASID), then `dsb ish`, and `isb` on the issuing core. A VA-form
+`dsb ishst` after the descriptor store, then `tlbi vale1is` for a leaf, then `dsb ish`, and `isb`
+on the issuing core. No path issues a table-level or whole-ASID broadcast: a user page-table page is
+freed only at teardown, when no CPU has its space loaded (`AddressSpace::teardown`), and an ASID is
+reused only in a later generation, which each CPU flushes locally before it loads one. A VA-form
 operand holds VA[55:12] in bits 43:0, the ASID in bits 63:48 (for a user VA the space's own,
 from its ASID word; a kernel VA's entries are global, so 0; a user VA through the `PageTable` seam,
 which names no space, uses `vaale1is`, every ASID), and a zero TTL hint in bits 47:44.
@@ -697,7 +699,9 @@ TAS, whose waiters service no IPIs. Both implementations assert those contexts i
 `vibeos::lock::Held::check_cross_cpu_wait`: no lockless section, which NMI, `#MC`, CPL-0 `#DB`, and
 serviced shootdown and call-function work enter, and not inside the log emit), aarch64 too although
 its broadcast waits for no peer, so work run first on aarch64 cannot add a deadlock that only x86_64
-hits.
+hits. aarch64 asserts it again at each user-VA invalidate (`cpu::tlbi_user_va`, and `cpu::tlbi_va`
+and `cpu::bbm_break` for a user VA), since a space's own-ASID flush (`asid::SpaceCtx::flush_page`)
+does not reach the hook.
 
 The initiator waits with interrupts disabled (`InterruptGuard` around publish → IPI → ack → clear
 waiters). A waiter with IF off cannot take an incoming shootdown as an IRQ, which would deadlock two
