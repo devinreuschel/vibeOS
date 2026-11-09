@@ -1144,7 +1144,11 @@ in a local TCG run at `f1d5d761` (Apple M-series host), until a `ci` run measure
 whose `limine.conf` `mkiso.sh` stages with `randomise_hhdm_base: yes`, running
 `run_ktest.HHDM_KTEST` alone: `bootinfo_consistent`, the opt-in `hhdm_randomised`, which fails
 when the offset is Limine's unrandomised base, and boot and mm rows that map and read through the
-offset. Its figures are one local TCG run at `f1d5d761` (Apple M-series host, one QEMU at a time),
+offset. `hhdm_randomised` fails a correct kernel about once in 2^15 boots: Limine adds 15 random
+bits at 1 GiB granularity (`rand64() & ~(1 GiB - 1) & ((1 << (va_bits - 3)) - 1)` at a 48-bit VA),
+and a draw of zero is the unrandomised base. The check is kept, since it is what fails an image
+whose Limine does not randomise, and is not retried; ROADMAP §10.2's `hhdm_randomised` flake line
+records it. Its figures are one local TCG run at `f1d5d761` (Apple M-series host, one QEMU at a time),
 until a `ci` run measures them.
 
 aarch64 e2e-1's `test-e2e-isa-floor` adds one short boot that ends 3 s after the ISA floor's refusal,

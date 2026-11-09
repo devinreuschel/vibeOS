@@ -63,6 +63,13 @@ fn physmap_slot() -> vibeos::physmap::PhysmapSlot {
 /// boot runs on is not the base Limine uses unrandomised, the start of the
 /// physmap slot on both architectures (4-level paging on x86_64, a 48-bit
 /// VA on aarch64), so a translation that assumed that base would miss.
+///
+/// A correct kernel fails this about once in 2^15 boots: Limine adds
+/// `rand64() & ~(1 GiB - 1) & ((1 << (va_bits - 3)) - 1)` to the base, 15
+/// random bits at a 48-bit VA, and a draw of all zeros is the unrandomised
+/// base itself. The inequality stays, since it is what makes the boot fail
+/// on an image whose Limine does not randomise, and no retry is added
+/// (AGENTS.md); ROADMAP §10.2 records the false failure as a flake line.
 pub(crate) fn test_hhdm_randomised() -> Outcome {
     let off = crate::boot::info().hhdm_offset;
     if off == physmap_slot().start {
