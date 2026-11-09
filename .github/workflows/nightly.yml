@@ -420,6 +420,12 @@ jobs:
     # (`make models`); setup.sh --kani installs the pinned kani-verifier,
     # which brings its own nightly, and checks no host tool, so this job
     # boots no QEMU.
+    env:
+      # herd7 for `make litmus` (ROADMAP §11.7), pinned: opam builds this
+      # herdtools7 release on this OCaml and checks the release tarball
+      # against the md5 and sha512 its opam package records. Bump both here.
+      HERDTOOLS7_VERSION: "7.58"
+      OCAML_VERSION: "5.2.1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -444,12 +450,31 @@ jobs:
       - name: ./setup.sh --kani && make models
         run: ./setup.sh --kani && make models
 
-      # herd7 from the distro (ROADMAP §11.7): `make litmus` beside `make models`.
+      # herd7 at the pinned herdtools7 (ROADMAP §11.7): `make litmus` beside
+      # `make models`. The opam switch is cached under the pinned versions.
+      - name: cache opam
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.opam
+          key: ${{ runner.os }}-opam-ocaml-${{ env.OCAML_VERSION }}-herdtools7-${{ env.HERDTOOLS7_VERSION }}
+
       - name: install herd7
         run: |
           sudo apt-get update
-          sudo apt-get install -y herdtools7
-          echo "herd7 $(dpkg-query -W -f='${Version}' herdtools7)" >> "$GITHUB_STEP_SUMMARY"
+          sudo apt-get install -y opam
+          herd="$HOME/.opam/herd/bin/herd7"
+          if [ ! -x "$herd" ]; then
+            opam init -y --bare --disable-sandboxing
+            opam switch create herd "ocaml-base-compiler.$OCAML_VERSION" -y
+            opam install -y --switch herd "herdtools7.$HERDTOOLS7_VERSION"
+          fi
+          got=$(opam list --switch herd --installed --short --columns=version herdtools7)
+          if [ "$got" != "$HERDTOOLS7_VERSION" ]; then
+            echo "herdtools7 $got, not the pinned $HERDTOOLS7_VERSION" >&2
+            exit 1
+          fi
+          echo "$HOME/.opam/herd/bin" >> "$GITHUB_PATH"
+          echo "herd7 herdtools7 $got (opam, OCaml $OCAML_VERSION)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: make litmus
         run: make litmus
