@@ -483,6 +483,12 @@ jobs:
             tier: forensics
             targets: test-forensics
             jobs: 2
+          - arch: x86_64
+            runner: ubuntu-26.04
+            apt: qemu-system-x86 ovmf-generic
+            tier: kernel-hhdm
+            targets: test-kernel-hhdm
+            jobs: 2
           - arch: aarch64
             runner: ubuntu-26.04-arm
             apt: qemu-system-arm qemu-efi-aarch64
@@ -500,6 +506,12 @@ jobs:
             apt: qemu-system-arm qemu-efi-aarch64
             tier: forensics
             targets: test-forensics
+            jobs: 2
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+            apt: qemu-system-arm qemu-efi-aarch64
+            tier: kernel-hhdm
+            targets: test-kernel-hhdm
             jobs: 2
           - arch: aarch64
             runner: ubuntu-26.04-arm

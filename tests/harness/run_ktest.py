@@ -956,6 +956,49 @@ def _asid_4bit_boot(env: EnvConfig) -> None:
     check_select_run(raw.lines, {ASID_4BIT_TEST: 1}, ())
 
 
+# The HHDM boot (ROADMAP §11.1, `make test-kernel-hhdm`): the ktest ELF in
+# the `ktest-hhdm` image, whose Limine randomises the HHDM base. The boot
+# itself runs every translation before and after the kernel's own page
+# tables (pmm, paging, the early device maps, AP bring-up at `-smp 2`);
+# these rows then check `BootInfo`'s offset is the randomised one paging
+# uses, and map, allocate and read memory through it.
+HHDM_TEST = "hhdm_randomised"
+HHDM_KTEST: tuple[str, ...] = (
+    "bootinfo_consistent",
+    HHDM_TEST,
+    "fw_cfg_probe",
+    "fw_cfg_dma",
+    "cmdline_captured",
+    "map_unmap",
+    "heap_box",
+    "heap_growth",
+    "kva_roundtrip",
+    "vmap",
+    "ioremap_failure_returns_va",
+    "frames_none_leaked",
+    "current_mapper_holds_pt",
+    "vmap_32_frames_unmapped",
+    "physmap_kernel_span_4k",
+    "user_runtime",
+)
+
+
+def hhdm_boot(env: EnvConfig) -> int:
+    """`HHDM_KTEST` alone in the HHDM image (`VIBEOS_ISO`): each row runs
+    once and passes, `hhdm_randomised` included, which fails when Limine
+    left the base unrandomised."""
+    try:
+        raw = _proof_boot(env, "hhdm", ktest=",".join(HHDM_KTEST), repeat=None)
+        check_select_run(raw.lines, {n: 1 for n in HHDM_KTEST}, ())
+    except HarnessError as e:
+        _record("ktest_hhdm_boot", False)
+        print(f"[ktest] FAIL hhdm boot: {e}", file=sys.stderr)
+        return 1
+    _record("ktest_hhdm_boot", True)
+    print("[ktest] hhdm boot: every row passed on the randomised HHDM", file=sys.stderr)
+    return 0
+
+
 def _aff_off_boot(env: EnvConfig) -> None:
     """`failed_ap_cleanup`: one AP stays OFF, `CPU_ON` not issued (F032)."""
     _proof_boot(env, "aff-off", ktest="failed_ap_cleanup", repeat=None)
@@ -1023,10 +1066,18 @@ def main(argv: list[str] | None = None) -> int:
         choices=sorted(ktest_shards.shard_names()),
         help="run one per-push shard of its variant (tests/harness/ktest_shards.py)",
     )
+    parser.add_argument(
+        "--hhdm",
+        action="store_true",
+        help="boot HHDM_KTEST alone in the randomised-HHDM image (ROADMAP §11.1)",
+    )
     args = parser.parse_args([] if argv is None else argv)
     apply_arch_cli(args.arch)
-    env = env_config(default_iso=default_iso("ktest"), default_timeout=BOOT_ALLOWANCE_S)
+    iso = default_iso("ktest-hhdm" if args.hhdm else "ktest")
+    env = env_config(default_iso=iso, default_timeout=BOOT_ALLOWANCE_S)
     results.Results(env.tier, env.arch)
+    if args.hhdm:
+        return hhdm_boot(env)
     if args.shard is None:
         boots = proof_boot_names(env.smp, args.hpet_off, env.arch)
         rc = main_boot(env, None)

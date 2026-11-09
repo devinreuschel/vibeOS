@@ -37,20 +37,38 @@ pub(crate) fn test_bootinfo_consistent() -> Outcome {
             p = p.saturating_add(0x1000);
         }
     }
-    let slot = {
-        #[cfg(target_arch = "x86_64")]
-        {
-            vibeos::physmap::PHYSMAP_X86_64
-        }
-        #[cfg(target_arch = "aarch64")]
-        {
-            vibeos::physmap::PHYSMAP_AARCH64
-        }
-    };
-    if !vibeos::physmap::hhdm_in_slot(info.hhdm_offset, slot) {
+    if !vibeos::physmap::hhdm_in_slot(info.hhdm_offset, physmap_slot()) {
         return Outcome::Fail("hhdm offset outside slot");
     }
     if info.hhdm_offset != paging_init::hhdm_offset() {
+        return Outcome::Fail("hhdm offset not the one paging uses");
+    }
+    Outcome::Ok
+}
+
+/// This architecture's physmap slot (DESIGN §4.1).
+fn physmap_slot() -> vibeos::physmap::PhysmapSlot {
+    #[cfg(target_arch = "x86_64")]
+    {
+        vibeos::physmap::PHYSMAP_X86_64
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        vibeos::physmap::PHYSMAP_AARCH64
+    }
+}
+
+/// An `.opt_in()` row for the `ktest-hhdm` image, whose Limine randomises
+/// the HHDM base (ROADMAP §11.1, `make test-kernel-hhdm`): the offset this
+/// boot runs on is not the base Limine uses unrandomised, the start of the
+/// physmap slot on both architectures (4-level paging on x86_64, a 48-bit
+/// VA on aarch64), so a translation that assumed that base would miss.
+pub(crate) fn test_hhdm_randomised() -> Outcome {
+    let off = crate::boot::info().hhdm_offset;
+    if off == physmap_slot().start {
+        return crate::fail_fmt!("hhdm offset {off:#x} is the unrandomised base");
+    }
+    if off != paging_init::hhdm_offset() {
         return Outcome::Fail("hhdm offset not the one paging uses");
     }
     Outcome::Ok
@@ -202,6 +220,7 @@ pub(crate) fn test_strace_flag_matches_cmdline() -> Outcome {
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
     test("bootinfo_consistent", test_bootinfo_consistent),
+    test("hhdm_randomised", test_hhdm_randomised).opt_in(),
     test("fw_cfg_probe", test_fw_cfg_probe),
     test("fw_cfg_dma", test_fw_cfg_dma),
     test("cmdline_captured", test_cmdline_captured),

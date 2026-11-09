@@ -61,6 +61,8 @@ ISO_KTEST_IRQOFF := $(BUILD_OUT)/vibeos-ktest-irqoff.iso
 ISO_INIT_FAULT   := $(BUILD_OUT)/vibeos-init-fault.iso
 ISO_NOSH         := $(BUILD_OUT)/vibeos-nosh.iso
 ISO_HANG         := $(BUILD_OUT)/vibeos-hang.iso
+# The ktest ELF under a Limine that randomises the HHDM base (ROADMAP §11.1).
+ISO_KTEST_HHDM   := $(BUILD_OUT)/vibeos-ktest-hhdm.iso
 
 LIMINE_DIR := ./limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
@@ -187,6 +189,11 @@ $(ISO_INIT_FAULT): $(KERNEL_ELF) $(INITRD_INIT_FAULT) limine.conf $(LIMINE_BIN) 
 # init's three failed shell starts end in its exit and the pid 1 panic.
 $(ISO_NOSH): $(KERNEL_ELF) $(INITRD_NOSH) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
 	LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD_NOSH) $@ $(BUILD_OUT)/iso_root_nosh
+# The ktest ELF with limine.conf's `randomise_hhdm_base: yes` (ROADMAP §11.1):
+# `make test-kernel-hhdm` boots it to show every translation follows the
+# HHDM offset Limine reports. A test image: no release publishes it.
+$(ISO_KTEST_HHDM): $(BUILD_OUT)/kernels/vibeos-ktest.elf $(INITRD) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
+	VIBEOS_HHDM_RANDOM=1 LIMINE_DIR=$(LIMINE_DIR) OBJCOPY=$(OBJCOPY) scripts/mkiso.sh $< $(INITRD) $@ $(BUILD_OUT)/iso_root_ktest-hhdm
 endif
 
 # The Rust user programs (ROADMAP §10.5, C-USERBINS): each user/src/bin/<name>.rs
@@ -242,7 +249,7 @@ endif
 
 .PHONY: help check check-python check-msrv check-hooks all kernel iso isos release-artifacts repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-panic-stop-gic2 test-e2e-isa-floor test-e2e-gp test-e2e-early-fault test-e2e-mce test \
-        test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
+        test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback test-kernel-hhdm \
         test-smp-stress test-vibefs-crash test-vibefs-crash-1 test-vibefs-crash-2 test-vibefs-crash-plants test-e2e-uefi test-qmp test-forensics test-irqoff \
         test-aarch64 test-gic-fallback litmus
 
@@ -295,6 +302,7 @@ help:
 	  '  test-lapic-fallback   in-guest tests, TSC-deadline off' \
 	  '  test-kernel-<k>       the per-push shards of those three, which test runs:' \
 	  '                        test-kernel-smp4-<k> and test-lapic-fallback-<k> too' \
+	  '  test-kernel-hhdm      ktest image with a randomised HHDM base: boot and mm rows' \
 	  '  test-irqoff           test-kernel and test-e2e in the IF-off tracer build (nightly)' \
 	  '  test-vibefs-crash     QEMU-kill + host fsck-vibefs' \
 	  '  test-smp-stress       -smp 4 in-guest tier (weekly CI); aarch64 also boots weak_order_probe' \
@@ -587,13 +595,13 @@ ifeq ($(ARCH),aarch64)
 # The ISOs aarch64 per-push tiers run (ROADMAP §11.7): e2e, the panic dump,
 # the stop dump under both GICs (§11.3), ktest shards, the forensics tier's
 # hang, and the §11.1 early-fault ISO.
-PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_HANG) $(ISO_EARLY_FAULT) \
+PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_KTEST_HHDM) $(ISO_HANG) $(ISO_EARLY_FAULT) \
 	$(BUILD_OUT)/kernels/vibeos-default.elf $(BUILD_OUT)/kernels/vibeos-panic.elf \
 	$(BUILD_OUT)/kernels/vibeos-panic-stop.elf $(BUILD_OUT)/kernels/vibeos-ktest.elf \
 	$(BUILD_OUT)/kernels/vibeos-hang.elf \
 	$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT) $(VMCORE)
 else
-PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_EARLY_FAULT) $(ISO_GP) $(ISO_PANIC_NEST) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) $(ISO_INIT_FAULT) $(ISO_NOSH) \
+PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_EARLY_FAULT) $(ISO_GP) $(ISO_PANIC_NEST) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_KTEST_HHDM) $(ISO_VIBEFS_CRASH) $(ISO_INIT_FAULT) $(ISO_NOSH) \
 	$(ISO_HANG) $(KERNEL_ELFS) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT) $(VMCORE)
 endif
 
@@ -839,9 +847,16 @@ test-gic-fallback-8: $(ISO_KTEST)
 test-gic-fallback-9: $(ISO_KTEST)
 	$(KTEST_RUN) --shard test-kernel-9
 
+# The HHDM boot (ROADMAP §11.1): the ktest ELF under a Limine that
+# randomises the HHDM base, at -smp 2, running run_ktest.HHDM_KTEST alone:
+# `bootinfo_consistent`, `hhdm_randomised` (the offset is not Limine's
+# unrandomised base) and the mm and boot rows that map and read through it.
+test-kernel-hhdm: $(ISO_KTEST_HHDM)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST_HHDM) VIBEOS_SMP=$(or $(VIBEOS_SMP),2) python3 tests/harness/run_ktest.py --hhdm
+
 # aarch64 per-push ladder (ROADMAP §11.7). x86-only e2e (PIT, #GP, #MC,
 # 9 GiB, LAPIC fallback, vibefs-crash) stays on `make test`.
-test-aarch64: test-e2e test-e2e-early-fault test-e2e-isa-floor test-e2e-panic test-e2e-panic-stop test-e2e-panic-stop-gic2 test-forensics test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-7 test-kernel-8 test-kernel-9 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-kernel-smp4-6 test-kernel-smp4-7 test-kernel-smp4-8 test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6 test-gic-fallback-7 test-gic-fallback-8 test-gic-fallback-9
+test-aarch64: test-e2e test-e2e-early-fault test-e2e-isa-floor test-kernel-hhdm test-e2e-panic test-e2e-panic-stop test-e2e-panic-stop-gic2 test-forensics test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-7 test-kernel-8 test-kernel-9 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-kernel-smp4-6 test-kernel-smp4-7 test-kernel-smp4-8 test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6 test-gic-fallback-7 test-gic-fallback-8 test-gic-fallback-9
 
 .PHONY: litmus
 litmus:
@@ -881,7 +896,7 @@ test-irqoff: $(ISO_KTEST_IRQOFF) $(ISO_IRQOFF) $(MKFS_VIBEFS)
 	VIBEOS_TIER=$@ $(IRQOFF_ENV) VIBEOS_ISO=$(ISO_KTEST_IRQOFF) python3 tests/harness/run_ktest.py
 	VIBEOS_TIER=$@ $(IRQOFF_ENV) VIBEOS_RESULTS_APPEND=1 VIBEOS_ISO=$(ISO_IRQOFF) VIBEOS_MKFS=$(MKFS_VIBEFS) python3 tests/harness/run_e2e.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-early-fault test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-qmp test-forensics test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-lapic-fallback-1 test-lapic-fallback-2 test-lapic-fallback-3 test-lapic-fallback-4 test-lapic-fallback-5 test-lapic-fallback-6 test-vibefs-crash-1 test-vibefs-crash-2 test-vibefs-crash-plants
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-panic-nest test-e2e-panic-stop test-e2e-gp test-e2e-early-fault test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-init-fault test-e2e-strace test-e2e-power test-qmp test-forensics test-kernel-hhdm test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-lapic-fallback-1 test-lapic-fallback-2 test-lapic-fallback-3 test-lapic-fallback-4 test-lapic-fallback-5 test-lapic-fallback-6 test-vibefs-crash-1 test-vibefs-crash-2 test-vibefs-crash-plants
 
 # The -smp 4 in-guest tier, weekly in CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)
@@ -900,7 +915,7 @@ gate:
 # Keeps build/results/.
 clean:
 	rm -rf $(BUILD_OUT)/kernels $(BUILD_OUT)/iso_root_* $(ISOS) $(addsuffix .xorriso-version,$(ISOS)) \
-	    $(INITRD) $(USER_OUT) $(ISO_INIT_FAULT) $(INITRD_INIT_FAULT) $(ISO_NOSH) $(INITRD_NOSH)
+	    $(INITRD) $(USER_OUT) $(ISO_INIT_FAULT) $(INITRD_INIT_FAULT) $(ISO_NOSH) $(INITRD_NOSH) $(ISO_KTEST_HHDM)
 	$(CARGO) clean
 
 distclean: clean
