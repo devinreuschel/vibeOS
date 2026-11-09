@@ -538,6 +538,10 @@ def _utest_verdict(env: EnvConfig, cfg: QemuConfig) -> UtestVerdict:
 
 # The frames the `#GP` backtrace lists, in this order (ROADMAP §10.7, F070).
 GP_FRAMES = ("gp_test_trip", "boot_rest")
+# The frames the panic-test backtrace lists, in this order (ROADMAP §10.7,
+# §11.7): the handler, `panic_fmt`, which the panic in `_start` calls, then
+# `_start` on the boot stack Limine handed it.
+PANIC_FRAMES = ("rust_begin_unwind", "panic_fmt", "_start")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -673,6 +677,17 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         res.record("marker", "gp_backtrace_order", "passed")
         print(f"[e2e]   . backtrace: {' then '.join(GP_FRAMES)}", file=sys.stderr)
+    if expect_panic and not gp_test and not panic_variant:
+        # The walk follows the frame pointer from the handler through the
+        # recorded boot stack, the only known stack before the first thread.
+        try:
+            panic_dump.check_frames_in_order(result.lines, PANIC_FRAMES)
+        except HarnessError as e:
+            res.record("marker", "panic_backtrace_order", "failed")
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        res.record("marker", "panic_backtrace_order", "passed")
+        print(f"[e2e]   . backtrace: {' then '.join(PANIC_FRAMES)}", file=sys.stderr)
     if panic_variant:
         try:
             PANIC_VARIANTS[panic_variant][1](result.lines)

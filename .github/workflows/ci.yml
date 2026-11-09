@@ -491,7 +491,7 @@ jobs:
             runner: ubuntu-26.04-arm
             apt: qemu-system-arm qemu-efi-aarch64
             tier: e2e-2
-            targets: test-e2e-panic-stop test-e2e-panic-stop-gic2
+            targets: test-e2e-panic test-e2e-panic-stop test-e2e-panic-stop-gic2
             jobs: 2
           - arch: aarch64
             runner: ubuntu-26.04-arm

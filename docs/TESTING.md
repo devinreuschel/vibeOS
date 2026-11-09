@@ -1092,7 +1092,7 @@ near 60 s, the 9 GiB case moves to a target of its own, by the rule above that s
 | x86_64 | vibefs-crash-plants | `test-vibefs-crash-plants` | 15 |
 | x86_64 | forensics | `test-forensics` | 60 |
 | aarch64 | e2e-1 | `test-e2e`, `test-e2e-isa-floor` | 51 |
-| aarch64 | e2e-2 | `test-e2e-panic-stop`, `test-e2e-panic-stop-gic2` | 19 |
+| aarch64 | e2e-2 | `test-e2e-panic`, `test-e2e-panic-stop`, `test-e2e-panic-stop-gic2` | 25 |
 | aarch64 | forensics | `test-forensics` | 60 |
 | aarch64 | kernel-1 | `test-kernel-1` | 40 |
 | aarch64 | kernel-2 | `test-kernel-2` | 40 |
@@ -1131,7 +1131,7 @@ are one to three boots at the x86 proof-boot cost, about 12 s each, until a `ci`
 aarch64 e2e-1's `test-e2e-isa-floor` adds one short boot that ends 3 s after the ISA floor's refusal,
 about 11 s in a local TCG run at `464a29aa` (Apple M-series host, one QEMU at a time), until a `ci` run
 measures it. aarch64 e2e-2's figure is its two `-smp 5` panic-stop
-boots in the same local run (10 s under GICv3, 9 s under GICv2).
+boots in the same local run (10 s under GICv3, 9 s under GICv2) and the panic-test boot, about 6 s.
 
 `test-e2e-init-fault` boots twice (`init_fault`, then `init_no_sh`, about 10 s more under TCG), so
 e2e-2's figure, measured before the second boot, is low by that much.

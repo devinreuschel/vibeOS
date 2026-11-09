@@ -576,10 +576,12 @@ vmcore: $(VMCORE)
 # drops, and holds paths relative to $(CURDIR). The named ELFs go too: a failed
 # run's guest core keeps the ELF behind its ISO (ROADMAP §10.7).
 ifeq ($(ARCH),aarch64)
-# The ISOs aarch64 per-push tiers run (ROADMAP §11.7): e2e, the stop dump
-# under both GICs (§11.3), ktest shards and the forensics tier's hang.
-PREBUILT_FILES = $(ISO) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_HANG) \
-	$(BUILD_OUT)/kernels/vibeos-default.elf $(BUILD_OUT)/kernels/vibeos-panic-stop.elf $(BUILD_OUT)/kernels/vibeos-ktest.elf \
+# The ISOs aarch64 per-push tiers run (ROADMAP §11.7): e2e, the panic dump,
+# the stop dump under both GICs (§11.3), ktest shards and the forensics
+# tier's hang.
+PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_PANIC_STOP) $(ISO_KTEST) $(ISO_HANG) \
+	$(BUILD_OUT)/kernels/vibeos-default.elf $(BUILD_OUT)/kernels/vibeos-panic.elf \
+	$(BUILD_OUT)/kernels/vibeos-panic-stop.elf $(BUILD_OUT)/kernels/vibeos-ktest.elf \
 	$(BUILD_OUT)/kernels/vibeos-hang.elf \
 	$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT) $(VMCORE)
 else
@@ -826,7 +828,7 @@ test-gic-fallback-9: $(ISO_KTEST)
 
 # aarch64 per-push ladder (ROADMAP §11.7). x86-only e2e (PIT, #GP, #MC,
 # 9 GiB, LAPIC fallback, vibefs-crash) stays on `make test`.
-test-aarch64: test-e2e test-e2e-isa-floor test-e2e-panic-stop test-e2e-panic-stop-gic2 test-forensics test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-7 test-kernel-8 test-kernel-9 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-kernel-smp4-6 test-kernel-smp4-7 test-kernel-smp4-8 test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6 test-gic-fallback-7 test-gic-fallback-8 test-gic-fallback-9
+test-aarch64: test-e2e test-e2e-isa-floor test-e2e-panic test-e2e-panic-stop test-e2e-panic-stop-gic2 test-forensics test-kernel-1 test-kernel-2 test-kernel-3 test-kernel-4 test-kernel-5 test-kernel-6 test-kernel-7 test-kernel-8 test-kernel-9 test-kernel-smp4-1 test-kernel-smp4-2 test-kernel-smp4-3 test-kernel-smp4-4 test-kernel-smp4-5 test-kernel-smp4-6 test-kernel-smp4-7 test-kernel-smp4-8 test-gic-fallback-1 test-gic-fallback-2 test-gic-fallback-3 test-gic-fallback-4 test-gic-fallback-5 test-gic-fallback-6 test-gic-fallback-7 test-gic-fallback-8 test-gic-fallback-9
 
 .PHONY: litmus
 litmus:

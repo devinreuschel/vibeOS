@@ -306,8 +306,9 @@ pub fn read_rbp() -> u64 {
     val
 }
 
-/// Approximate RIP of the caller-ish (`lea` of the next insn).
-#[inline]
+/// The RIP of the next instruction, in the function this is inlined into
+/// (`lea` of it).
+#[inline(always)]
 pub fn read_rip() -> u64 {
     let val: u64;
     // SAFETY: `lea r, [rip]` only computes an address into a register; established here.

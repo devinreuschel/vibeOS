@@ -44,9 +44,6 @@ use vibeos::symtab::{self, Entry};
 const PANIC_LINE_SYM: &str = "log::panic::PANIC_LINE";
 /// The flight recorder's static, exported unmangled.
 const TRACE_SYM: &str = "VIBEOS_TRACE";
-/// The dump's symbol rule: an address more than this past its symbol has
-/// none (`log::panic::print_frame_addr`).
-const SYM_REACH: u64 = 0x1_0000;
 
 /// Why the tool stops, and its exit code.
 #[derive(Debug, PartialEq, Eq)]
@@ -307,12 +304,11 @@ impl Symbols {
         Ok(Self { funcs, all })
     }
 
-    /// The function holding `addr` and the offset into it, by the dump's
-    /// rule.
-    fn name(&self, addr: u64) -> Option<(&'static str, u64)> {
-        let e = symtab::lookup(&self.funcs, addr)?;
-        let off = symtab::offset(e, addr);
-        (off < SYM_REACH).then_some((e.name, off))
+    /// The function a frame at `addr` is in and the offset into it, by
+    /// the dump's rule (`vibeos::symtab::frame_name`; `ret` for a return
+    /// address, every frame but a walk's first).
+    fn name(&self, addr: u64, ret: bool) -> Option<(&'static str, u64)> {
+        symtab::frame_name(&self.funcs, addr, ret)
     }
 
     /// The one symbol whose demangled name is `path` or ends in `::path`.
@@ -516,7 +512,10 @@ fn report_in<A: CoreFormat>(store: &Store, elf_bytes: &[u8], opts: &Opts) -> Res
     write_signature(
         &mut out,
         panic_text.as_deref(),
-        sig_frames.iter().map(|&a| syms.name(a).map(|(n, _)| n)),
+        sig_frames
+            .iter()
+            .enumerate()
+            .map(|(j, &a)| syms.name(a, j > 0).map(|(n, _)| n)),
     )
     .map_err(|e| other("report", e))?;
     out.push('\n');
@@ -559,7 +558,7 @@ fn report_in<A: CoreFormat>(store: &Store, elf_bytes: &[u8], opts: &Opts) -> Res
             runq.join(", ")
         );
         for (n, &a) in frames[i].iter().enumerate() {
-            match syms.name(a) {
+            match syms.name(a, n > 0) {
                 Some((name, 0)) => {
                     put!(out, "  #{n} 0x{a:016x} {name}");
                 }

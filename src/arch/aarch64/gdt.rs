@@ -33,13 +33,10 @@ pub fn read_user_segs() -> UserSegs {
 pub fn load_user_segs(_s: UserSegs) {}
 
 /// This CPU's overflow stack, for the panic backtrace.
+/// A zero top (before `vectors` gives the CPU one) is left out by
+/// `vibeos::log::backtrace::known_stacks`.
 pub fn this_cpu_stacks(cpu: &PerCpu) -> [(u64, usize); 1] {
-    let top = cpu.overflow_sp;
-    if top == 0 {
-        [(0, 0)]
-    } else {
-        [(top, DEFAULT_STACK_PAGES)]
-    }
+    [(cpu.overflow_sp, DEFAULT_STACK_PAGES)]
 }
 
 pub fn alloc_ap_tables() -> Option<ApTables> {
