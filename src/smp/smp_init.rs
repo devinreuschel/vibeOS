@@ -1118,13 +1118,12 @@ fn init_aarch64() {
         }
         p = p.saturating_add(4096);
     }
-    let Some((ttbr0_id, _, mut id_tables)) = arch::aarch64::secondary::build_identity(&pas[..])
-    else {
+    let Some((ttbr0_id, mut id_tables)) = arch::aarch64::secondary::build_identity(&pas[..]) else {
         crate::klog!(vibeos::log::Level::Error, "vibeOS: smp: identity map");
         return;
     };
     // The stub leaves TTBR0 at the permanent empty user root, the one every
-    // kernel thread runs on, not the identity build's own zero root.
+    // kernel thread runs on.
     let ttbr0_empty = crate::paging_init::empty_user_root();
     if ttbr0_empty == 0 {
         crate::klog!(vibeos::log::Level::Error, "vibeOS: smp: no empty TTBR0");

@@ -117,6 +117,48 @@ class TestSecondaryNoSharedWrite(unittest.TestCase):
         self.assertEqual(after, [], "param-page load after the arrival store")
 
 
+def empty_root_flush_errors(lines: list[str]) -> list[str]:
+    """Why the stub's switch to the empty TTBR0 root fails to drop every
+    identity entry: after `msr ttbr0_el1` from `#{ttbr0_empty}` it must run
+    `isb`, `tlbi vmalle1`, `dsb nsh`, `isb`, in that order, before the
+    arrival `stlr` and the `br x3` into the kernel. The identity leaves are
+    global, so an ASID-scoped `tlbi` would leave them."""
+    try:
+        load = find_line(lines, "ldr x1, [x0, #{ttbr0_empty}]")
+        write = find_line(lines, "msr ttbr0_el1", load + 1)
+        stlr = find_line(lines, "stlr ", write + 1)
+        enter = find_line(lines, "br x3", write + 1)
+    except AssertionError as e:
+        return [str(e)]
+    if write != load + 1:
+        return ["the empty-root load does not feed the TTBR0 write"]
+    window = lines[write + 1 : min(stlr, enter)]
+    want = ["isb", "tlbi vmalle1", "dsb nsh", "isb"]
+    seq = [ln for ln in window if ln in want or ln.startswith(("tlbi", "dsb"))]
+    if seq[:4] != want:
+        return [f"after the empty TTBR0 write: {seq}, want {want} first"]
+    return []
+
+
+class TestEmptyRootFlush(unittest.TestCase):
+    """ROADMAP §11.4: the stub points TTBR0 at the empty user root, then
+    invalidates the local TLB, so no identity entry survives."""
+
+    def test_stub_flushes_after_empty_root(self) -> None:
+        self.assertEqual(empty_root_flush_errors(global_asm(SECONDARY.read_text())), [])
+
+    def test_missing_or_asid_tlbi_fails(self) -> None:
+        lines = global_asm(SECONDARY.read_text())
+        load = find_line(lines, "ldr x1, [x0, #{ttbr0_empty}]")
+        tlbi = find_line(lines, "tlbi vmalle1", load)
+        dropped = lines[:tlbi] + lines[tlbi + 1 :]
+        self.assertTrue(empty_root_flush_errors(dropped))
+        scoped = lines[:tlbi] + ["tlbi aside1, xzr"] + lines[tlbi + 1 :]
+        self.assertTrue(empty_root_flush_errors(scoped))
+        no_dsb = lines[: tlbi + 1] + lines[tlbi + 2 :]
+        self.assertTrue(empty_root_flush_errors(no_dsb))
+
+
 class TestCleanBeforeCpuOn(unittest.TestCase):
     """ROADMAP §11.4: the boot CPU cleans the stub, the identity tables, and
     the param page to PoC (`dc cvac`, then `dsb sy`) before `CPU_ON`."""

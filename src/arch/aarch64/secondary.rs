@@ -326,17 +326,31 @@ pub unsafe fn map_identity(l0_pa: u64, pa: u64, tables: &mut [u64], n: &mut usiz
 /// tables, and up to three more for each CPU's param page (`map_identity`).
 pub(crate) const IDENTITY_TABLES: usize = 16 + 3 * vibeos::acpi::MAX_CPUS;
 
-/// Build a TTBR0 identity root covering `pas` into `tables` (no heap).
+/// Build a TTBR0 identity root covering `pas`, plus a zero root to switch
+/// to after it, into `tables` (no heap).
 ///
-/// Returns `(l0, empty, count)`. `empty` is a zero root. `tables[..count]`
-/// holds `l0`, `empty` and the tables under `l0`, which the caller cleans
-/// to PoC before a secondary loads them. None when `tables` is too small.
-/// Paging install calls this before the heap exists.
+/// Returns `(l0, empty, count)`. `tables[..count]` holds `l0`, `empty` and
+/// the tables under `l0`. None when `tables` is too small. Paging install
+/// calls this before the heap exists, when no empty user root exists yet.
 pub(crate) fn build_identity_into(pas: &[u64], tables: &mut [u64]) -> Option<(u64, u64, usize)> {
-    let l0 = alloc_zeroed_page()?;
     let empty = alloc_zeroed_page()?;
+    let (l0, n) = identity_root_into(pas, tables, Some(empty))?;
+    Some((l0, empty, n))
+}
+
+/// Build a TTBR0 identity root covering `pas` into `tables`, tracking
+/// `extra` beside it. Returns `(l0, count)`: `tables[..count]` holds `l0`,
+/// `extra`, and the tables under `l0`, which the caller cleans to PoC
+/// before a secondary loads them.
+fn identity_root_into(pas: &[u64], tables: &mut [u64], extra: Option<u64>) -> Option<(u64, usize)> {
+    let l0 = alloc_zeroed_page()?;
     let mut n = 0usize;
-    if !paging::track_table(tables, &mut n, l0) || !paging::track_table(tables, &mut n, empty) {
+    if !paging::track_table(tables, &mut n, l0) {
+        return None;
+    }
+    if let Some(e) = extra
+        && !paging::track_table(tables, &mut n, e)
+    {
         return None;
     }
     for &pa in pas {
@@ -355,14 +369,15 @@ pub(crate) fn build_identity_into(pas: &[u64], tables: &mut [u64]) -> Option<(u6
         }
         i += 1;
     }
-    Some((l0, empty, n))
+    Some((l0, n))
 }
 
-/// Build a TTBR0 identity root covering `pas`, plus `empty` TTBR0.
-pub fn build_identity(pas: &[u64]) -> Option<(u64, u64, TryBox<[u64; IDENTITY_TABLES]>)> {
+/// Build a TTBR0 identity root covering `pas` for the secondary stub, which
+/// leaves it for `paging_init::empty_user_root`.
+pub fn build_identity(pas: &[u64]) -> Option<(u64, TryBox<[u64; IDENTITY_TABLES]>)> {
     let mut tables = TryBox::try_new([0u64; IDENTITY_TABLES]).ok()?;
-    let (l0, empty, _) = build_identity_into(pas, &mut *tables)?;
-    Some((l0, empty, tables))
+    let (l0, _) = identity_root_into(pas, &mut *tables, None)?;
+    Some((l0, tables))
 }
 
 /// `dc cvac` over `[va, va+len)`, one op per `CTR_EL0.DminLine` line, then

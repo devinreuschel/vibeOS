@@ -334,10 +334,7 @@ pub fn read_ttbr0() -> u64 {
 /// or EL2&0 under VHE): `AT S1E1R` (`AT S1E2R` under VHE), then
 /// `PAR_EL1.F`. Call with IRQs masked, so no handler's `AT` overwrites
 /// `PAR_EL1` between the two.
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(dead_code, reason = "in-guest ap_ttbr0_empty (kernel_tests)")
-)]
+#[cfg(feature = "kernel_tests")]
 pub fn stage1_read_translates(va: u64) -> bool {
     let par: u64;
     // SAFETY: `AT` only writes PAR_EL1, which nothing else in the kernel
