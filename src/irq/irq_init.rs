@@ -1016,6 +1016,25 @@ pub fn enable_msix(dev: &Device, table_index: u16, irq: IrqId) -> Result<(), Irq
     Ok(())
 }
 
+/// The four dwords of `irq`'s live MSI-X table entry (address low, address
+/// high, data, vector control), or None when `enable_msix` armed none.
+#[cfg(all(feature = "kernel_tests", target_arch = "aarch64"))]
+pub fn msix_entry_dwords(irq: IrqId) -> Option<[u32; 4]> {
+    let live = with_irq(|s| irq.slot().and_then(|i| s.msix.get(i).copied().flatten()))?;
+    let base = live.table.wrapping_add((live.index as u64) * 16) as *const u32;
+    // SAFETY: invariant I49, established by `irq::irq_init::enable_msix`:
+    // `live.table` is the MSI-X table VA that call checked for `live.index`,
+    // so the entry's four dwords are mapped, aligned device registers.
+    unsafe {
+        Some([
+            base.read_volatile(),
+            base.add(1).read_volatile(),
+            base.add(2).read_volatile(),
+            base.add(3).read_volatile(),
+        ])
+    }
+}
+
 pub fn disable_msix(dev: &Device) {
     let Some(cap_off) = dev.caps.msix else {
         return;
