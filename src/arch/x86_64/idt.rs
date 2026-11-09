@@ -942,7 +942,7 @@ fn page_fault(frame: &mut TrapFrame) {
     let (err, cr2) = (frame.error_code, frame.cr2);
     if frame.user_mode() {
         #[cfg(all(feature = "kernel_tests", target_arch = "x86_64"))]
-        testing::on_user_pf(frame);
+        crate::ktest::user::on_user_fault(frame.cr2);
         user_fault(frame);
     } else if let Some(rip) = super::uaccess::fixup(frame.iret.rip, cr2) {
         frame.iret.rip = rip;
@@ -1192,7 +1192,7 @@ fn dump(kind: &[u8], frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>)
 pub mod testing {
     use core::mem::size_of;
     use core::ptr;
-    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
     use vibeos::syscall::UserFrame;
     use vibeos::vectors;
@@ -1233,69 +1233,6 @@ pub mod testing {
     pub fn cpl3_hits(vector: u8) -> u64 {
         // Relaxed: a count; pairs with nothing.
         CPL3_HITS[vector as usize].load(Ordering::Relaxed)
-    }
-
-    /// `cr2` of the fault whose `#PF` body yields once, at its top; 0 for none.
-    static PF_YIELD_CR2: AtomicU64 = AtomicU64::new(0);
-    static PF_YIELDING: AtomicBool = AtomicBool::new(false);
-    static PF_DURING_YIELD: AtomicU64 = AtomicU64::new(0);
-
-    /// The next CPL-3 `#PF` at `cr2` yields at the top of its body until
-    /// another CPL-3 `#PF` body has run, for at most 1 s of TSC time.
-    pub fn arm_pf_yield(cr2: u64) {
-        // Release: pairs with the Acquire loads in `on_user_pf` and `pf_during_yield`.
-        PF_DURING_YIELD.store(0, Ordering::Release);
-        // Release: pairs with the Acquire load in `on_user_pf`.
-        PF_YIELDING.store(false, Ordering::Release);
-        // Release: pairs with the Acquire load and compare-exchange in `on_user_pf`.
-        PF_YIELD_CR2.store(cr2, Ordering::Release);
-    }
-
-    pub fn disarm_pf_yield() {
-        // Release: pairs with the Acquire load and compare-exchange in `on_user_pf`.
-        PF_YIELD_CR2.store(0, Ordering::Release);
-    }
-
-    /// The `cr2` of the first CPL-3 `#PF` body that ran during the yield;
-    /// 0 for none.
-    pub fn pf_during_yield() -> u64 {
-        // Acquire: pairs with the Release stores in `on_user_pf` and `arm_pf_yield`.
-        PF_DURING_YIELD.load(Ordering::Acquire)
-    }
-
-    /// Top of a CPL-3 `#PF` body, after the dispatcher's `sti`.
-    pub(super) fn on_user_pf(frame: &TrapFrame) {
-        // Acquire: pairs with the Release stores of `PF_YIELDING` below and in `arm_pf_yield`.
-        if PF_YIELDING.load(Ordering::Acquire) {
-            // Acquire: pairs with the Release stores in `arm_pf_yield` and below.
-            if PF_DURING_YIELD.load(Ordering::Acquire) == 0 {
-                // Release: pairs with the yield loop's Acquire load below and `pf_during_yield`.
-                PF_DURING_YIELD.store(frame.cr2, Ordering::Release);
-            }
-            return;
-        }
-        // Acquire: pairs with the Release stores in `arm_pf_yield` and `disarm_pf_yield`.
-        let armed = PF_YIELD_CR2.load(Ordering::Acquire);
-        // AcqRel, Acquire on failure: pairs with the Release stores of the arm and disarm.
-        if armed == 0
-            || frame.cr2 != armed
-            || PF_YIELD_CR2
-                .compare_exchange(armed, 0, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-        {
-            return;
-        }
-        // Release: pairs with the Acquire load at the top of a later body.
-        PF_YIELDING.store(true, Ordering::Release);
-        let t0 = crate::time_init::now_ns();
-        // Acquire: pairs with the Release store of another body's `cr2` above.
-        while PF_DURING_YIELD.load(Ordering::Acquire) == 0
-            && crate::time_init::now_ns().saturating_sub(t0) < 1_000_000_000
-        {
-            crate::thread_init::yield_now();
-        }
-        // Release: pairs with the Acquire load at the top of a later body.
-        PF_YIELDING.store(false, Ordering::Release);
     }
 
     /// The 15 GPR canaries of `arm_canaries`, in `UserFrame` order

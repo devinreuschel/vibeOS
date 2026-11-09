@@ -31,9 +31,4 @@ pub mod testing {
     pub fn repin_cpus() -> (u32, u32) {
         (0, 0)
     }
-    pub fn arm_pf_yield(_cr2: u64) {}
-    pub fn disarm_pf_yield() {}
-    pub fn pf_during_yield() -> u64 {
-        0
-    }
 }

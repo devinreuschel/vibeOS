@@ -86,6 +86,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("signal_on_return", test_signal_on_return).deadline(30_000),
     test("exit_work_ipi", test_exit_work_ipi).deadline(30_000),
     test("syscall_body_if_on", test_syscall_body_if_on).deadline(30_000),
+    #[cfg(target_arch = "aarch64")]
+    test("el0_fault_body_yield", test_el0_fault_body_yield).deadline(30_000),
     test("kill_line_whole", test_kill_line_whole).deadline(30_000),
     test("kalloc_fail_after_hook", test_kalloc_fail_after_hook),
     test("kalloc_nomem", test_kalloc_nomem).deadline(120_000),

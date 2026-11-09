@@ -682,11 +682,12 @@ extern "C" fn vibeos_el0_rust(frame: &mut UserFrame, slot: u64, esr: u64, far: u
         }
         other => {
             cpu::daif_clear_all();
-            crate::proc_init::try_user_trap(
-                other,
-                frame.pc,
-                trap::fault_addr(esr, far, frame.pc, frame.sp),
-            );
+            let addr = trap::fault_addr(esr, far, frame.pc, frame.sp);
+            #[cfg(feature = "kernel_tests")]
+            if matches!(other, TrapKind::PageFault(_)) {
+                crate::ktest::user::on_user_fault(addr);
+            }
+            crate::proc_init::try_user_trap(other, frame.pc, addr);
             cpu::daif_set_all();
         }
     }
