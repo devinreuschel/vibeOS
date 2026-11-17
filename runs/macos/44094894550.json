@@ -1,0 +1,87 @@
+{
+ "attempt": 1,
+ "branch": "main",
+ "conclusion": "failure",
+ "created": "2026-11-17T13:39:20Z",
+ "event": "schedule",
+ "finished": "2026-11-17T14:22:27Z",
+ "head_sha": "3b5f5f82499d8c70641408dec008440d31293d94",
+ "jobs": [
+  {
+   "completed": "2026-11-17T14:07:26Z",
+   "conclusion": "success",
+   "created": "2026-11-17T13:39:21Z",
+   "name": "check",
+   "results": [],
+   "runner": null,
+   "seconds": 1683,
+   "started": "2026-11-17T13:39:23Z",
+   "steps": [
+    {
+     "name": "Set up job",
+     "seconds": 1
+    },
+    {
+     "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 3
+    },
+    {
+     "name": "install host tools",
+     "seconds": 36
+    },
+    {
+     "name": "install python linters",
+     "seconds": 5
+    },
+    {
+     "name": "install rust",
+     "seconds": 18
+    },
+    {
+     "name": "setup",
+     "seconds": 18
+    },
+    {
+     "name": "install cargo-deny",
+     "seconds": 179
+    },
+    {
+     "name": "make check",
+     "seconds": 528
+    },
+    {
+     "name": "./setup.sh --kani && make models",
+     "seconds": 883
+    },
+    {
+     "name": "upload harness results",
+     "seconds": 0
+    },
+    {
+     "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+     "seconds": 1
+    },
+    {
+     "name": "Complete job",
+     "seconds": 9
+    }
+   ]
+  },
+  {
+   "completed": "2026-11-17T14:22:27Z",
+   "conclusion": "cancelled",
+   "created": "2026-11-17T13:39:21Z",
+   "name": "test",
+   "results": [],
+   "runner": null,
+   "seconds": 2586,
+   "started": "2026-11-17T13:39:21Z",
+   "steps": []
+  }
+ ],
+ "run_id": 44094894550,
+ "runner": null,
+ "schema": 1,
+ "started": "2026-11-17T13:39:20Z",
+ "workflow": "macos"
+}
